@@ -31,6 +31,18 @@
               <span class="shelf-btn-label">取消全选</span>
             </button>
           </template>
+          <button class="shelf-btn" type="button" title="上传 TXT" aria-label="上传 TXT" @click="triggerTxtUpload" :disabled="txtUploading">
+            <svg v-if="!txtUploading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 3v12" />
+              <path d="m7 8 5-5 5 5" />
+              <path d="M5 21h14" />
+            </svg>
+            <svg v-else class="spinning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+            <span class="shelf-btn-label">{{ txtUploading ? '上传中' : '上传 TXT' }}</span>
+          </button>
           <button class="shelf-btn" type="button" title="刷新书架" aria-label="刷新书架" @click="handleRefreshBooks" :disabled="shelfStore.refreshing">
             <svg :class="{ spinning: shelfStore.refreshing }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
@@ -74,6 +86,14 @@
           </button>
         </div>
       </div>
+
+      <input
+        ref="txtFileInputRef"
+        type="file"
+        accept=".txt,text/plain"
+        class="hidden-input"
+        @change="handleTxtFileChange"
+      />
 
       <!-- Group Tabs -->
       <div class="group-tabs">
@@ -151,6 +171,7 @@ import { useRouter } from 'vue-router'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
+import { uploadTxtBook } from '../api/bookshelf'
 import BookGrid from '../components/BookGrid.vue'
 import BookDetailModal from '../components/BookDetailModal.vue'
 import GroupSelectModal from '../components/bookshelf/GroupSelectModal.vue'
@@ -170,6 +191,8 @@ const showGroupManager = ref(false)
 const showCacheManager = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
 const openingBookUrl = ref('')
+const txtFileInputRef = ref<HTMLInputElement | null>(null)
+const txtUploading = ref(false)
 
 onMounted(async () => {
   await appStore.fetchUserInfo()
@@ -185,6 +208,35 @@ onMounted(async () => {
     }
   }
 })
+
+function triggerTxtUpload() {
+  if (txtUploading.value) return
+  txtFileInputRef.value?.click()
+}
+
+async function handleTxtFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  if (!file.name.toLowerCase().endsWith('.txt')) {
+    appStore.showToast('只支持上传 .txt 文件', 'warning')
+    return
+  }
+
+  txtUploading.value = true
+  try {
+    const book = await uploadTxtBook(file)
+    await shelfStore.fetchBooks()
+    appStore.showToast(`已导入《${book.name}》`, 'success')
+    await handleBookClick(book)
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || 'TXT 上传失败', 'error')
+  } finally {
+    txtUploading.value = false
+  }
+}
 
 async function handleBookClick(book: Book | SearchBook) {
   const b = book as Book
@@ -299,6 +351,10 @@ async function handleRefreshBooks() {
   min-height: 0;
 }
 
+
+.hidden-input {
+  display: none;
+}
 
 .shelf-header {
   display: flex;

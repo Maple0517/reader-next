@@ -911,9 +911,7 @@ impl BookService {
         let mut list = self.read_bookshelf(user_ns).await?;
         let mut exist_idx: Option<usize> = None;
         for (i, b) in list.iter().enumerate() {
-            if b.book_url == book.book_url
-                || (!b.name.is_empty() && b.name == book.name && b.author == book.author)
-            {
+            if books_match_for_save(b, &book) {
                 exist_idx = Some(i);
                 break;
             }
@@ -972,34 +970,10 @@ impl BookService {
         let orig_len = list.len();
         let removed: Vec<Book> = list
             .iter()
-            .filter(|b| {
-                if !book.book_url.is_empty() && b.book_url == book.book_url {
-                    return true;
-                }
-                if !book.name.is_empty()
-                    && !book.author.is_empty()
-                    && b.name == book.name
-                    && b.author == book.author
-                {
-                    return true;
-                }
-                false
-            })
+            .filter(|b| books_match_for_delete(b, book))
             .cloned()
             .collect();
-        list.retain(|b| {
-            if !book.book_url.is_empty() && b.book_url == book.book_url {
-                return false;
-            }
-            if !book.name.is_empty()
-                && !book.author.is_empty()
-                && b.name == book.name
-                && b.author == book.author
-            {
-                return false;
-            }
-            true
-        });
+        list.retain(|b| !books_match_for_delete(b, book));
         let deleted = list.len() != orig_len;
         if deleted {
             self.write_bookshelf(user_ns, &list).await?;
@@ -1017,36 +991,12 @@ impl BookService {
         for book in books {
             let matched: Vec<Book> = list
                 .iter()
-                .filter(|b| {
-                    if !book.book_url.is_empty() && b.book_url == book.book_url {
-                        return true;
-                    }
-                    if !book.name.is_empty()
-                        && !book.author.is_empty()
-                        && b.name == book.name
-                        && b.author == book.author
-                    {
-                        return true;
-                    }
-                    false
-                })
+                .filter(|b| books_match_for_delete(b, &book))
                 .cloned()
                 .collect();
             removed_books.extend(matched);
             let before = list.len();
-            list.retain(|b| {
-                if !book.book_url.is_empty() && b.book_url == book.book_url {
-                    return false;
-                }
-                if !book.name.is_empty()
-                    && !book.author.is_empty()
-                    && b.name == book.name
-                    && b.author == book.author
-                {
-                    return false;
-                }
-                true
-            });
+            list.retain(|b| !books_match_for_delete(b, &book));
             if list.len() != before {
                 deleted += 1;
             }
@@ -1618,6 +1568,35 @@ fn cookie_domain(source_url: &str) -> String {
     } else {
         parts[parts.len() - 2..].join(".")
     }
+}
+
+fn is_local_txt_book(book: &Book) -> bool {
+    book.origin.trim() == "local-txt" || book.book_url.trim().starts_with("local-txt:")
+}
+
+fn books_match_for_save(existing: &Book, incoming: &Book) -> bool {
+    if existing.book_url == incoming.book_url {
+        return true;
+    }
+    if is_local_txt_book(existing) || is_local_txt_book(incoming) {
+        return false;
+    }
+    !existing.name.is_empty()
+        && existing.name == incoming.name
+        && existing.author == incoming.author
+}
+
+fn books_match_for_delete(existing: &Book, target: &Book) -> bool {
+    if !target.book_url.is_empty() && existing.book_url == target.book_url {
+        return true;
+    }
+    if is_local_txt_book(existing) || is_local_txt_book(target) {
+        return false;
+    }
+    !target.name.is_empty()
+        && !target.author.is_empty()
+        && existing.name == target.name
+        && existing.author == target.author
 }
 
 fn sanitize_book_urls(book: &mut Book) {
