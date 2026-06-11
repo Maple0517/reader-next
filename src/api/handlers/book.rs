@@ -377,6 +377,23 @@ fn merge_search_results(
     sort_and_filter_search_results(query, result)
 }
 
+fn take_search_book_multi_sse_batch(
+    query: &str,
+    books: Vec<SearchBook>,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<SearchBook> {
+    let ranked_books = sort_and_filter_search_results(query, books);
+    let mut batch = Vec::new();
+
+    for book in ranked_books {
+        if seen.insert(book.merge_key()) {
+            batch.push(book);
+        }
+    }
+
+    batch
+}
+
 pub async fn explore_book(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -1736,14 +1753,7 @@ pub async fn search_book_multi_sse(
                 match res {
                     Ok((cur_idx, _source_name, Ok(list))) => {
                         last_idx = cur_idx;
-                        let mut batch = Vec::new();
-                        for b in list {
-                            let key = format!("{}_{}", b.name, b.author);
-                            if !result_map.contains(&key) {
-                                result_map.insert(key);
-                                batch.push(b);
-                            }
-                        }
+                        let batch = take_search_book_multi_sse_batch(&key, list, &mut result_map);
                         if !batch.is_empty() {
                             total += batch.len();
                             let payload = serde_json::json!({"lastIndex": cur_idx, "data": batch});
@@ -2759,7 +2769,8 @@ mod tests {
         book_matches_delete_target, build_available_book_source_response,
         cache_count_for_shelf_display, fallback_available_book, merge_search_results,
         should_use_available_source_cache, take_available_source_cached_matches,
-        take_available_source_sse_matches, GetAvailableBookSourceRequest,
+        take_available_source_sse_matches, take_search_book_multi_sse_batch,
+        GetAvailableBookSourceRequest,
     };
     use crate::model::{book::Book, search::SearchBook};
     use std::collections::HashSet;
@@ -2796,7 +2807,6 @@ mod tests {
 
         assert!(book_matches_delete_target(&shelf_book, &target));
     }
-
 
     #[test]
     fn merge_search_results_ranks_exact_matches_first_and_filters_noise() {
@@ -2858,6 +2868,42 @@ mod tests {
         assert!(merged[0].book_source_urls.as_ref().is_some_and(|urls| {
             urls.contains(&"source-a".to_string()) && urls.contains(&"source-b".to_string())
         }));
+    }
+
+    #[test]
+    fn take_search_book_multi_sse_batch_filters_noise_and_tracks_seen_results() {
+        let books = vec![
+            SearchBook {
+                name: "修什么仙造作啊".to_string(),
+                author: "雏禾".to_string(),
+                origin: "source-a".to_string(),
+                book_url: "a".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "没钱修什么仙".to_string(),
+                author: "封七月".to_string(),
+                origin: "source-b".to_string(),
+                book_url: "b".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "我在异界没钱修什么仙".to_string(),
+                author: "一只鱼".to_string(),
+                origin: "source-c".to_string(),
+                book_url: "c".to_string(),
+                ..SearchBook::default()
+            },
+        ];
+        let mut seen = HashSet::new();
+
+        let batch = take_search_book_multi_sse_batch("没钱修什么仙", books.clone(), &mut seen);
+        let duplicate_batch = take_search_book_multi_sse_batch("没钱修什么仙", books, &mut seen);
+        let names: Vec<String> = batch.into_iter().map(|book| book.name).collect();
+
+        assert_eq!(names, vec!["没钱修什么仙", "我在异界没钱修什么仙"]);
+        assert!(duplicate_batch.is_empty());
+        assert_eq!(seen.len(), 2);
     }
 
     #[test]
