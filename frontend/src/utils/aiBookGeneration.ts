@@ -1,6 +1,8 @@
 import type {
+  AiBookAnyMemory,
   AiBookConfig,
   AiBookCharacter,
+  AiBookChapterKnowledgePatch,
   AiBookLocation,
   AiBookMap,
   AiBookMemory,
@@ -11,6 +13,7 @@ import type {
   BookChapter,
 } from '../types'
 import { isAiBookConfigReady, isAiBookImageConfigReady } from './aiBookConfig'
+import { isAiBookMemoryV2, reconcileAiBookMemoryV2 } from './aiBookV2'
 import { summarizeHttpErrorBody } from './httpError'
 
 export type AiBookChatMessage = {
@@ -35,7 +38,7 @@ export interface BuildPromptParams {
   chapterTitle: string
   chapterIndex: number
   chapterContent: string
-  memory: AiBookMemory
+  memory: AiBookAnyMemory
 }
 
 export interface GenerateMemoryParams {
@@ -43,7 +46,7 @@ export interface GenerateMemoryParams {
   book: Book
   chapter: BookChapter
   chapterContent: string
-  memory: AiBookMemory
+  memory: AiBookAnyMemory
   fetchImpl?: typeof fetch
 }
 
@@ -95,9 +98,9 @@ interface AiProxyRequestParams {
 }
 
 interface AiBookRawModelUpdate {
-  memory?: Partial<AiBookMemory>
-  memoryPatch?: Partial<AiBookMemory>
-  patch?: Partial<AiBookMemory>
+  memory?: UnknownRecord
+  memoryPatch?: UnknownRecord
+  patch?: UnknownRecord
   shouldRegenerateMap?: boolean
   mapPrompt?: string
   summary?: string
@@ -106,6 +109,10 @@ interface AiBookRawModelUpdate {
   relationships?: unknown
   locations?: unknown
   mapDirty?: boolean
+  chapterDigest?: unknown
+  worldFacts?: unknown
+  facts?: unknown
+  mapChanges?: unknown
 }
 
 type AiBookToolResult = {
@@ -174,7 +181,7 @@ const AI_BOOK_AGENT_TOOLS = [
 ]
 
 export function shouldRunAiBookAutoUpdate(
-  memory: AiBookMemory | null | undefined,
+  memory: AiBookAnyMemory | null | undefined,
   completedChapterIndex: number,
   config: AiBookConfig,
 ) {
@@ -202,6 +209,9 @@ export function buildAiBookPromptMessages({
         '不要在普通文本中输出最终 JSON；最终结果必须放在 save_memory_patch 工具参数里。',
         '无法确认的信息必须标记为“推断”或“未知”。',
         'summary 用于记录已读剧情进展；worldview 不是章节简介。',
+        '优先输出 V2 ChapterKnowledgePatch：chapterDigest、summary、worldFacts、characters、relationships、locations、mapChanges。',
+        'chapterDigest 只概括当前章节；summary.current 是已读全局局势；worldFacts 是可复用设定；所有关键条目必须带 evidence。',
+        'mapChanges 只描述地点结构、路线、区域边界变化，不要因普通人物状态变化触发。',
         'worldview 必须是跨章节可复用的设定集条目，只记录规则、制度、势力、历史、技术/魔法、社会文化、地理环境、组织体系、未确认设定。',
         'worldview 禁止写成本章剧情复述、人物行动流水账、案件经过、章节摘要；不要使用“本章”“这一章”“第X章”作为设定标题或内容主体。',
         '世界观必须按 category 分类，例如：基础规则、势力制度、历史传说、技术/魔法、社会文化、地理环境、组织体系、未确认信息。',
@@ -220,6 +230,69 @@ export function buildAiBookPromptMessages({
       content: JSON.stringify({
         task: 'tool-calling-ai-book-memory-update',
         finalTool: AI_BOOK_TOOL_SAVE_PATCH,
+        preferredPatchSchema: 'ChapterKnowledgePatch',
+        v2PatchSchema: {
+          chapterDigest: {
+            chapterIndex: 'number',
+            chapterTitle: 'string',
+            digest: 'string，当前章节短摘要',
+            keyEvents: ['string，当前章节关键事件'],
+          },
+          summary: {
+            current: 'string，已读范围内的当前全局局势，不写成单章流水账',
+            recentChanges: ['string，最近关键变化'],
+            openQuestions: ['string，已读范围内未确认问题'],
+          },
+          worldFacts: [{
+            id: 'string optional，已知实体 id 可复用',
+            category: '基础规则|势力制度|历史传说|技术/魔法|社会文化|地理环境|组织体系|未确认信息',
+            title: 'string，设定名',
+            content: 'string，稳定设定说明',
+            confidence: '已知|推断|未知',
+            importance: 'high|medium|low',
+            evidence: [{ chapterIndex: 'number', chapterTitle: 'string', quote: 'string optional', note: 'string' }],
+          }],
+          characters: [{
+            id: 'string optional',
+            name: 'string',
+            aliases: ['string'],
+            importance: 'high|medium|low',
+            currentStatus: 'string',
+            faction: 'string optional',
+            locationName: 'string optional',
+            description: 'string optional',
+            evidence: [{ chapterIndex: 'number', chapterTitle: 'string', quote: 'string optional', note: 'string' }],
+          }],
+          relationships: [{
+            sourceName: 'string',
+            targetName: 'string',
+            targetKind: 'character|location|organization',
+            relationType: 'string',
+            direction: 'directed|undirected',
+            currentStatus: 'string optional',
+            description: 'string optional',
+            importance: 'high|medium|low',
+            evidence: [{ chapterIndex: 'number', chapterTitle: 'string', quote: 'string optional', note: 'string' }],
+          }],
+          locations: [{
+            id: 'string optional',
+            name: 'string',
+            aliases: ['string'],
+            kind: 'string',
+            scale: 'world|continent|country|region|city|district|site|building|room|unknown',
+            parentName: 'string optional',
+            description: 'string',
+            currentStatus: 'string optional',
+            importance: 'high|medium|low',
+            evidence: [{ chapterIndex: 'number', chapterTitle: 'string', quote: 'string optional', note: 'string' }],
+          }],
+          mapChanges: {
+            changed: 'boolean',
+            reason: 'string optional',
+            affectedLocationNames: ['string'],
+            routeHints: ['string'],
+          },
+        },
         patchSchema: {
           summary: 'string，已读剧情进展摘要，允许写章节事件',
           worldview: [{
@@ -368,7 +441,7 @@ function executeAiBookToolCall(
     book: Book
     chapter: BookChapter
     chapterContent: string
-    memory: AiBookMemory
+    memory: AiBookAnyMemory
   },
 ): AiBookToolResult {
   const name = toolCall.function?.name || ''
@@ -429,7 +502,65 @@ function executeAiBookToolCall(
   }
 }
 
-function buildAgentMemoryContext(memory: AiBookMemory) {
+function buildAgentMemoryContext(memory: AiBookAnyMemory) {
+  if (isAiBookMemoryV2(memory)) {
+    return {
+      schemaVersion: 2,
+      bookUrl: memory.bookUrl,
+      bookName: memory.bookName,
+      author: memory.author,
+      processedChapterIndex: memory.processedChapterIndex,
+      processedChapterTitle: memory.processedChapterTitle,
+      summary: memory.summary,
+      recentChapterDigests: memory.chapterDigests.slice(-5),
+      worldFacts: memory.worldFacts
+        .filter((item) => item.importance !== 'low')
+        .map(({ id, category, title, content, confidence, importance }) => ({ id, category, title, content, confidence, importance })),
+      characters: memory.characters
+        .filter((item) => item.importance !== 'low')
+        .map(({ id, name, aliases, importance, currentStatus, faction, currentLocationId, description }) => ({
+          id,
+          name,
+          aliases,
+          importance,
+          currentStatus,
+          faction,
+          currentLocationId,
+          description,
+        })),
+      relationships: memory.relationships
+        .filter((item) => item.importance !== 'low')
+        .map(({ id, sourceCharacterId, targetEntityId, targetKind, relationType, direction, currentStatus, description, importance }) => ({
+          id,
+          sourceCharacterId,
+          targetEntityId,
+          targetKind,
+          relationType,
+          direction,
+          currentStatus,
+          description,
+          importance,
+        })),
+      locations: memory.locations
+        .map(({ id, name, aliases, importance, kind, scale, parentId, description, currentStatus }) => ({
+          id,
+          name,
+          aliases,
+          importance,
+          kind,
+          scale,
+          parentId,
+          description,
+          currentStatus,
+        })),
+      mapState: {
+        dirty: memory.mapState.dirty,
+        reason: memory.mapState.reason,
+        sourceChapterIndex: memory.mapState.sourceChapterIndex,
+      },
+    }
+  }
+
   return {
     bookUrl: memory.bookUrl,
     bookName: memory.bookName,
@@ -474,7 +605,7 @@ function normalizeToolPatch(args: UnknownRecord): AiBookRawModelUpdate {
         ? args.patch
         : args
   return {
-    memory: memory as Partial<AiBookMemory>,
+    memory,
     shouldRegenerateMap: readBoolean(args, 'shouldRegenerateMap') || readBoolean(args, 'mapDirty'),
     mapPrompt: readString(args, 'mapPrompt'),
     mapDirty: readBoolean(args, 'mapDirty'),
@@ -635,8 +766,13 @@ export function applyMapFallbackToMemory(
   }
 }
 
-function coerceModelUpdate(raw: AiBookRawModelUpdate, previous: AiBookMemory, book: Book, chapter: BookChapter): AiBookModelUpdate {
-  const rawMemory = raw.memory || raw
+function coerceModelUpdate(raw: AiBookRawModelUpdate, previous: AiBookAnyMemory, book: Book, chapter: BookChapter): AiBookModelUpdate {
+  if (isAiBookMemoryV2(previous)) {
+    return reconcileAiBookMemoryV2(previous, normalizeV2Patch(raw, chapter), book, chapter)
+  }
+
+  const rawRecord = raw as unknown as UnknownRecord
+  const rawMemory = isRecord(raw.memory) ? raw.memory : rawRecord
   const worldviewSource = mergeIncrementalItems(previous.worldview, rawMemory.worldview)
   const characterSource = mergeIncrementalItems(previous.characters, rawMemory.characters)
   const relationshipSource = mergeIncrementalItems(previous.relationships, rawMemory.relationships)
@@ -676,6 +812,33 @@ function coerceModelUpdate(raw: AiBookRawModelUpdate, previous: AiBookMemory, bo
     memory,
     shouldRegenerateMap,
     mapPrompt: shouldRegenerateMap ? mapPrompt : undefined,
+  }
+}
+
+function normalizeV2Patch(raw: AiBookRawModelUpdate, chapter: BookChapter): AiBookChapterKnowledgePatch {
+  const rawRecord = raw as unknown as UnknownRecord
+  const candidate: UnknownRecord = isRecord(raw.patch)
+    ? raw.patch
+    : isRecord(raw.memoryPatch)
+      ? raw.memoryPatch
+      : isRecord(raw.memory) && isRecord(raw.memory.chapterDigest)
+        ? raw.memory
+        : rawRecord
+  const patch = candidate as unknown as Partial<AiBookChapterKnowledgePatch>
+  return {
+    chapterDigest: patch.chapterDigest || {
+      chapterIndex: chapter.index,
+      chapterTitle: chapter.title,
+      digest: readString(candidate, 'summary') || '',
+      keyEvents: [],
+    },
+    summary: patch.summary,
+    facts: patch.facts,
+    worldFacts: patch.worldFacts,
+    characters: patch.characters,
+    relationships: patch.relationships,
+    locations: patch.locations,
+    mapChanges: patch.mapChanges,
   }
 }
 

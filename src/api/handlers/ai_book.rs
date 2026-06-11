@@ -8,7 +8,6 @@ use serde_json::Value;
 
 use crate::api::{auth::AuthContext, AppState};
 use crate::error::error::{ApiResponse, AppError};
-use crate::model::ai_book::AiBookMemory;
 use crate::util::text::repair_encoded_url;
 
 #[derive(Debug, Deserialize, Default)]
@@ -27,33 +26,25 @@ pub async fn get_ai_book_memory(
     let req = parse_ai_book_request(q, body)?;
     let book_url = required_book_url(req.book_url)?;
     ensure_shelf_book(&state, &user_ns, &book_url).await?;
-    let memory = state.ai_book_service.get(&user_ns, &book_url).await?;
-    Ok(Json(ApiResponse::ok(
-        serde_json::to_value(memory).unwrap_or_default(),
-    )))
+    let memory = state.ai_book_service.get_value(&user_ns, &book_url).await?;
+    Ok(Json(ApiResponse::ok(serde_json::to_value(memory).unwrap_or_default())))
 }
 
 pub async fn save_ai_book_memory(
     State(state): State<AppState>,
     auth: AuthContext,
-    Json(mut memory): Json<AiBookMemory>,
+    Json(mut memory): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let user_ns = resolve_user_ns(&state, &auth).await?;
-    let book_url = required_book_url(Some(memory.book_url.clone()))?;
+    let book_url = required_book_url(read_json_string(&memory, "bookUrl"))?;
     let shelf_book = ensure_shelf_book(&state, &user_ns, &book_url).await?;
-    if memory.book_name.as_deref().unwrap_or("").trim().is_empty() {
-        memory.book_name = Some(shelf_book.name);
-    }
-    if memory.author.as_deref().unwrap_or("").trim().is_empty() {
-        memory.author = Some(shelf_book.author);
-    }
+    set_json_string_if_empty(&mut memory, "bookName", shelf_book.name)?;
+    set_json_string_if_empty(&mut memory, "author", shelf_book.author)?;
     let saved = state
         .ai_book_service
-        .save_for_book(&user_ns, &book_url, memory)
+        .save_value_for_book(&user_ns, &book_url, memory)
         .await?;
-    Ok(Json(ApiResponse::ok(
-        serde_json::to_value(saved).unwrap_or_default(),
-    )))
+    Ok(Json(ApiResponse::ok(saved)))
 }
 
 pub async fn delete_ai_book_memory(
@@ -118,4 +109,28 @@ fn required_book_url(book_url: Option<String>) -> Result<String, AppError> {
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| AppError::BadRequest("bookUrl required".to_string()))?;
     Ok(repair_encoded_url(&book_url))
+}
+
+fn read_json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn set_json_string_if_empty(value: &mut Value, key: &str, next: String) -> Result<(), AppError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::BadRequest("AI memory must be a JSON object".to_string()))?;
+    let current = object
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if current.is_empty() {
+        object.insert(key.to_string(), Value::String(next));
+    }
+    Ok(())
 }

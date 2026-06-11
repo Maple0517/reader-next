@@ -53,7 +53,19 @@
         <section v-if="activeTab === 'overview'" class="overview-grid">
           <div class="overview-main">
             <h2>世界观</h2>
-            <p class="summary">{{ memory.summary || '暂无资料' }}</p>
+            <p class="summary">{{ overviewSummary }}</p>
+            <div v-if="recentChanges.length" class="summary-points">
+              <span>最近变化</span>
+              <ul>
+                <li v-for="item in recentChanges" :key="item">{{ item }}</li>
+              </ul>
+            </div>
+            <div v-if="openQuestions.length" class="summary-points">
+              <span>未解问题</span>
+              <ul>
+                <li v-for="item in openQuestions" :key="item">{{ item }}</li>
+              </ul>
+            </div>
             <div class="worldview-groups">
               <section v-for="group in worldviewGroups" :key="group.category" class="worldview-group">
                 <div class="group-head">
@@ -139,7 +151,7 @@
           <div class="map-toolbar">
             <div class="map-title">
               <h2>世界地图</h2>
-              <p>{{ memory.map?.updatedAt ? formatTime(memory.map.updatedAt) : '未生成' }}</p>
+              <p>{{ displayBaseMemory?.map?.updatedAt ? formatTime(displayBaseMemory.map.updatedAt) : '未生成' }}</p>
             </div>
             <button class="secondary-btn" :disabled="aiStore.isBusy" @click="redrawMap">
               {{ aiStore.phase === 'map' ? '绘制中...' : '重绘地图' }}
@@ -147,7 +159,7 @@
           </div>
 
           <div class="map-frame">
-            <img v-if="memory.map?.imageUrl" :src="memory.map.imageUrl" alt="世界地图" />
+            <img v-if="displayBaseMemory?.map?.imageUrl" :src="displayBaseMemory.map.imageUrl" alt="世界地图" />
             <div v-else-if="relationshipGraph.nodes.length" class="graph-fallback">
               <div class="graph-canvas">
                 <div class="graph-legend">
@@ -218,7 +230,7 @@
                     <small>{{ connection.relation }}</small>
                   </button>
                 </div>
-                <small>{{ memory.map?.fallbackReason || '图片地图未生成，显示关系图' }}</small>
+                <small>{{ displayBaseMemory?.map?.fallbackReason || '图片地图未生成，显示关系图' }}</small>
               </aside>
             </div>
             <div v-else class="map-empty">暂无地图</div>
@@ -524,6 +536,7 @@ import type {
 } from '../types'
 import { buildAiBookRelationshipGraph, layoutAiBookRelationshipGraph } from '../utils/aiBookGraph'
 import { buildAiBookLocationRows, groupAiBookWorldview } from '../utils/aiBookPresentation'
+import { isAiBookMemoryV2, toAiBookDisplayMemory } from '../utils/aiBookV2'
 import { collapseWhitespace, summarizeDisplayError } from '../utils/httpError'
 
 type AiTab = 'overview' | 'characters' | 'relationships' | 'map' | 'settings'
@@ -561,21 +574,26 @@ const tabs: Array<{ key: AiTab; label: string }> = [
 ]
 
 const memory = computed(() => aiStore.memory)
+const displayBaseMemory = computed(() => memory.value ? toAiBookDisplayMemory(memory.value) : null)
+const v2Summary = computed(() => isAiBookMemoryV2(memory.value) ? memory.value.summary : null)
+const overviewSummary = computed(() => v2Summary.value?.current || displayBaseMemory.value?.summary || '暂无资料')
+const recentChanges = computed(() => v2Summary.value?.recentChanges || [])
+const openQuestions = computed(() => v2Summary.value?.openQuestions || [])
 const canUseServerModel = computed(() => aiStore.canUseServerModel || aiStore.isServerModelAdmin)
 const isServerModelAdmin = computed(() => aiStore.isServerModelAdmin)
 const serverConfig = computed(() => aiStore.serverModelConfig?.config || null)
 const serverTextReady = computed(() => Boolean(serverConfig.value?.text.enabled && serverConfig.value.text.baseUrl && serverConfig.value.text.model))
 const serverImageReady = computed(() => Boolean(serverConfig.value?.image.enabled && serverConfig.value.image.baseUrl && serverConfig.value.image.model))
 const serverSpeechReady = computed(() => Boolean(serverConfig.value?.speech.enabled && serverConfig.value.speech.baseUrl && serverConfig.value.speech.model))
-const worldviewGroups = computed(() => groupAiBookWorldview(memory.value?.worldview || [], collapsedWorldviewCategories.value))
-const importantCharacters = computed(() => normalizeDisplayCharacters(memory.value?.characters || []))
+const worldviewGroups = computed(() => groupAiBookWorldview(displayBaseMemory.value?.worldview || [], collapsedWorldviewCategories.value))
+const importantCharacters = computed(() => normalizeDisplayCharacters(displayBaseMemory.value?.characters || []))
 const filteredCharacters = computed(() => filterCharacters(importantCharacters.value, characterSearch.value))
-const displayRelationships = computed(() => normalizeDisplayRelationships(memory.value?.relationships || []))
-const displayLocations = computed(() => normalizeDisplayLocations(memory.value?.locations || []))
+const displayRelationships = computed(() => normalizeDisplayRelationships(displayBaseMemory.value?.relationships || []))
+const displayLocations = computed(() => normalizeDisplayLocations(displayBaseMemory.value?.locations || []))
 const visibleLocationRows = computed(() => buildAiBookLocationRows(displayLocations.value, collapsedLocationIds.value))
-const displayMemory = computed<AiBookMemory | null>(() => memory.value
+const displayMemory = computed<AiBookMemory | null>(() => displayBaseMemory.value
   ? {
-      ...memory.value,
+      ...displayBaseMemory.value,
       characters: importantCharacters.value,
       relationships: displayRelationships.value,
       locations: displayLocations.value,
@@ -721,7 +739,8 @@ async function updateToCurrent() {
 async function redrawMap() {
   if (!book.value) return
   const next = await aiStore.redrawMap(book.value)
-  if (next?.map?.imageUrl) {
+  const displayNext = next ? toAiBookDisplayMemory(next) : null
+  if (displayNext?.map?.imageUrl) {
     appStore.showToast('地图已更新', 'success')
   } else {
     appStore.showToast('图片地图不可用，已显示关系图', 'warning')
@@ -1266,6 +1285,27 @@ function cloneServerModelConfig(config: AiServerModelConfig): AiServerModelConfi
   margin: 0 0 18px;
   line-height: 1.8;
   color: var(--color-text-secondary);
+}
+
+.summary-points {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.summary-points span {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.summary-points ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
 }
 
 .worldview-groups,

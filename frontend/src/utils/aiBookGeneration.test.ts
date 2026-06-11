@@ -8,6 +8,7 @@ import {
   shouldRunAiBookAutoUpdate,
   uploadGeneratedMap,
 } from './aiBookGeneration'
+import { createEmptyAiBookMemoryV2, isAiBookMemoryV2, toAiBookDisplayMemory } from './aiBookV2'
 
 const readyConfig: AiBookConfig = {
   modelSource: 'browser',
@@ -79,6 +80,90 @@ describe('aiBookGeneration', () => {
     expect(serialized).toContain('importance')
     expect(serialized).toContain('不要输出不重要')
     expect(serialized).toContain('人物关系必须去重')
+    expect(serialized).toContain('ChapterKnowledgePatch')
+    expect(serialized).toContain('chapterDigest')
+    expect(serialized).toContain('worldFacts')
+    expect(serialized).toContain('evidence')
+    expect(serialized).toContain('mapChanges')
+  })
+
+  it('reconciles V2 chapter knowledge patches into layered memory', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => ({
+      ok: true,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              chapterDigest: {
+                chapterIndex: 7,
+                chapterTitle: '第八章 北境',
+                digest: '林舟抵达北境，首次听闻旧神传说。',
+                keyEvents: ['林舟抵达北境'],
+              },
+              summary: {
+                current: '林舟抵达北境，旧神传说真伪未知。',
+                recentChanges: ['林舟离开旧村'],
+                openQuestions: ['旧神传说是否真实'],
+              },
+              worldFacts: [{
+                id: 'fact-old-god',
+                category: '历史传说',
+                title: '旧神传说',
+                content: '北境流传旧神传说，真伪未知。',
+                confidence: '推断',
+                importance: 'high',
+                evidence: [{ chapterIndex: 7, chapterTitle: '第八章 北境', note: '首次提及旧神' }],
+              }],
+              characters: [{
+                id: 'char-lin-zhou',
+                name: '林舟',
+                aliases: ['阿舟'],
+                importance: 'high',
+                currentStatus: '抵达北境',
+                locationName: '北境',
+                evidence: [{ chapterIndex: 7, chapterTitle: '第八章 北境', note: '抵达北境' }],
+              }],
+              locations: [{
+                id: 'loc-north',
+                name: '北境',
+                kind: '区域',
+                scale: 'region',
+                description: '寒冷边境。',
+                importance: 'high',
+                evidence: [{ chapterIndex: 7, chapterTitle: '第八章 北境', note: '章节主舞台' }],
+              }],
+              mapChanges: {
+                changed: true,
+                reason: '新增北境区域',
+                affectedLocationNames: ['北境'],
+                routeHints: [],
+              },
+            }),
+          },
+        }],
+      }),
+    }))
+
+    const update = await requestAiBookMemoryUpdate({
+      config: readyConfig,
+      book: { name: '山海旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' },
+      chapter: { title: '第八章 北境', url: 'chapter-8', index: 7 },
+      chapterContent: '林舟抵达北境，首次听闻旧神传说。',
+      memory: createEmptyAiBookMemoryV2({ name: '山海旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' }),
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })
+
+    if (!isAiBookMemoryV2(update.memory)) {
+      throw new Error('expected V2 memory')
+    }
+    expect(update.memory.schemaVersion).toBe(2)
+    expect(update.memory.summary.current).toBe('林舟抵达北境，旧神传说真伪未知。')
+    expect(update.memory.chapterDigests[0]).toMatchObject({ chapterIndex: 7 })
+    expect(update.memory.worldFacts[0]).toMatchObject({ id: 'fact-old-god', category: '历史传说' })
+    expect(update.memory.characters[0]).toMatchObject({ id: 'char-lin-zhou', currentLocationId: 'loc-north' })
+    expect(update.memory.mapState.dirty).toBe(true)
+    expect(update.shouldRegenerateMap).toBe(true)
+    expect(update.mapPrompt).toContain('北境')
   })
 
   it('runs memory updates through OpenAI-compatible tool calling', async () => {
@@ -173,8 +258,9 @@ describe('aiBookGeneration', () => {
     const secondBody = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))
     expect(JSON.stringify(secondBody.messages)).toContain('旧资料摘要')
     expect(JSON.stringify(secondBody.messages)).toContain('刘隆指出李皓已经接触超凡领域')
-    expect(update.memory.summary).toBe('主角确认超凡领域存在。')
-    expect(update.memory.worldview[0]).toMatchObject({
+    const displayMemory = toAiBookDisplayMemory(update.memory)
+    expect(displayMemory.summary).toBe('主角确认超凡领域存在。')
+    expect(displayMemory.worldview[0]).toMatchObject({
       category: '基础规则',
       title: '超凡领域',
     })
@@ -277,12 +363,13 @@ describe('aiBookGeneration', () => {
       fetchImpl: fetchMock as unknown as typeof fetch,
     })
 
-    expect(update.memory.worldview.map((item) => item.category)).toEqual(['基础设定', '基础规则'])
-    expect(update.memory.characters.map((item) => item.name)).toEqual(['克莱恩'])
-    expect(update.memory.characters[0].aliases).toEqual(['周明瑞'])
-    expect(update.memory.characters[0].status).toBe('正在适应新身份并调查线索')
-    expect(update.memory.relationships).toHaveLength(1)
-    expect(update.memory.relationships[0]).toMatchObject({
+    const displayMemory = toAiBookDisplayMemory(update.memory)
+    expect(displayMemory.worldview.map((item) => item.category)).toEqual(['基础设定', '基础规则'])
+    expect(displayMemory.characters.map((item) => item.name)).toEqual(['克莱恩'])
+    expect(displayMemory.characters[0].aliases).toEqual(['周明瑞'])
+    expect(displayMemory.characters[0].status).toBe('正在适应新身份并调查线索')
+    expect(displayMemory.relationships).toHaveLength(1)
+    expect(displayMemory.relationships[0]).toMatchObject({
       source: '克莱恩',
       target: '梅丽莎',
       relation: '兄妹',
@@ -348,8 +435,9 @@ describe('aiBookGeneration', () => {
       fetchImpl: fetchMock as unknown as typeof fetch,
     })
 
-    expect(update.memory.worldview.map((item) => item.title)).toEqual(['超凡领域'])
-    expect(update.memory.summary).toBe('执法队搜查无果，李皓开始接触超凡线索。')
+    const displayMemory = toAiBookDisplayMemory(update.memory)
+    expect(displayMemory.worldview.map((item) => item.title)).toEqual(['超凡领域'])
+    expect(displayMemory.summary).toBe('执法队搜查无果，李皓开始接触超凡线索。')
   })
 
   it('merges incremental model memory with existing book memory', async () => {
@@ -408,17 +496,18 @@ describe('aiBookGeneration', () => {
       fetchImpl: fetchMock as unknown as typeof fetch,
     })
 
-    expect(update.memory.worldview.map((item) => item.title)).toEqual(['灵脉', '北境'])
-    expect(update.memory.characters.map((item) => item.name)).toEqual(['林舟', '沈月'])
-    expect(update.memory.characters.find((item) => item.name === '林舟')).toMatchObject({
+    const displayMemory = toAiBookDisplayMemory(update.memory)
+    expect(displayMemory.worldview.map((item) => item.title)).toEqual(['灵脉', '北境'])
+    expect(displayMemory.characters.map((item) => item.name)).toEqual(['林舟', '沈月'])
+    expect(displayMemory.characters.find((item) => item.name === '林舟')).toMatchObject({
       status: '已离开旧村',
       location: '北境',
     })
-    expect(update.memory.relationships.map((item) => `${item.source}-${item.relation}-${item.target}`)).toEqual([
+    expect(displayMemory.relationships.map((item) => `${item.source}-${item.relation}-${item.target}`)).toEqual([
       '林舟-师徒-村长',
       '林舟-临时同伴-沈月',
     ])
-    expect(update.memory.locations.map((item) => item.name)).toEqual(['旧村', '北境'])
+    expect(displayMemory.locations.map((item) => item.name)).toEqual(['旧村', '北境'])
   })
 
   it('does not regenerate the world map when requested without location changes', async () => {
@@ -478,7 +567,7 @@ describe('aiBookGeneration', () => {
 
     expect(update.shouldRegenerateMap).toBe(false)
     expect(update.mapPrompt).toBeUndefined()
-    expect(update.memory.mapDirty).toBe(false)
+    expect(toAiBookDisplayMemory(update.memory).mapDirty).toBe(false)
   })
 
   it('regenerates the world map when requested with new location changes', async () => {
@@ -533,7 +622,7 @@ describe('aiBookGeneration', () => {
 
     expect(update.shouldRegenerateMap).toBe(true)
     expect(update.mapPrompt).toBe('把旧村与北境画在同一张区域地图上。')
-    expect(update.memory.mapDirty).toBe(true)
+    expect(toAiBookDisplayMemory(update.memory).mapDirty).toBe(true)
   })
 
   it('uploads generated base64 maps through reader asset endpoint', async () => {

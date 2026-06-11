@@ -2,20 +2,26 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { getAiModelConfig } from '../api/aiModel'
 import { deleteAiBookMemory, getAiBookMemory, saveAiBookMemory } from '../api/aiBook'
-import type { AiBookMemory, AiServerModelConfigResponse, Book, BookChapter } from '../types'
+import type { AiBookAnyMemory, AiServerModelConfigResponse, Book, BookChapter } from '../types'
 import { useAppStore } from './app'
 import { getAiBookConfig, saveAiBookConfig } from '../utils/aiBookConfig'
 import type { AiBookConfig } from '../types'
 import {
   applyMapFallbackToMemory,
   applyMapToMemory,
-  createEmptyAiBookMemory,
   requestAiBookMapImage,
   requestAiBookMemoryUpdate,
   shouldRunAiBookAutoUpdate,
   uploadGeneratedMap,
 } from '../utils/aiBookGeneration'
 import { shouldSkipAiBookChapter } from '../utils/aiBookChapterFilter'
+import {
+  applyMapArtifactToMemoryV2,
+  applyMapFallbackToMemoryV2,
+  createEmptyAiBookMemoryV2,
+  isAiBookMemoryV2,
+  toAiBookDisplayMemory,
+} from '../utils/aiBookV2'
 
 type GenerationPhase = 'idle' | 'loading' | 'text' | 'map' | 'saving' | 'error'
 interface LoadServerModelConfigOptions {
@@ -24,7 +30,7 @@ interface LoadServerModelConfigOptions {
 
 export const useAiBookStore = defineStore('aiBook', () => {
   const appStore = useAppStore()
-  const memory = ref<AiBookMemory | null>(null)
+  const memory = ref<AiBookAnyMemory | null>(null)
   const loading = ref(false)
   const phase = ref<GenerationPhase>('idle')
   const statusText = ref('')
@@ -79,14 +85,14 @@ export const useAiBookStore = defineStore('aiBook', () => {
     loading.value = true
     try {
       const saved = await getAiBookMemory(book.bookUrl)
-      memory.value = saved || createEmptyAiBookMemory(book)
+      memory.value = saved || createEmptyAiBookMemoryV2(book)
       return memory.value
     } finally {
       loading.value = false
     }
   }
 
-  async function save(next: AiBookMemory) {
+  async function save(next: AiBookAnyMemory) {
     phase.value = 'saving'
     statusText.value = '保存 AI 资料...'
     try {
@@ -112,7 +118,7 @@ export const useAiBookStore = defineStore('aiBook', () => {
 
   async function reset(book: Book) {
     await deleteAiBookMemory(book.bookUrl)
-    memory.value = createEmptyAiBookMemory(book)
+    memory.value = createEmptyAiBookMemoryV2(book)
     phase.value = 'idle'
     statusText.value = ''
     return memory.value
@@ -140,7 +146,7 @@ export const useAiBookStore = defineStore('aiBook', () => {
     book: Book
     chapter: BookChapter
     chapterContent: string
-    current?: AiBookMemory
+    current?: AiBookAnyMemory
     allowSkip?: boolean
     chapters?: BookChapter[]
   }) {
@@ -182,7 +188,7 @@ export const useAiBookStore = defineStore('aiBook', () => {
       const message = (error as Error).message || 'AI 资料更新失败'
       phase.value = 'error'
       statusText.value = message
-      const failed: AiBookMemory = {
+      const failed: AiBookAnyMemory = {
         ...current,
         bookUrl: params.book.bookUrl,
         bookName: params.book.name,
@@ -205,8 +211,8 @@ export const useAiBookStore = defineStore('aiBook', () => {
     }
   }
 
-  async function saveSkippedChapterMemory(book: Book, chapter: BookChapter, current: AiBookMemory) {
-    const next: AiBookMemory = {
+  async function saveSkippedChapterMemory(book: Book, chapter: BookChapter, current: AiBookAnyMemory) {
+    const next: AiBookAnyMemory = {
       ...current,
       bookUrl: book.bookUrl,
       bookName: book.name,
@@ -220,10 +226,15 @@ export const useAiBookStore = defineStore('aiBook', () => {
     return memory.value
   }
 
-  async function redrawMap(book: Book, prompt?: string, sourceChapterIndex?: number, currentMemory?: AiBookMemory) {
+  async function redrawMap(book: Book, prompt?: string, sourceChapterIndex?: number, currentMemory?: AiBookAnyMemory) {
     const currentConfig = refreshConfig()
     const current = currentMemory || memory.value || await load(book)
-    const resolvedPrompt = prompt || current.map?.prompt || buildFallbackMapPrompt(current, book)
+    const displayMemory = toAiBookDisplayMemory(current)
+    const resolvedPrompt = prompt
+      || (isAiBookMemoryV2(current)
+        ? current.mapState.mapPrompt || current.renderArtifacts.mapImagePrompt
+        : current.map?.prompt)
+      || buildFallbackMapPrompt(current, book)
     phase.value = 'map'
     statusText.value = '生成世界地图...'
     try {
@@ -237,23 +248,28 @@ export const useAiBookStore = defineStore('aiBook', () => {
         filename: `${Date.now()}-${slugify(book.name || 'map')}.png`,
         useBackendProxy: currentConfig.useBackendProxy || currentConfig.modelSource === 'server',
       })
-      const next = applyMapToMemory(current, {
+      const map = {
         imageUrl,
         prompt: resolvedPrompt,
         updatedAt: Date.now(),
         sourceChapterIndex,
-      })
+      }
+      const next = isAiBookMemoryV2(current)
+        ? applyMapArtifactToMemoryV2(current, map)
+        : applyMapToMemory(displayMemory, map)
       memory.value = await saveAiBookMemory(next)
       phase.value = 'idle'
       statusText.value = ''
       return memory.value
     } catch (error) {
       const message = (error as Error).message || '地图生成失败'
-      const fallback = applyMapFallbackToMemory(current, {
-        prompt: resolvedPrompt,
-        reason: `${message}，已显示关系图`,
-        sourceChapterIndex,
-      })
+      const fallback = isAiBookMemoryV2(current)
+        ? applyMapFallbackToMemoryV2(current, resolvedPrompt, `${message}，已显示关系图`, sourceChapterIndex)
+        : applyMapFallbackToMemory(displayMemory, {
+            prompt: resolvedPrompt,
+            reason: `${message}，已显示关系图`,
+            sourceChapterIndex,
+          })
       memory.value = await saveAiBookMemory(fallback).catch(() => fallback)
       phase.value = 'idle'
       statusText.value = '图片地图不可用，已显示关系图'
@@ -289,15 +305,16 @@ export const useAiBookStore = defineStore('aiBook', () => {
   }
 })
 
-function buildFallbackMapPrompt(memory: AiBookMemory, book: Book) {
-  const locations = memory.locations
+function buildFallbackMapPrompt(memory: AiBookAnyMemory, book: Book) {
+  const displayMemory = toAiBookDisplayMemory(memory)
+  const locations = displayMemory.locations
     .map((item) => `${item.parentName ? `${item.parentName} > ` : ''}${item.name}${item.kind ? `（${item.kind}）` : ''}: ${item.description}`)
     .join('\n')
   return [
     `为小说《${book.name}》绘制一张不剧透的世界地图。`,
     '只包含已读进度中出现的地点和势力范围。',
     '优先表现地点层级、区域边界、路线连接、图例和地点标签，避免画成建筑外观或场景照片。',
-    locations || memory.summary || '保留未知区域，以卷轴地图风格呈现。',
+    locations || displayMemory.summary || '保留未知区域，以卷轴地图风格呈现。',
   ].join('\n')
 }
 

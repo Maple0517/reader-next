@@ -325,7 +325,251 @@ export interface AiBookMemory {
 }
 
 export interface AiBookModelUpdate {
-  memory: AiBookMemory
+  memory: AiBookAnyMemory
   shouldRegenerateMap: boolean
   mapPrompt?: string
 }
+
+export type AiBookImportance = 'high' | 'medium' | 'low'
+export type AiBookConfidence = '已知' | '推断' | '未知'
+export type AiBookLocationScale =
+  | 'world'
+  | 'continent'
+  | 'country'
+  | 'region'
+  | 'city'
+  | 'district'
+  | 'site'
+  | 'building'
+  | 'room'
+  | 'unknown'
+
+export interface AiBookEvidence {
+  chapterIndex: number
+  chapterTitle: string
+  quote?: string
+  note: string
+}
+
+export interface AiBookSummaryState {
+  current: string
+  recentChanges: string[]
+  openQuestions: string[]
+}
+
+export interface AiBookChapterDigest {
+  chapterIndex: number
+  chapterTitle: string
+  digest: string
+  keyEvents: string[]
+  touchedEntityIds: string[]
+  createdAt: number
+}
+
+export interface AiBookArcSummary {
+  id: string
+  startChapterIndex: number
+  endChapterIndex: number
+  title: string
+  summary: string
+  keyEntityIds: string[]
+}
+
+export interface AiBookWorldFact {
+  id: string
+  category: string
+  title: string
+  content: string
+  confidence: AiBookConfidence
+  importance: AiBookImportance
+  firstSeenChapterIndex?: number
+  lastConfirmedChapterIndex?: number
+  evidence: AiBookEvidence[]
+  supersedes?: string[]
+}
+
+export interface AiBookEntityState {
+  chapterIndex: number
+  chapterTitle: string
+  status: string
+  locationId?: string
+  faction?: string
+  evidence?: AiBookEvidence
+}
+
+export interface AiBookCharacterV2 {
+  id: string
+  name: string
+  aliases: string[]
+  importance: AiBookImportance
+  ambiguous?: boolean
+  currentStatus: string
+  faction?: string
+  currentLocationId?: string
+  description?: string
+  firstSeenChapterIndex?: number
+  lastSeenChapterIndex?: number
+  statusHistory: AiBookEntityState[]
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookRelationshipV2 {
+  id: string
+  sourceCharacterId: string
+  targetEntityId: string
+  targetKind: 'character' | 'location' | 'organization'
+  relationType: string
+  direction: 'directed' | 'undirected'
+  currentStatus?: string
+  description?: string
+  importance: AiBookImportance
+  firstSeenChapterIndex?: number
+  lastSeenChapterIndex?: number
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookLocationV2 {
+  id: string
+  name: string
+  aliases: string[]
+  importance: AiBookImportance
+  kind: string
+  scale: AiBookLocationScale
+  parentId?: string
+  description: string
+  currentStatus?: string
+  relatedCharacterIds: string[]
+  firstSeenChapterIndex?: number
+  lastSeenChapterIndex?: number
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookMapNode {
+  id: string
+  locationId: string
+  label: string
+  scale: AiBookLocationScale
+  parentNodeId?: string
+  status?: string
+}
+
+export interface AiBookMapEdge {
+  id: string
+  sourceNodeId: string
+  targetNodeId: string
+  kind: 'contains' | 'route' | 'adjacent' | 'character-movement'
+  label?: string
+  evidence?: AiBookEvidence
+}
+
+export interface AiBookMapState {
+  dirty: boolean
+  reason?: string
+  lastRenderedAt?: number
+  sourceChapterIndex?: number
+  mapPrompt?: string
+  nodes: AiBookMapNode[]
+  edges: AiBookMapEdge[]
+}
+
+export interface AiBookRenderArtifacts {
+  mapImageUrl?: string
+  mapImagePrompt?: string
+  mapFallbackReason?: string
+}
+
+export interface AiBookMemoryV2 {
+  schemaVersion: 2
+  bookUrl: string
+  bookName?: string
+  author?: string
+  enabled: boolean
+  processedChapterIndex?: number
+  processedChapterTitle?: string
+  updatedAt: number
+  lastError?: string
+  summary: AiBookSummaryState
+  chapterDigests: AiBookChapterDigest[]
+  arcs: AiBookArcSummary[]
+  worldFacts: AiBookWorldFact[]
+  characters: AiBookCharacterV2[]
+  relationships: AiBookRelationshipV2[]
+  locations: AiBookLocationV2[]
+  mapState: AiBookMapState
+  renderArtifacts: AiBookRenderArtifacts
+}
+
+export interface AiBookPatchWorldFact {
+  id?: string
+  category?: string
+  title: string
+  content: string
+  confidence?: AiBookConfidence
+  importance?: AiBookImportance
+  evidence?: AiBookEvidence[]
+}
+
+export interface AiBookPatchCharacter {
+  id?: string
+  name: string
+  aliases?: string[]
+  importance?: AiBookImportance
+  currentStatus?: string
+  status?: string
+  faction?: string
+  locationName?: string
+  description?: string
+  evidence?: AiBookEvidence[]
+}
+
+export interface AiBookPatchRelationship {
+  id?: string
+  sourceId?: string
+  sourceName?: string
+  targetId?: string
+  targetName?: string
+  targetKind?: 'character' | 'location' | 'organization'
+  relationType?: string
+  relation?: string
+  direction?: 'directed' | 'undirected'
+  currentStatus?: string
+  status?: string
+  description?: string
+  importance?: AiBookImportance
+  evidence?: AiBookEvidence[]
+}
+
+export interface AiBookPatchLocation {
+  id?: string
+  name: string
+  aliases?: string[]
+  kind?: string
+  scale?: AiBookLocationScale
+  parentId?: string
+  parentName?: string
+  description?: string
+  currentStatus?: string
+  status?: string
+  relatedCharacterNames?: string[]
+  relatedCharacterIds?: string[]
+  importance?: AiBookImportance
+  evidence?: AiBookEvidence[]
+}
+
+export interface AiBookChapterKnowledgePatch {
+  chapterDigest: Omit<AiBookChapterDigest, 'touchedEntityIds' | 'createdAt'> & Partial<Pick<AiBookChapterDigest, 'touchedEntityIds' | 'createdAt'>>
+  summary?: Partial<AiBookSummaryState>
+  facts?: AiBookPatchWorldFact[]
+  worldFacts?: AiBookPatchWorldFact[]
+  characters?: AiBookPatchCharacter[]
+  relationships?: AiBookPatchRelationship[]
+  locations?: AiBookPatchLocation[]
+  mapChanges?: {
+    changed: boolean
+    reason?: string
+    affectedLocationNames: string[]
+    routeHints: string[]
+  }
+}
+
+export type AiBookAnyMemory = AiBookMemory | AiBookMemoryV2

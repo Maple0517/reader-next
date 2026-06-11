@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 use tokio::fs;
 
@@ -27,6 +28,19 @@ impl AiBookService {
         user_ns: &str,
         book_url: &str,
     ) -> Result<Option<AiBookMemory>, AppError> {
+        let Some(value) = self.get_value(user_ns, book_url).await? else {
+            return Ok(None);
+        };
+        serde_json::from_value::<AiBookMemory>(value)
+            .map(Some)
+            .map_err(|e| AppError::BadRequest(e.to_string()))
+    }
+
+    pub async fn get_value(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+    ) -> Result<Option<Value>, AppError> {
         let key = md5_hex(book_url);
         if let Some(row) =
             sqlx::query("SELECT json FROM ai_book_memories WHERE user_ns=?1 AND book_key=?2")
@@ -36,7 +50,7 @@ impl AiBookService {
                 .await?
         {
             let json: String = row.get("json");
-            let memory = serde_json::from_str::<AiBookMemory>(&json)
+            let memory = serde_json::from_str::<Value>(&json)
                 .map_err(|e| AppError::BadRequest(e.to_string()))?;
             return Ok(Some(memory));
         }
@@ -48,9 +62,14 @@ impl AiBookService {
         let data = fs::read_to_string(&path)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
-        let memory = serde_json::from_str::<AiBookMemory>(&data)
+        let memory = serde_json::from_str::<Value>(&data)
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        self.save_memory_row(user_ns, book_url, &memory).await?;
+        let updated_at = memory
+            .get("updatedAt")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| now_ts() * 1000);
+        self.save_memory_value_row(user_ns, book_url, &memory, updated_at)
+            .await?;
         let _ = fs::remove_file(path).await;
         Ok(Some(memory))
     }
@@ -59,22 +78,51 @@ impl AiBookService {
         &self,
         user_ns: &str,
         book_url: &str,
-        mut memory: AiBookMemory,
+        memory: AiBookMemory,
     ) -> Result<AiBookMemory, AppError> {
+        let value =
+            serde_json::to_value(memory).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        let saved = self.save_value_for_book(user_ns, book_url, value).await?;
+        serde_json::from_value::<AiBookMemory>(saved)
+            .map_err(|e| AppError::BadRequest(e.to_string()))
+    }
+
+    pub async fn save_value_for_book(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        mut memory: Value,
+    ) -> Result<Value, AppError> {
         if book_url.trim().is_empty() {
             return Err(AppError::BadRequest("bookUrl required".to_string()));
         }
-        if memory.book_url.trim().is_empty() {
-            memory.book_url = book_url.to_string();
-        }
-        if memory.book_url != book_url {
+
+        let object = memory
+            .as_object_mut()
+            .ok_or_else(|| AppError::BadRequest("AI memory must be a JSON object".to_string()))?;
+        let memory_book_url = object
+            .get("bookUrl")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if memory_book_url.is_empty() {
+            object.insert("bookUrl".to_string(), Value::String(book_url.to_string()));
+        } else if memory_book_url != book_url {
             return Err(AppError::BadRequest("bookUrl mismatch".to_string()));
         }
-        if memory.updated_at <= 0 {
-            memory.updated_at = now_ts() * 1000;
-        }
 
-        self.save_memory_row(user_ns, book_url, &memory).await?;
+        let updated_at = object.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
+        let updated_at = if updated_at > 0 {
+            updated_at
+        } else {
+            let now = now_ts() * 1000;
+            object.insert("updatedAt".to_string(), Value::Number(now.into()));
+            now
+        };
+
+        self.save_memory_value_row(user_ns, book_url, &memory, updated_at)
+            .await?;
         Ok(memory)
     }
 
@@ -99,11 +147,12 @@ impl AiBookService {
         Ok(result.rows_affected() > 0 || removed_file)
     }
 
-    async fn save_memory_row(
+    async fn save_memory_value_row(
         &self,
         user_ns: &str,
         book_url: &str,
-        memory: &AiBookMemory,
+        memory: &Value,
+        updated_at: i64,
     ) -> Result<(), AppError> {
         let key = md5_hex(book_url);
         let data =
@@ -116,7 +165,7 @@ impl AiBookService {
         .bind(&key)
         .bind(book_url)
         .bind(data)
-        .bind(memory.updated_at)
+        .bind(updated_at)
         .execute(&self.pool)
         .await?;
         Ok(())
