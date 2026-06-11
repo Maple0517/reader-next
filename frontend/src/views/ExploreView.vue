@@ -118,13 +118,12 @@ async function handleBookClick(book: Book | SearchBook) {
   if (openingBookUrl.value === b.bookUrl) return
 
   openingBookUrl.value = b.bookUrl
-  const targetIndex = b.durChapterIndex || 0
 
   try {
     const loadBookTask = readerStore.loadBook(b)
     await router.push('/reader')
     await loadBookTask
-    await readerStore.loadChapter(targetIndex)
+    await readerStore.loadChapter(readerStore.currentIndex)
   } finally {
     openingBookUrl.value = ''
   }

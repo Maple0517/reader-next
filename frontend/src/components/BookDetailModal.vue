@@ -166,7 +166,7 @@ async function startReading() {
   const b = props.book as Book
   await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
   await readerStore.loadBook(b)
-  await readerStore.loadChapter(b.durChapterIndex || 0)
+  await readerStore.loadChapter(readerStore.currentIndex)
   close()
   router.push('/reader')
 }

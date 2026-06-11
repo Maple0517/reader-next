@@ -260,7 +260,7 @@ async function handleBookClick(book: Book | SearchBook) {
   const b = book as Book
   if (b.origin && b.bookUrl) {
     await readerStore.loadBook(b)
-    await readerStore.loadChapter(b.durChapterIndex || 0)
+    await readerStore.loadChapter(readerStore.currentIndex)
     router.push('/reader')
   }
 }

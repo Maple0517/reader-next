@@ -6,6 +6,7 @@ import { useAiBookStore } from './aiBook'
 import {
   getChapterList,
   getBookContent,
+  getShelfBook,
   saveBookProgress,
   setBookSource as apiSetBookSource,
 } from '../api/bookshelf'
@@ -374,6 +375,22 @@ export const useReaderStore = defineStore('reader', () => {
     return Math.max(0, Math.min(1, normalized))
   }
 
+  function normalizeProgressTimestamp(value?: number | null) {
+    if (typeof value !== 'number' || Number.isNaN(value) || value <= 0) return 0
+    return value < 1_000_000_000_000 ? value * 1000 : value
+  }
+
+  async function resolveLatestShelfBook(localBook: Book) {
+    if (!localBook.bookUrl) return localBook
+    const latest = await getShelfBook(localBook.bookUrl).catch(() => null)
+    if (!latest) return localBook
+    const shelfBook = shelfStore.books.find((item) => item.bookUrl === localBook.bookUrl || item.bookUrl === latest.bookUrl)
+    if (shelfBook) {
+      Object.assign(shelfBook, latest)
+    }
+    return latest
+  }
+
   function currentServerProgressPayload(index = currentIndex.value, progress = chapterScrollProgress.value) {
     if (!book.value) return null
     return {
@@ -411,15 +428,33 @@ export const useReaderStore = defineStore('reader', () => {
     const session = getPersistedReaderSession()
     if (!session?.book || !session.chapters?.length) return false
 
-    book.value = session.book
-    chapters.value = session.chapters
-    loadReadChapterHistory(session.book)
+    let restoredBook = session.book
+    let restoredChapters = session.chapters
+    let nextIndex = Math.max(0, Math.min(session.currentIndex || 0, restoredChapters.length - 1))
+    let nextProgress = session.chapterScrollProgress || 0
 
-    const nextIndex = Math.max(0, Math.min(session.currentIndex || 0, session.chapters.length - 1))
+    const latestBook = await resolveLatestShelfBook(session.book)
+    if (
+      latestBook !== session.book
+      && normalizeProgressTimestamp(latestBook.durChapterTime) > normalizeProgressTimestamp(session.updatedAt)
+    ) {
+      restoredBook = latestBook
+      restoredChapters = await getChapterList({
+        bookUrl: latestBook.bookUrl,
+        bookSourceUrl: latestBook.origin,
+      }).catch(() => session.chapters)
+      nextIndex = Math.max(0, Math.min(restoredChapters.length - 1, latestBook.durChapterIndex || 0))
+      nextProgress = decodeServerProgress(latestBook.durChapterPos)
+    }
+
+    book.value = restoredBook
+    chapters.value = restoredChapters
+    loadReadChapterHistory(restoredBook)
+
     try {
       const chapterContent = await fetchChapterContent(nextIndex)
       if (chapterContent == null) return false
-      setActiveChapterState(nextIndex, chapterContent, session.chapterScrollProgress || 0)
+      setActiveChapterState(nextIndex, chapterContent, nextProgress)
       markChapterAsRead(nextIndex)
       return true
     } catch {
@@ -1178,22 +1213,26 @@ export const useReaderStore = defineStore('reader', () => {
   /* ─── Book / chapter ops ─── */
   async function loadBook(b: Book) {
     loading.value = true
-    book.value = b
+    const latestBook = await resolveLatestShelfBook(b)
+    book.value = latestBook
     chapters.value = []
     content.value = ''
-    appStore.markBookOpened(b.bookUrl)
-    currentIndex.value = b.durChapterIndex || 0
+    appStore.markBookOpened(latestBook.bookUrl)
+    currentIndex.value = latestBook.durChapterIndex || 0
     chapterScrollProgress.value = 0
     preloadedContent.value.clear()
-    loadReadChapterHistory(b)
+    loadReadChapterHistory(latestBook)
     progressDirty.value = false
     lastServerProgressKey.value = ''
     chaptersLoading.value = true
     try {
       chapters.value = await getChapterList({
-        bookUrl: b.bookUrl,
-        bookSourceUrl: b.origin,
+        bookUrl: latestBook.bookUrl,
+        bookSourceUrl: latestBook.origin,
       })
+      if (chapters.value.length) {
+        currentIndex.value = Math.max(0, Math.min(currentIndex.value, chapters.value.length - 1))
+      }
       saveReaderSession()
     } catch (error) {
       loading.value = false

@@ -950,6 +950,7 @@ impl BookService {
     }
 
     pub async fn save_books(&self, user_ns: &str, books: Vec<Book>) -> Result<Vec<Book>, AppError> {
+        let existing = self.read_bookshelf(user_ns).await?;
         let mut normalized = Vec::with_capacity(books.len());
         for mut book in books {
             sanitize_book_urls(&mut book);
@@ -958,6 +959,12 @@ impl BookService {
             }
             if book.book_url.trim().is_empty() {
                 return Err(AppError::BadRequest("bookUrl required".to_string()));
+            }
+            if let Some(existing_book) = existing
+                .iter()
+                .find(|item| books_match_for_save(item, &book))
+            {
+                preserve_newer_reading_progress(existing_book, &mut book);
             }
             normalized.push(book);
         }
@@ -1610,6 +1617,20 @@ fn sanitize_book_urls(book: &mut Book) {
     }
 }
 
+fn progress_updated_at(book: &Book) -> i64 {
+    book.dur_chapter_time.unwrap_or(0)
+}
+
+fn preserve_newer_reading_progress(existing: &Book, incoming: &mut Book) {
+    if progress_updated_at(existing) <= progress_updated_at(incoming) {
+        return;
+    }
+    incoming.dur_chapter_index = existing.dur_chapter_index;
+    incoming.dur_chapter_pos = existing.dur_chapter_pos;
+    incoming.dur_chapter_time = existing.dur_chapter_time;
+    incoming.dur_chapter_title = existing.dur_chapter_title.clone();
+}
+
 fn recover_bookshelf_entries(data: &str) -> Option<Vec<Book>> {
     let mut recovered = Vec::new();
     let mut seen = HashSet::new();
@@ -1684,16 +1705,59 @@ fn content_type_from_ext(ext: &str) -> String {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn window_rate_waits_when_existing_starts_reach_limit() {
-        let storage_dir =
-            std::env::temp_dir().join(format!("reader-rust-window-rate-{}", std::process::id()));
+    fn test_book_service(name: &str) -> (BookService, PathBuf) {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-rust-{name}-{}-{}",
+            std::process::id(),
+            crate::util::time::now_ts()
+        ));
         let service = BookService::new(
             HttpClient::new(5, None).unwrap(),
             RuleEngine::new().unwrap(),
             FileCache::new(storage_dir.join("cache")),
             storage_dir.to_str().unwrap(),
         );
+        (service, storage_dir)
+    }
+
+    fn test_book(chapter_index: i32, chapter_pos: i32, chapter_time: i64) -> Book {
+        Book {
+            name: "同步书".to_string(),
+            author: "作者".to_string(),
+            origin: "https://source.example".to_string(),
+            book_url: "https://book.example/1".to_string(),
+            dur_chapter_index: Some(chapter_index),
+            dur_chapter_pos: Some(chapter_pos),
+            dur_chapter_time: Some(chapter_time),
+            dur_chapter_title: Some(format!("第{}章", chapter_index + 1)),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn save_books_preserves_newer_existing_reading_progress() {
+        let (service, storage_dir) = test_book_service("save-books-progress");
+        let user_ns = "progress-user";
+        service
+            .save_book(user_ns, test_book(8, 7300, 2000))
+            .await
+            .unwrap();
+
+        let saved = service
+            .save_books(user_ns, vec![test_book(2, 1400, 1000)])
+            .await
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert_eq!(saved[0].dur_chapter_index, Some(8));
+        assert_eq!(saved[0].dur_chapter_pos, Some(7300));
+        assert_eq!(saved[0].dur_chapter_time, Some(2000));
+        assert_eq!(saved[0].dur_chapter_title.as_deref(), Some("第9章"));
+    }
+
+    #[tokio::test]
+    async fn window_rate_waits_when_existing_starts_reach_limit() {
+        let (service, storage_dir) = test_book_service("window-rate");
         let now = Instant::now();
         service.rate_states.write().await.insert(
             "source".to_string(),
