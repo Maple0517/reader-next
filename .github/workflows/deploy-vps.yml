@@ -1,0 +1,61 @@
+name: Deploy Reader to VPS
+
+on:
+  push:
+    branches:
+      - Maple/ai-book-v2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-reader-vps
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Deploy over SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          APP_DIR: /opt/reader/app
+          BRANCH: ${{ github.ref_name }}
+          REPO: https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+
+          : "${VPS_HOST:?Missing VPS_HOST secret}"
+          : "${VPS_USER:?Missing VPS_USER secret}"
+          : "${VPS_SSH_PRIVATE_KEY:?Missing VPS_SSH_PRIVATE_KEY secret}"
+          VPS_SSH_PORT="${VPS_SSH_PORT:-22}"
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/reader_deploy_key
+          chmod 600 ~/.ssh/reader_deploy_key
+          ssh-keyscan -p "$VPS_SSH_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+          ssh \
+            -i ~/.ssh/reader_deploy_key \
+            -p "$VPS_SSH_PORT" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "APP_DIR='$APP_DIR' BRANCH='$BRANCH' REPO='$REPO' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          if [[ ! -x "$APP_DIR/scripts/deploy-do.sh" ]]; then
+            mkdir -p "$(dirname "$APP_DIR")"
+            git clone --branch "$BRANCH" "$REPO" "$APP_DIR"
+          fi
+
+          APP_DIR="$APP_DIR" BRANCH="$BRANCH" REPO="$REPO" "$APP_DIR/scripts/deploy-do.sh"
+          REMOTE
