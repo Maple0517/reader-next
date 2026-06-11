@@ -3,6 +3,7 @@ use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
 use crate::model::{book::Book, book_source::BookSource, search::SearchBook};
 use crate::service::local_txt_book::{is_local_txt_origin, is_local_txt_url, LOCAL_TXT_ORIGIN};
+use crate::service::search_relevance::{score_search_book, sort_and_filter_search_results};
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use axum::body::Body;
 use axum::body::Bytes;
@@ -306,15 +307,21 @@ pub async fn search_book_multi(
     }
 
     // Merge books with same name and author
-    let merged = merge_search_results(results);
+    let merged = merge_search_results(&key, results);
 
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(merged).unwrap_or_default(),
     )))
 }
 
-/// Merge search results from different book sources for the same book
+/// Merge search results from different book sources for the same book.
+///
+/// The caller's query is used only after parsing remote book-source data: exact
+/// and strong title matches are ranked first, weak token-overlap noise is hidden
+/// when strong matches exist, and all-weak result sets are kept to avoid false
+/// empty states for unusual titles.
 fn merge_search_results(
+    query: &str,
     results: Vec<crate::model::search::SearchBook>,
 ) -> Vec<crate::model::search::SearchBook> {
     use crate::model::search::SearchBook;
@@ -322,21 +329,27 @@ fn merge_search_results(
 
     let mut merged: HashMap<String, SearchBook> = HashMap::new();
 
-    for book in results {
+    for mut book in results {
         let key = book.merge_key();
 
         if let Some(existing) = merged.get_mut(&key) {
-            // Add this source to the existing book
-            if let Some(ref mut urls) = existing.book_source_urls {
-                if !urls.contains(&book.origin) {
-                    urls.push(book.origin.clone());
-                }
-            } else {
-                existing.book_source_urls =
-                    Some(vec![existing.origin.clone(), book.origin.clone()]);
+            let incoming_origin = book.origin.clone();
+            let existing_score = score_search_book(query, existing).score;
+            let incoming_score = score_search_book(query, &book).score;
+
+            if incoming_score > existing_score {
+                std::mem::swap(existing, &mut book);
             }
 
-            // Fill in missing fields from this source
+            // Add this source to the existing book.
+            let urls = existing
+                .book_source_urls
+                .get_or_insert_with(|| vec![existing.origin.clone()]);
+            if !urls.contains(&incoming_origin) {
+                urls.push(incoming_origin);
+            }
+
+            // Fill in missing fields from this source.
             if existing.cover_url.is_none() && book.cover_url.is_some() {
                 existing.cover_url = book.cover_url;
             }
@@ -352,15 +365,16 @@ fn merge_search_results(
             if existing.update_time.is_none() && book.update_time.is_some() {
                 existing.update_time = book.update_time;
             }
+            if existing.word_count.is_none() && book.word_count.is_some() {
+                existing.word_count = book.word_count;
+            }
         } else {
             merged.insert(key, book);
         }
     }
 
-    let mut result: Vec<SearchBook> = merged.into_values().collect();
-    // Sort by name for consistent ordering
-    result.sort_by(|a, b| a.name.cmp(&b.name));
-    result
+    let result: Vec<SearchBook> = merged.into_values().collect();
+    sort_and_filter_search_results(query, result)
 }
 
 pub async fn explore_book(
@@ -2743,9 +2757,9 @@ fn take_available_source_sse_matches(
 mod tests {
     use super::{
         book_matches_delete_target, build_available_book_source_response,
-        cache_count_for_shelf_display, fallback_available_book, should_use_available_source_cache,
-        take_available_source_cached_matches, take_available_source_sse_matches,
-        GetAvailableBookSourceRequest,
+        cache_count_for_shelf_display, fallback_available_book, merge_search_results,
+        should_use_available_source_cache, take_available_source_cached_matches,
+        take_available_source_sse_matches, GetAvailableBookSourceRequest,
     };
     use crate::model::{book::Book, search::SearchBook};
     use std::collections::HashSet;
@@ -2781,6 +2795,69 @@ mod tests {
         };
 
         assert!(book_matches_delete_target(&shelf_book, &target));
+    }
+
+
+    #[test]
+    fn merge_search_results_ranks_exact_matches_first_and_filters_noise() {
+        let books = vec![
+            SearchBook {
+                name: "修什么仙造作啊".to_string(),
+                author: "雏禾".to_string(),
+                origin: "source-a".to_string(),
+                book_url: "a".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "没钱修什么仙".to_string(),
+                author: "封七月".to_string(),
+                origin: "source-b".to_string(),
+                book_url: "b".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "我在异界没钱修什么仙".to_string(),
+                author: "一只鱼".to_string(),
+                origin: "source-c".to_string(),
+                book_url: "c".to_string(),
+                ..SearchBook::default()
+            },
+        ];
+
+        let merged = merge_search_results("没钱修什么仙", books);
+        let names: Vec<String> = merged.into_iter().map(|book| book.name).collect();
+
+        assert_eq!(names, vec!["没钱修什么仙", "我在异界没钱修什么仙"]);
+    }
+
+    #[test]
+    fn merge_search_results_collects_duplicate_sources() {
+        let books = vec![
+            SearchBook {
+                name: "没钱修什么仙".to_string(),
+                author: "封七月".to_string(),
+                origin: "source-a".to_string(),
+                book_url: "url-a".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "没钱修什么仙".to_string(),
+                author: "封七月".to_string(),
+                origin: "source-b".to_string(),
+                book_url: "url-b".to_string(),
+                cover_url: Some("cover.jpg".to_string()),
+                ..SearchBook::default()
+            },
+        ];
+
+        let merged = merge_search_results("没钱修什么仙", books);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "没钱修什么仙");
+        assert_eq!(merged[0].cover_url.as_deref(), Some("cover.jpg"));
+        assert!(merged[0].book_source_urls.as_ref().is_some_and(|urls| {
+            urls.contains(&"source-a".to_string()) && urls.contains(&"source-b".to_string())
+        }));
     }
 
     #[test]
