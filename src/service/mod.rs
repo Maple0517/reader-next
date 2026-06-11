@@ -5,5 +5,6 @@ pub mod book_service;
 pub mod book_source_service;
 pub mod json_document_service;
 pub mod local_txt_book;
+pub mod search_relevance;
 pub mod update_service;
 pub mod user_service;
