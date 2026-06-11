@@ -1,5 +1,6 @@
 # Environment variables (contains secrets)
 .env
+AGENTS.local.md
 
 # Rust build artifacts
 target/
@@ -21,6 +22,7 @@ Thumbs.db
 
 # Storage data (if contains user data)
 /storage/
+/storage-docker/
 
 release-assets/
 node_modules/
