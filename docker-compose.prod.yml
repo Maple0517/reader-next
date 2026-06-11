@@ -12,6 +12,7 @@ services:
       - /opt/reader/storage:/app/storage
     networks:
       - reader-net
+      - sub2api-network
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ >/dev/null"]
       interval: 30s
@@ -37,3 +38,6 @@ services:
 networks:
   reader-net:
     name: reader-net
+  sub2api-network:
+    name: sub2api-deploy_sub2api-network
+    external: true

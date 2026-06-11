@@ -32,3 +32,6 @@ test-results/
 # Local agent secrets/context
 AGENTS.local.md
 /storage-docker/
+
+# Production environment secrets
+.env.prod
