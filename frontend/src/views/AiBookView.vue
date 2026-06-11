@@ -537,6 +537,7 @@ import type {
 import { buildAiBookRelationshipGraph, layoutAiBookRelationshipGraph } from '../utils/aiBookGraph'
 import { buildAiBookLocationRows, groupAiBookWorldview } from '../utils/aiBookPresentation'
 import { isAiBookMemoryV2, toAiBookDisplayMemory } from '../utils/aiBookV2'
+import { shouldAutoUseServerAiBookConfig } from '../utils/aiBookConfig'
 import { collapseWhitespace, summarizeDisplayError } from '../utils/httpError'
 
 type AiTab = 'overview' | 'characters' | 'relationships' | 'map' | 'settings'
@@ -664,6 +665,9 @@ onMounted(async () => {
   await appStore.fetchUserInfo()
   aiStore.refreshConfig()
   await aiStore.loadServerModelConfig({ force: true })
+  if (shouldAutoUseServerAiBookConfig(aiStore.config, canUseServerModel.value)) {
+    aiStore.persistConfig({ ...aiStore.config, modelSource: 'server' })
+  }
   Object.assign(configDraft, aiStore.config)
   if (aiStore.serverModelConfig?.config) {
     Object.assign(serverConfigDraft, cloneServerModelConfig(aiStore.serverModelConfig.config))

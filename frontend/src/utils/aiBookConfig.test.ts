@@ -4,6 +4,7 @@ import {
   aiBookConfigStorageKey,
   getAiBookConfig,
   isAiBookImageConfigReady,
+  shouldAutoUseServerAiBookConfig,
   isAiBookConfigReady,
   saveAiBookConfig,
 } from './aiBookConfig'
@@ -110,6 +111,40 @@ describe('aiBookConfig', () => {
       imageUseFullUrl: false,
       useBackendProxy: false,
     })
+  })
+
+  it('auto-prefers server config when browser config would call the reader app itself', () => {
+    const baseConfig = {
+      ...DEFAULT_AI_BOOK_CONFIG,
+      modelSource: 'browser' as const,
+      textModel: 'gpt-5.5',
+    }
+
+    expect(shouldAutoUseServerAiBookConfig(
+      { ...baseConfig, textBaseUrl: '' },
+      true,
+      'http://127.0.0.1:8081',
+    )).toBe(true)
+    expect(shouldAutoUseServerAiBookConfig(
+      { ...baseConfig, textBaseUrl: 'http://127.0.0.1:8081' },
+      true,
+      'http://127.0.0.1:8081',
+    )).toBe(true)
+    expect(shouldAutoUseServerAiBookConfig(
+      { ...baseConfig, textBaseUrl: 'http://localhost:8081' },
+      true,
+      'http://127.0.0.1:8081',
+    )).toBe(true)
+    expect(shouldAutoUseServerAiBookConfig(
+      { ...baseConfig, textBaseUrl: 'http://127.0.0.1:8080' },
+      true,
+      'http://127.0.0.1:8081',
+    )).toBe(false)
+    expect(shouldAutoUseServerAiBookConfig(
+      { ...baseConfig, textBaseUrl: 'http://127.0.0.1:8081' },
+      false,
+      'http://127.0.0.1:8081',
+    )).toBe(false)
   })
 })
 

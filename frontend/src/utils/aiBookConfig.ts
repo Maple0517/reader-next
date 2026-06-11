@@ -87,6 +87,34 @@ export function isAiBookImageConfigReady(config: AiBookConfig) {
   return Boolean(config.imageBaseUrl.trim() && config.imageModel.trim())
 }
 
+export function shouldAutoUseServerAiBookConfig(
+  config: AiBookConfig,
+  canUseServerModel: boolean,
+  currentOrigin = globalThis.location?.origin || '',
+) {
+  if (!canUseServerModel || config.modelSource === 'server') return false
+  if (!config.textBaseUrl.trim()) return true
+  return pointsToCurrentApp(config.textBaseUrl, currentOrigin)
+}
+
 export function aiBookConfigStorageKey(username?: string | null) {
   return storageKey(username)
+}
+
+function pointsToCurrentApp(baseUrl: string, currentOrigin: string) {
+  try {
+    const target = new URL(normalizeBaseUrl(baseUrl))
+    const current = new URL(currentOrigin)
+    if (target.origin === current.origin) return true
+    return isLoopbackHost(target.hostname)
+      && isLoopbackHost(current.hostname)
+      && target.port === current.port
+      && target.protocol === current.protocol
+  } catch {
+    return false
+  }
+}
+
+function isLoopbackHost(hostname: string) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
 }
