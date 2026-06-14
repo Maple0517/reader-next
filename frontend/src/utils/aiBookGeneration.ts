@@ -482,18 +482,18 @@ async function requestAiBookMemoryUpdateGeminiJson({
     fullUrl: config.textUseFullUrl,
     path: config.textPath || DEFAULT_TEXT_MODEL_PATH,
     fetchImpl,
-      body: {
-        messages: buildAiBookGeminiJsonPromptMessages({
-          book,
-          chapter,
-          chapterContent,
-          memory,
-        }),
-        responseMimeType: 'application/json',
-        responseSchema: buildAiBookGeminiJsonResponseSchema(),
-        max_tokens: 4096,
-        temperature: 0.2,
-      },
+    body: {
+      messages: buildAiBookGeminiJsonPromptMessages({
+        book,
+        chapter,
+        chapterContent,
+        memory,
+      }),
+      responseMimeType: 'application/json',
+      responseSchema: buildAiBookGeminiJsonResponseSchema(),
+      max_tokens: 8192,
+      temperature: 0.2,
+    },
   })
 
   if (!response.ok) {
@@ -607,6 +607,8 @@ function buildAiBookGeminiJsonPromptMessages({
         '所有关键条目必须带 evidence；如果不确定，写“推断”或“未知”。',
         'worldFacts 只记录可复用设定；不要写章节流水账。',
         'characters 只输出重要角色；relationships 只输出重要关系；locations 必须尽量给 parentName。',
+        '每类数组最多输出 8 条，evidence.note 控制在 30 字以内，quote 只在必要时填写。',
+        '必须输出紧凑 JSON，避免重复长句，避免超长字段。',
         '不要输出空白说明文字，不要包裹在代码块里。',
       ].join('\n'),
     },
@@ -1845,6 +1847,7 @@ function extractFirstJsonObject(content: string) {
   let depth = 0
   let inString = false
   let escaped = false
+  const closingStack: string[] = []
   for (let index = start; index < text.length; index += 1) {
     const char = text[index]
     if (inString) {
@@ -1862,15 +1865,151 @@ function extractFirstJsonObject(content: string) {
       inString = true
     } else if (char === '{') {
       depth += 1
+      closingStack.push('}')
+    } else if (char === '[') {
+      closingStack.push(']')
     } else if (char === '}') {
       depth -= 1
+      if (closingStack[closingStack.length - 1] === '}') closingStack.pop()
       if (depth === 0) {
         return text.slice(start, index + 1)
       }
+    } else if (char === ']') {
+      if (closingStack[closingStack.length - 1] === ']') closingStack.pop()
     }
   }
 
-  throw new Error('AI 资料生成结果 JSON 对象不完整')
+  return repairTruncatedJsonObject(text.slice(start), { inString, escaped, depth })
+}
+
+function repairTruncatedJsonObject(
+  content: string,
+  {
+    inString,
+    escaped,
+    depth,
+  }: {
+    inString: boolean
+    escaped: boolean
+    depth: number
+  },
+) {
+  if (depth <= 0) {
+    throw new Error('AI 资料生成结果 JSON 对象不完整')
+  }
+
+  let repaired = content.trimEnd()
+  if (escaped) {
+    repaired = repaired.slice(0, -1)
+  }
+  if (inString) {
+    repaired += '"'
+  }
+  repaired = closeTruncatedTopLevelArrays(repaired)
+  repaired = repaired.replace(/,\s*$/g, '').replace(/:\s*$/g, '')
+  repaired += [...collectJsonClosingStack(repaired)].reverse().join('')
+  return repaired.replace(/,\s*([}\]])/g, '$1')
+}
+
+const AI_BOOK_TOP_LEVEL_PATCH_KEYS = new Set([
+  'chapterDigest',
+  'summary',
+  'facts',
+  'worldFacts',
+  'characters',
+  'relationships',
+  'locations',
+  'mapChanges',
+  'shouldRegenerateMap',
+  'mapPrompt',
+])
+
+function closeTruncatedTopLevelArrays(content: string) {
+  let result = ''
+  let inString = false
+  let escaped = false
+  let objectDepth = 0
+  const closingStack: string[] = []
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index]
+    if (inString) {
+      result += char
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      result += char
+    } else if (char === '{') {
+      objectDepth += 1
+      closingStack.push('}')
+      result += char
+    } else if (char === '}') {
+      objectDepth = Math.max(0, objectDepth - 1)
+      if (closingStack[closingStack.length - 1] === '}') closingStack.pop()
+      result += char
+    } else if (char === '[') {
+      closingStack.push(']')
+      result += char
+    } else if (char === ']') {
+      if (closingStack[closingStack.length - 1] === ']') closingStack.pop()
+      result += char
+    } else if (char === ',' && objectDepth === 1 && closingStack[closingStack.length - 1] === ']') {
+      const nextKey = readJsonObjectKeyAfterComma(content, index)
+      if (nextKey && AI_BOOK_TOP_LEVEL_PATCH_KEYS.has(nextKey)) {
+        closingStack.pop()
+        result += ']'
+      }
+      result += char
+    } else {
+      result += char
+    }
+  }
+  return result
+}
+
+function readJsonObjectKeyAfterComma(content: string, commaIndex: number) {
+  const match = content.slice(commaIndex + 1).match(/^\s*"([^"\\]+)"\s*:/)
+  return match?.[1] || ''
+}
+
+function collectJsonClosingStack(content: string) {
+  let inString = false
+  let escaped = false
+  const closingStack: string[] = []
+  for (const char of content) {
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+    } else if (char === '{') {
+      closingStack.push('}')
+    } else if (char === '[') {
+      closingStack.push(']')
+    } else if ((char === '}' || char === ']') && closingStack[closingStack.length - 1] === char) {
+      closingStack.pop()
+    }
+  }
+  if (inString) {
+    return []
+  }
+  return closingStack
 }
 
 async function readModelError(response: Response, fallback: string) {

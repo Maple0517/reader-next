@@ -1035,6 +1035,121 @@ describe('aiBookGeneration', () => {
     expect(update.memory.summary).toBe('主角抵达北境。')
   })
 
+  it('repairs truncated direct JSON output with an open array from Gemini', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      if (fetchMock.mock.calls.length === 1) {
+        expect(body.body.tools).toEqual(expect.any(Array))
+        return {
+          ok: true,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: '' }] } }],
+          }),
+        }
+      }
+
+      expect(body.body.tools).toBeUndefined()
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{
+            content: {
+              parts: [{
+                text: '{"chapterDigest":{"chapterIndex":0,"chapterTitle":"第一章","digest":"林舟进入北境学院。","keyEvents":["林舟进入北境学院"]},"summary":{"current":"林舟进入北境学院。","recentChanges":[],"openQuestions":[]},"worldFacts":[{"category":"技术/魔法","title":"灵脉复苏","content":"灵脉复苏会改变城市能源规则。","confidence":"已知","importance":"high","evidence":[{"chapterIndex":0,"chapterTitle":"第一章","note":"导师沈月说明"}]},"characters":[],"relationships":[],"locations":[],"mapChanges":{"changed":false,"affectedLocationNames":[],"routeHints":[]}'
+              }],
+            },
+          }],
+        }),
+      }
+    })
+
+    await requestAiBookMemoryUpdate({
+      config: { ...readyConfig, modelSource: 'server' },
+      book: { name: '北境旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' },
+      chapter: { title: '第一章', url: 'chapter-1', index: 0 },
+      chapterContent: '林舟进入北境学院。',
+      memory: {
+        schemaVersion: 2,
+        bookUrl: 'book-1',
+        enabled: true,
+        updatedAt: 0,
+        summary: { current: '', recentChanges: [], openQuestions: [] },
+        chapterDigests: [],
+        arcs: [],
+        worldFacts: [],
+        characters: [],
+        relationships: [],
+        locations: [],
+        mapState: { dirty: false, nodes: [], edges: [] },
+        renderArtifacts: {},
+      },
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })
+  })
+
+  it('repairs truncated direct JSON output from Gemini', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      if (fetchMock.mock.calls.length === 1) {
+        expect(body.body.tools).toEqual(expect.any(Array))
+        return {
+          ok: true,
+          json: async () => ({
+            candidates: [{
+              content: { parts: [{ text: '' }] },
+            }],
+          }),
+        }
+      }
+
+      expect(body.body.tools).toBeUndefined()
+      expect(body.body.responseMimeType).toBe('application/json')
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{
+            content: {
+              parts: [{
+                text: '{"chapterDigest":{"chapterIndex":0,"chapterTitle":"第一章","digest":"林舟进入北境学院。","keyEvents":["林舟进入北境学院"]},"summary":{"current":"林舟进入北境学院。","recentChanges":[],"openQuestions":[]},"worldFacts":[],"characters":[],"relationships":[],"locations":[],"mapChanges":{"changed":false,"affectedLocationNames":[],"routeHints":[]}'
+              }],
+            },
+          }],
+        }),
+      }
+    })
+
+    const update = await requestAiBookMemoryUpdate({
+      config: {
+        ...readyConfig,
+        modelSource: 'server',
+      },
+      book: { name: '北境旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' },
+      chapter: { title: '第一章', url: 'chapter-1', index: 0 },
+      chapterContent: '林舟进入北境学院。',
+      memory: {
+        schemaVersion: 2,
+        bookUrl: 'book-1',
+        enabled: true,
+        updatedAt: 0,
+        summary: { current: '', recentChanges: [], openQuestions: [] },
+        chapterDigests: [],
+        arcs: [],
+        worldFacts: [],
+        characters: [],
+        relationships: [],
+        locations: [],
+        mapState: { dirty: false, nodes: [], edges: [] },
+        renderArtifacts: {},
+      },
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })
+
+    expect(isAiBookMemoryV2(update.memory)).toBe(true)
+    if (!isAiBookMemoryV2(update.memory)) throw new Error('expected v2 memory')
+    expect(update.memory.summary.current).toBe('林舟进入北境学院。')
+    expect(update.memory.chapterDigests[0]?.digest).toBe('林舟进入北境学院。')
+  })
+
   it('falls back to direct JSON generation when Gemini returns empty text without tool calls', async () => {
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body))
