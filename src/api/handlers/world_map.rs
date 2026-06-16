@@ -56,15 +56,12 @@ pub async fn get_world_map_spec(
     auth: AuthContext,
     Query(req): Query<WorldMapRequest>,
 ) -> Result<Json<ApiResponse<WorldMapSpec>>, AppError> {
-    let user_ns = auth
-        .user_ns
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("未登录".to_string()))?;
+    let user_ns = resolve_user_ns(&state, &auth).await?;
 
     let service = WorldMapBuilderService::new(&state.config.storage_dir);
 
     let spec = service
-        .load(user_ns, &req.book_url)
+        .load(&user_ns, &req.book_url)
         .await?
         .ok_or_else(|| AppError::NotFound("世界地图规格书不存在".to_string()))?;
 
@@ -77,15 +74,12 @@ pub async fn build_world_map(
     auth: AuthContext,
     Json(req): Json<BuildWorldMapRequest>,
 ) -> Result<Json<ApiResponse<WorldMapSpec>>, AppError> {
-    let user_ns = auth
-        .user_ns
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("未登录".to_string()))?;
+    let user_ns = resolve_user_ns(&state, &auth).await?;
 
     let service = WorldMapBuilderService::new(&state.config.storage_dir);
 
     let spec = service
-        .build_from_mock(user_ns, &req.book_url, &req.novel_title)
+        .build_from_mock(&user_ns, &req.book_url, &req.novel_title)
         .await?;
 
     Ok(Json(ApiResponse::ok(spec)))
@@ -97,16 +91,13 @@ pub async fn save_world_map_spec(
     auth: AuthContext,
     Json(spec): Json<WorldMapSpec>,
 ) -> Result<Json<ApiResponse<WorldMapSpec>>, AppError> {
-    let user_ns = auth
-        .user_ns
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("未登录".to_string()))?;
+    let user_ns = resolve_user_ns(&state, &auth).await?;
 
     let service = WorldMapBuilderService::new(&state.config.storage_dir);
 
     // 从 spec 中提取 book_url
     let book_url = &spec.metadata.novel_title;
-    service.save(user_ns, book_url, &spec).await?;
+    service.save(&user_ns, book_url, &spec).await?;
 
     Ok(Json(ApiResponse::ok(spec)))
 }
@@ -117,16 +108,13 @@ pub async fn update_world_map(
     auth: AuthContext,
     Json(req): Json<UpdateWorldMapRequest>,
 ) -> Result<Json<ApiResponse<UpdateWorldMapResponse>>, AppError> {
-    let user_ns = auth
-        .user_ns
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("未登录".to_string()))?;
+    let user_ns = resolve_user_ns(&state, &auth).await?;
 
     let service = WorldMapBuilderService::new(&state.config.storage_dir);
 
     // 加载现有 spec
     let existing = service
-        .load(user_ns, &req.book_url)
+        .load(&user_ns, &req.book_url)
         .await?
         .ok_or_else(|| AppError::NotFound("世界地图规格书不存在".to_string()))?;
 
@@ -151,15 +139,12 @@ pub async fn generate_coordinates(
     auth: AuthContext,
     Json(req): Json<GenerateCoordinatesRequest>,
 ) -> Result<Json<ApiResponse<WorldMapCoordinates>>, AppError> {
-    let user_ns = auth
-        .user_ns
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("未登录".to_string()))?;
+    let user_ns = resolve_user_ns(&state, &auth).await?;
 
     let service = WorldMapBuilderService::new(&state.config.storage_dir);
 
     let coords = service
-        .generate_coordinates(user_ns, &req.book_url)
+        .generate_coordinates(&user_ns, &req.book_url)
         .await?;
 
     Ok(Json(ApiResponse::ok(coords)))
@@ -171,14 +156,11 @@ pub async fn get_review_items(
     auth: AuthContext,
     Query(req): Query<WorldMapRequest>,
 ) -> Result<Json<ApiResponse<Vec<WorldMapReviewItem>>>, AppError> {
-    let user_ns = auth
-        .user_ns
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("未登录".to_string()))?;
+    let user_ns = resolve_user_ns(&state, &auth).await?;
 
     let service = WorldMapBuilderService::new(&state.config.storage_dir);
 
-    let items = service.get_review_items(user_ns, &req.book_url).await?;
+    let items = service.get_review_items(&user_ns, &req.book_url).await?;
 
     Ok(Json(ApiResponse::ok(items)))
 }
@@ -189,14 +171,19 @@ pub async fn resolve_review_item(
     auth: AuthContext,
     Json(req): Json<ResolveReviewRequest>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
-    let _user_ns = auth
-        .user_ns
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("未登录".to_string()))?;
+    let _user_ns = resolve_user_ns(&state, &auth).await?;
 
     // TODO: 实现修正逻辑
     Ok(Json(ApiResponse::ok(format!(
         "已标记审查项 {} 为 {}",
         req.item_id, req.resolution
     ))))
+}
+
+async fn resolve_user_ns(state: &AppState, auth: &AuthContext) -> Result<String, AppError> {
+    state
+        .user_service
+        .resolve_user_ns_with_override(auth.access_token(), auth.secure_key(), auth.user_ns())
+        .await
+        .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))
 }
