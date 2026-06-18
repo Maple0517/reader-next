@@ -12,44 +12,23 @@ cargo test                   # All tests
 cargo test --lib <test_name> # Single test
 ```
 
+### Local Dev
+- Default backend port is `18080`; check it before starting: `lsof -i :18080`.
+- If `18080` is occupied, use the next available port instead of reclaiming the process blindly.
+- Prefer explicit port override for local runs: `SERVER_PORT=18080 cargo run`.
+
 ### Frontend
 ```bash
 cd frontend && npm install && npm run dev    # Dev server
 cd frontend && npm run build                 # Builds to frontend/dist/
 ```
 
-### Docker
-```bash
-# Build ARM64 image (requires pre-built binary)
-cargo build --release --target aarch64-unknown-linux-musl
-podman build --platform linux/arm64 -t docker.io/givenge/reader-rust:${TAG}-aarch64 -f Dockerfile .
-
-# Build x86_64 image (requires pre-built binary)
-cargo build --release --target x86_64-unknown-linux-musl
-podman build --platform linux/amd64 -t docker.io/givenge/reader-rust:${TAG}-x86_64 -f Dockerfile.x86 .
-```
-
-Dockerfiles do NOT compile Rust in-container. Build the binary on the host first, then copy it.
-
-### Docker Release (Podman)
-- Default release repository: `docker.io/givenge/reader-rust`
-- Default rolling tags:
-- `latest` -> x86_64
-- `latest-aarch64` -> arm64
-- Build commands must explicitly set platform:
-- x86_64: `podman build --platform linux/amd64 ... -f Dockerfile.x86 .`
-- arm64: `podman build --platform linux/arm64 ... -f Dockerfile .`
-- For any “发布版本 / 发布docker镜像 / release版本” request, run `./scripts/release.sh` by default.
-- If user does not specify version, auto-bump patch from latest tag (`vX.Y.Z -> vX.Y.(Z+1)`).
-- Full end-to-end workflow is in `/RELEASE_WORKFLOW.md`.
-- Docker-specific details remain in `/DOCKER_RELEASE.md`.
-
 ## Configuration
 
 Loaded from `.env` file (via `dotenvy`) or environment variables. Separator is `__` for nested keys. See `.env.example` for all options.
 
 Key settings:
-- `SERVER_HOST` / `SERVER_PORT` — default `0.0.0.0:8080`
+- `SERVER_HOST` / `SERVER_PORT` — default `0.0.0.0:18080`
 - `DATABASE_URL` — SQLite path, default `sqlite:storage/reader.db?mode=rwc`
 - `WEB_ROOT` — static files path, default `frontend/dist`
 - `SECURE` / `SECURE_KEY` — security mode toggle
@@ -90,6 +69,6 @@ JSON objects with `bookSourceUrl`, `bookSourceName`, `searchUrl`/`exploreUrl` (w
 
 ## Important Notes
 
-- **Frontend app**: `frontend/` is the Vue 3 + Vite frontend. Docker images use `frontend/dist/`.
+- **Frontend app**: `frontend/` is the Vue 3 + Vite frontend; production static files come from `frontend/dist/`.
 - **`/storage/` is gitignored**: Contains user data and SQLite DB.
 - **No tests currently**: `cargo test` will pass but there are no test files written yet.
