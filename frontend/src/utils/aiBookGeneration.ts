@@ -1081,7 +1081,11 @@ export function applyMapFallbackToMemory(
 
 function coerceModelUpdate(raw: AiBookRawModelUpdate, previous: AiBookAnyMemory, book: Book, chapter: BookChapter): AiBookModelUpdate {
   if (isAiBookMemoryV2(previous)) {
-    return reconcileAiBookMemoryV2(previous, normalizeV2Patch(raw, chapter), book, chapter)
+    const patch = normalizeV2Patch(raw, chapter)
+    if (isEmptyV2Patch(patch)) {
+      throw new Error('AI 资料生成结果为空')
+    }
+    return reconcileAiBookMemoryV2(previous, patch, book, chapter)
   }
 
   const rawRecord = raw as unknown as UnknownRecord
@@ -1126,6 +1130,22 @@ function coerceModelUpdate(raw: AiBookRawModelUpdate, previous: AiBookAnyMemory,
     shouldRegenerateMap,
     mapPrompt: shouldRegenerateMap ? mapPrompt : undefined,
   }
+}
+
+function isEmptyV2Patch(patch: AiBookChapterKnowledgePatch) {
+  return !nonEmptyText(patch.chapterDigest.digest)
+    && !nonEmptyText(patch.summary?.current)
+    && !(patch.summary?.recentChanges || []).length
+    && !(patch.summary?.openQuestions || []).length
+    && !(patch.facts || []).length
+    && !(patch.worldFacts || []).length
+    && !(patch.characters || []).length
+    && !(patch.relationships || []).length
+    && !(patch.locations || []).length
+}
+
+function nonEmptyText(value: unknown) {
+  return typeof value === 'string' && value.trim().length > 0
 }
 
 function normalizeV2Patch(raw: AiBookRawModelUpdate, chapter: BookChapter): AiBookChapterKnowledgePatch {
