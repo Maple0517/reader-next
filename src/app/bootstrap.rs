@@ -10,7 +10,8 @@ use crate::parser::rule_engine::RuleEngine;
 use crate::service::{
     ai_book_service::AiBookService, ai_model_service::AiModelService,
     book_group_service::BookGroupService, book_service::BookService,
-    book_source_service::BookSourceService, json_document_service::JsonDocumentService,
+    book_source_service::BookSourceService, chapter_summary_service::ChapterSummaryService,
+    json_document_service::JsonDocumentService,
     local_txt_book::LocalTxtBookService, update_service::UpdateService, user_service::UserService,
 };
 use crate::storage::{cache::file_cache::FileCache, db, fs::storage_fs::StorageFs};
@@ -52,6 +53,7 @@ pub async fn run() -> anyhow::Result<()> {
         json_document_service.clone(),
         &cfg.storage_dir,
     ));
+    let chapter_summary_service = Arc::new(ChapterSummaryService::new(json_document_service.clone()));
     let update_service = Arc::new(UpdateService::new(
         json_document_service.clone(),
         cfg.request_timeout_secs,
@@ -68,6 +70,7 @@ pub async fn run() -> anyhow::Result<()> {
         json_document_service,
         ai_book_service,
         ai_model_service,
+        chapter_summary_service,
         update_service,
     };
 

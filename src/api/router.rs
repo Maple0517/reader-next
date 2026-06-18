@@ -225,6 +225,18 @@ pub fn build_router(state: AppState) -> Router {
             "/reader3/saveAiModelConfig",
             post(handlers::save_ai_model_config),
         )
+        .route(
+            "/reader3/chapterSummary",
+            get(handlers::get_chapter_summary),
+        )
+        .route(
+            "/reader3/chapterSummary/generate",
+            post(handlers::generate_chapter_summary),
+        )
+        .route(
+            "/reader3/chapterSummary/config",
+            get(handlers::get_chapter_summary_config).post(handlers::save_chapter_summary_config),
+        )
         .route("/reader3/aiProxy", post(handlers::ai_proxy))
         .route("/reader3/aiProxyImage", post(handlers::ai_proxy_image))
         .route("/reader3/getReplaceRules", get(handlers::get_replace_rules))

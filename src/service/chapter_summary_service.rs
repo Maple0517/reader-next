@@ -1,10 +1,16 @@
 use std::sync::Arc;
 
 use md5::{Digest, Md5};
+use reqwest::Client;
+use serde::Deserialize;
+use serde_json::{json, Value};
 
 use crate::error::error::AppError;
-use crate::model::chapter_summary::{ChapterSummaryConfig, ChapterSummaryRecord};
+use crate::model::ai_model::{AiModelConfig, AiModelKind};
+use crate::model::ai_proxy::build_ai_proxy_url;
+use crate::model::chapter_summary::{ChapterSummaryConfig, ChapterSummaryRecord, GenerateChapterSummaryRequest};
 use crate::service::json_document_service::JsonDocumentService;
+use crate::util::time::now_ts;
 
 const APP_NAMESPACE: &str = "__app__";
 const CONFIG_NAME: &str = "chapter-summary-config.json";
@@ -59,6 +65,114 @@ impl ChapterSummaryService {
         self.docs.set_value(user_ns, &name, &record).await?;
         Ok(record)
     }
+
+    pub fn validate_generation_input(
+        &self,
+        config: &ChapterSummaryConfig,
+        content: &str,
+    ) -> Result<(), AppError> {
+        if !config.enabled {
+            return Err(AppError::BadRequest("本章摘要功能未启用".to_string()));
+        }
+        if content.trim().is_empty() {
+            return Err(AppError::BadRequest("正文内容为空".to_string()));
+        }
+        if content.chars().count() < config.min_content_chars {
+            return Err(AppError::BadRequest("正文内容不足，未达到生成摘要的最短长度".to_string()));
+        }
+        Ok(())
+    }
+
+    pub async fn get_cached_if_allowed(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        chapter_url: &str,
+        force: bool,
+    ) -> Result<Option<ChapterSummaryRecord>, AppError> {
+        if force {
+            return Ok(None);
+        }
+        self.get_summary(user_ns, book_url, chapter_url).await
+    }
+
+    pub async fn generate_summary(
+        &self,
+        user_ns: &str,
+        req: GenerateChapterSummaryRequest,
+        ai_config: AiModelConfig,
+        client: &Client,
+    ) -> Result<ChapterSummaryRecord, AppError> {
+        let config = self.get_config().await?;
+        self.validate_generation_input(&config, &req.content)?;
+
+        if let Some(cached) = self
+            .get_cached_if_allowed(user_ns, &req.book_url, &req.chapter_url, req.force)
+            .await?
+        {
+            return Ok(cached);
+        }
+
+        let endpoint = ai_config.resolve(AiModelKind::Text);
+        if !endpoint.enabled || endpoint.base_url.trim().is_empty() || endpoint.model.trim().is_empty() {
+            return Err(AppError::BadRequest("后端文本模型未启用或配置不完整".to_string()));
+        }
+
+        let path = if endpoint.path.trim().is_empty() {
+            "/v1/chat/completions"
+        } else {
+            endpoint.path.trim()
+        };
+        let target = build_ai_proxy_url(&endpoint.base_url, path, endpoint.use_full_url)
+            .map_err(AppError::BadRequest)?;
+        let body = json!({
+            "model": endpoint.model,
+            "temperature": config.temperature,
+            "messages": [
+                { "role": "system", "content": config.prompt },
+                { "role": "user", "content": build_chapter_summary_user_prompt(&config, &req) }
+            ]
+        });
+
+        let mut builder = client
+            .post(target)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&body);
+        if !endpoint.api_key.trim().is_empty() {
+            builder = builder.bearer_auth(endpoint.api_key.trim());
+        }
+        let response = builder.send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AppError::BadRequest(format!(
+                "摘要模型请求失败: {} {}",
+                status,
+                text.chars().take(200).collect::<String>()
+            )));
+        }
+
+        let value: Value = response.json().await?;
+        let content = extract_chat_content(&value)?;
+        let parsed = parse_summary_payload(&content)?;
+        let now = now_ts();
+        let old = self.get_summary(user_ns, &req.book_url, &req.chapter_url).await?;
+        let created_at = old.as_ref().map(|v| v.created_at).unwrap_or(now);
+        let record = ChapterSummaryRecord {
+            book_url: req.book_url,
+            chapter_url: req.chapter_url,
+            chapter_index: req.chapter_index,
+            chapter_title: req.chapter_title,
+            summary: parsed.summary,
+            key_points: parsed.key_points,
+            questions: parsed.questions,
+            prompt_version: "default-v1".to_string(),
+            model: endpoint.model,
+            created_at,
+            updated_at: now,
+        };
+        self.save_summary(user_ns, record).await
+    }
 }
 
 fn summary_name(book_url: &str, chapter_url: &str) -> String {
@@ -69,12 +183,72 @@ fn summary_name(book_url: &str, chapter_url: &str) -> String {
     format!("{}-{:x}.json", SUMMARY_PREFIX, hasher.finalize())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelSummaryPayload {
+    summary: String,
+    #[serde(default)]
+    key_points: Vec<String>,
+    #[serde(default)]
+    questions: Vec<String>,
+}
+
+fn build_chapter_summary_user_prompt(
+    config: &ChapterSummaryConfig,
+    req: &GenerateChapterSummaryRequest,
+) -> String {
+    format!(
+        "书籍URL：{}\n章节：{}\n详细程度：{}\n最多{}字\n\n正文：\n{}",
+        req.book_url,
+        req.chapter_title.as_deref().unwrap_or("未命名章节"),
+        config.detail_level,
+        config.max_words,
+        trim_content_for_summary(&req.content)
+    )
+}
+
+fn trim_content_for_summary(content: &str) -> String {
+    const MAX_CHARS: usize = 12_000;
+    let count = content.chars().count();
+    if count <= MAX_CHARS {
+        return content.to_string();
+    }
+    let head: String = content.chars().take(8_000).collect();
+    let tail: String = content.chars().skip(count.saturating_sub(4_000)).collect();
+    format!("{}\n\n……中间内容已省略……\n\n{}", head, tail)
+}
+
+fn extract_chat_content(value: &Value) -> Result<String, AppError> {
+    value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| AppError::BadRequest("摘要模型返回内容为空".to_string()))
+}
+
+fn parse_summary_payload(content: &str) -> Result<ModelSummaryPayload, AppError> {
+    let trimmed = content.trim();
+    let json_text = if trimmed.starts_with("```") {
+        trimmed
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+    } else {
+        trimmed
+    };
+    serde_json::from_str::<ModelSummaryPayload>(json_text)
+        .map_err(|_| AppError::BadRequest("摘要模型返回 JSON 格式不正确".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::db;
     use crate::service::json_document_service::JsonDocumentService;
-    use crate::model::chapter_summary::ChapterSummaryRecord;
+    use crate::model::chapter_summary::{ChapterSummaryConfig, ChapterSummaryRecord};
     use uuid::Uuid;
     use std::sync::Arc;
     use tokio::fs;
@@ -100,6 +274,50 @@ mod tests {
         assert_eq!(config.temperature, 0.3);
         assert_eq!(config.min_content_chars, 300);
         assert!(config.prompt.contains("只总结用户提供的本章正文"));
+
+        let _ = fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_short_content() {
+        let (service, dir) = create_service().await;
+        let config = ChapterSummaryConfig { min_content_chars: 10, ..Default::default() };
+        let err = service.validate_generation_input(&config, "太短").unwrap_err();
+
+        assert!(err.to_string().contains("正文内容不足"));
+        let _ = fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn get_or_cached_summary_uses_cache_when_not_forced() {
+        let (service, dir) = create_service().await;
+        let record = ChapterSummaryRecord {
+            book_url: "book-a".to_string(),
+            chapter_url: "chapter-1".to_string(),
+            chapter_index: Some(1),
+            chapter_title: Some("第一章".to_string()),
+            summary: "缓存摘要".to_string(),
+            key_points: vec![],
+            questions: vec![],
+            prompt_version: "default-v1".to_string(),
+            model: "cached-model".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        service.save_summary("u1", record).await.unwrap();
+
+        let cached = service
+            .get_cached_if_allowed("u1", "book-a", "chapter-1", false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.summary, "缓存摘要");
+
+        let forced = service
+            .get_cached_if_allowed("u1", "book-a", "chapter-1", true)
+            .await
+            .unwrap();
+        assert!(forced.is_none());
 
         let _ = fs::remove_dir_all(dir).await;
     }
