@@ -64,10 +64,10 @@
             <button class="opt-btn" :class="{ active: config.enableChapterSummaryAuto }" @click="store.updateConfig('enableChapterSummaryAuto', true)">自动</button>
             <button class="opt-btn" :class="{ active: !config.enableChapterSummaryAuto }" @click="store.updateConfig('enableChapterSummaryAuto', false)">手动</button>
           </div>
-          <p class="chapter-summary-hint">进入章节后延迟生成；已有缓存不会重复消耗模型。</p>
 
           <details v-if="chapterSummaryConfig?.isAdmin" class="chapter-summary-advanced">
             <summary>高级配置</summary>
+            <p class="chapter-summary-hint">进入章节后延迟生成；已有缓存不会重复消耗模型。</p>
             <div class="chapter-summary-grid">
               <label>
                 功能启用
@@ -691,19 +691,19 @@ onMounted(async () => {
 }
 
 .chapter-summary-panel > .btn-group {
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .chapter-summary-hint {
-  margin: 0;
+  margin: 10px 0 0;
   font-size: 12px;
   opacity: 0.55;
-  text-align: right;
+  text-align: left;
   line-height: 1.5;
 }
 
 .chapter-summary-advanced {
-  align-self: flex-end;
+  align-self: flex-start;
   box-sizing: border-box;
 }
 
