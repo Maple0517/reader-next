@@ -644,7 +644,7 @@ onMounted(async () => {
   align-items: flex-start;
 }
 
-.setting-row label {
+.setting-row > label {
   min-width: 70px;
   font-size: 14px;
   font-weight: 500;
@@ -686,8 +686,12 @@ onMounted(async () => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  align-items: flex-end;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.chapter-summary-panel > .btn-group {
+  justify-content: flex-end;
 }
 
 .chapter-summary-hint {
@@ -702,7 +706,8 @@ onMounted(async () => {
   width: 100%;
   border: 1px solid rgba(128, 128, 128, 0.18);
   border-radius: 12px;
-  padding: 10px 12px;
+  padding: 12px;
+  box-sizing: border-box;
 }
 
 .chapter-summary-advanced summary {
@@ -741,7 +746,19 @@ onMounted(async () => {
 }
 
 .chapter-summary-prompt {
-  margin-top: 10px;
+  margin-top: 12px;
+}
+
+.chapter-summary-prompt textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.chapter-summary-advanced .opt-btn.wide {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
 }
 
 /* Theme swatches */
