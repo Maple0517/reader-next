@@ -35,9 +35,11 @@
     <!-- PC Desktop Toolbars (Always shown) -->
     <ReaderSidebar
       v-if="!isMobile"
+      :chapter-summary-auto="config.enableChapterSummaryAuto"
       @goHome="goHome"
       @scrollTop="scrollToTop"
       @scrollBottom="scrollToBottom"
+      @toggleChapterSummaryAuto="toggleChapterSummaryAuto"
     />
     <ReaderToolbar
       v-if="!isMobile"
@@ -1574,6 +1576,12 @@ async function openInfo() {
   } catch {
     appStore.showToast('获取书籍详情失败，已显示当前缓存信息', 'warning')
   }
+}
+
+function toggleChapterSummaryAuto() {
+  const next = !config.value.enableChapterSummaryAuto
+  store.updateConfig('enableChapterSummaryAuto', next)
+  appStore.showToast(next ? '已开启自动摘要' : '已关闭自动摘要', 'success')
 }
 
 function openAiBook() {
