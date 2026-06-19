@@ -163,6 +163,45 @@
         <div v-else>
           <div class="chapter-title">{{ store.currentChapter?.title || '加载中...' }}</div>
 
+          <section class="chapter-summary-card" :class="{ expanded: chapterSummaryExpanded }">
+            <button class="chapter-summary-header" @click="chapterSummaryExpanded = !chapterSummaryExpanded">
+              <span class="summary-kicker">AI 本章梗概</span>
+              <span v-if="chapterSummaryStatus === 'loading'" class="summary-muted">生成中…</span>
+              <span v-else-if="chapterSummary" class="summary-muted">{{ chapterSummaryExpanded ? '收起' : chapterSummaryPreview }}</span>
+              <span v-else-if="chapterSummaryError" class="summary-muted">{{ chapterSummaryError }}</span>
+              <span v-else class="summary-muted">可手动生成</span>
+            </button>
+
+            <div v-if="chapterSummaryExpanded" class="chapter-summary-body">
+              <p v-if="chapterSummary?.summary" class="summary-main">{{ chapterSummary.summary }}</p>
+              <div v-if="chapterSummary?.keyPoints.length" class="summary-list">
+                <strong>关键人物/线索</strong>
+                <ul>
+                  <li v-for="item in chapterSummary.keyPoints" :key="item">{{ item }}</li>
+                </ul>
+              </div>
+              <div v-if="chapterSummary?.questions.length" class="summary-list">
+                <strong>伏笔疑点</strong>
+                <ul>
+                  <li v-for="item in chapterSummary.questions" :key="item">{{ item }}</li>
+                </ul>
+              </div>
+              <p v-if="chapterSummaryStatus === 'error' && chapterSummaryError" class="summary-error">{{ chapterSummaryError }}</p>
+              <div class="summary-actions">
+                <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryForCurrentChapter(Boolean(chapterSummary))">
+                  {{ chapterSummary ? '重新生成' : '生成摘要' }}
+                </button>
+                <button v-if="chapterSummary" class="summary-action" @click.stop="copyChapterSummary">复制</button>
+              </div>
+            </div>
+
+            <div v-else-if="!chapterSummary" class="summary-actions compact">
+              <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryForCurrentChapter(false)">
+                {{ chapterSummaryStatus === 'loading' ? '生成中…' : '生成摘要' }}
+              </button>
+            </div>
+          </section>
+
           <div
             ref="chapterTextRef"
             class="chapter-text"
@@ -281,12 +320,14 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { getBookInfo } from '../api/bookshelf'
+import { getChapterSummary, generateChapterSummary } from '../api/chapterSummary'
 import { applySystemTheme } from '../utils/systemUi'
 import { countBrowserBookCache } from '../utils/browserCache'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
-import type { Book } from '../types'
+import { buildChapterSummaryIdentity, isCurrentChapterSummaryIdentity } from '../utils/chapterSummaryState'
+import type { Book, ChapterSummaryRecord } from '../types'
 
 import ReaderSidebar from '../components/reader/ReaderSidebar.vue'
 import ReaderToolbar from '../components/reader/ReaderToolbar.vue'
@@ -389,6 +430,12 @@ const bookInfoBook = ref<Book | null>(null)
 const showTTSPanel = ref(false)
 const ttsPanelDismissed = ref(false)
 const offlineCachedCount = ref(0)
+const chapterSummary = ref<ChapterSummaryRecord | null>(null)
+const chapterSummaryStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+const chapterSummaryError = ref('')
+const chapterSummaryExpanded = ref(false)
+let chapterSummaryTimer: number | null = null
+let chapterSummaryRequestId = 0
 const speechTimerNow = ref(Date.now())
 const speechTimerText = computed(() => {
   if (!store.speechStopAt) return ''
@@ -445,6 +492,107 @@ const offlineBannerText = computed(() => {
   }
   return '离线模式：当前书尚未缓存到浏览器，未缓存章节将无法打开'
 })
+
+const currentChapterSummaryIdentity = computed(() => buildChapterSummaryIdentity(
+  store.book?.bookUrl,
+  store.currentChapter?.url,
+  store.currentIndex,
+))
+
+const chapterSummaryPreview = computed(() => {
+  const text = chapterSummary.value?.summary.trim() || ''
+  return text.length > 64 ? `${text.slice(0, 64)}…` : text
+})
+
+function clearChapterSummaryTimer() {
+  if (!chapterSummaryTimer) return
+  window.clearTimeout(chapterSummaryTimer)
+  chapterSummaryTimer = null
+}
+
+function resetChapterSummaryState() {
+  clearChapterSummaryTimer()
+  chapterSummary.value = null
+  chapterSummaryStatus.value = 'idle'
+  chapterSummaryError.value = ''
+  chapterSummaryExpanded.value = false
+}
+
+async function loadChapterSummaryForCurrentChapter() {
+  const bookUrl = store.book?.bookUrl
+  const chapterUrl = store.currentChapter?.url
+  if (!bookUrl || !chapterUrl) {
+    resetChapterSummaryState()
+    return
+  }
+
+  const identity = currentChapterSummaryIdentity.value
+  const requestId = ++chapterSummaryRequestId
+  chapterSummaryError.value = ''
+  try {
+    const res = await getChapterSummary(bookUrl, chapterUrl)
+    if (requestId !== chapterSummaryRequestId || !isCurrentChapterSummaryIdentity(currentChapterSummaryIdentity.value, identity)) return
+    chapterSummary.value = res.summary
+    chapterSummaryStatus.value = res.summary ? 'ready' : 'idle'
+    if (!res.summary) scheduleAutoChapterSummary(identity)
+  } catch (error) {
+    if (requestId !== chapterSummaryRequestId) return
+    chapterSummaryStatus.value = 'error'
+    chapterSummaryError.value = (error as Error).message || '摘要加载失败'
+  }
+}
+
+function scheduleAutoChapterSummary(identity: string) {
+  clearChapterSummaryTimer()
+  if (!config.value.enableChapterSummaryAuto) return
+  if (isContinuousMode.value || isHorizontalPageMode.value) return
+  if (!store.displayContent || store.displayContent.trim().length < 300) return
+  chapterSummaryTimer = window.setTimeout(() => {
+    if (!isCurrentChapterSummaryIdentity(currentChapterSummaryIdentity.value, identity)) return
+    void generateChapterSummaryForCurrentChapter(false)
+  }, 1500)
+}
+
+async function generateChapterSummaryForCurrentChapter(force: boolean) {
+  const bookUrl = store.book?.bookUrl
+  const chapter = store.currentChapter
+  if (!bookUrl || !chapter?.url || !store.displayContent.trim()) return
+
+  const identity = currentChapterSummaryIdentity.value
+  const requestId = ++chapterSummaryRequestId
+  clearChapterSummaryTimer()
+  chapterSummaryStatus.value = 'loading'
+  chapterSummaryError.value = ''
+  try {
+    const res = await generateChapterSummary({
+      bookUrl,
+      chapterUrl: chapter.url,
+      chapterIndex: store.currentIndex,
+      chapterTitle: chapter.title,
+      content: store.displayContent,
+      force,
+    })
+    if (requestId !== chapterSummaryRequestId || !isCurrentChapterSummaryIdentity(currentChapterSummaryIdentity.value, identity)) return
+    chapterSummary.value = res.summary
+    chapterSummaryStatus.value = res.summary ? 'ready' : 'idle'
+    chapterSummaryExpanded.value = Boolean(res.summary)
+  } catch (error) {
+    if (requestId !== chapterSummaryRequestId) return
+    chapterSummaryStatus.value = chapterSummary.value ? 'ready' : 'error'
+    chapterSummaryError.value = (error as Error).message || '摘要生成失败'
+  }
+}
+
+function copyChapterSummary() {
+  if (!chapterSummary.value) return
+  const text = [
+    chapterSummary.value.summary,
+    chapterSummary.value.keyPoints.length ? `关键人物/线索：${chapterSummary.value.keyPoints.join('；')}` : '',
+    chapterSummary.value.questions.length ? `伏笔疑点：${chapterSummary.value.questions.join('；')}` : '',
+  ].filter(Boolean).join('\n')
+  void navigator.clipboard?.writeText(text)
+  appStore.showToast('摘要已复制', 'success')
+}
 
 async function refreshOfflineCacheState() {
   if (!store.book) {
@@ -1581,6 +1729,11 @@ async function openInfo() {
 function toggleChapterSummaryAuto() {
   const next = !config.value.enableChapterSummaryAuto
   store.updateConfig('enableChapterSummaryAuto', next)
+  if (next && !chapterSummary.value && chapterSummaryStatus.value !== 'loading') {
+    scheduleAutoChapterSummary(currentChapterSummaryIdentity.value)
+  } else if (!next) {
+    clearChapterSummaryTimer()
+  }
   appStore.showToast(next ? '已开启自动摘要' : '已关闭自动摘要', 'success')
 }
 
@@ -1593,6 +1746,7 @@ function openAiBook() {
 }
 
 onBeforeRouteLeave(() => {
+  clearChapterSummaryTimer()
   persistReadingProgressKeepalive()
   return true
 })
@@ -1641,6 +1795,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+    clearChapterSummaryTimer()
     persistReadingProgressKeepalive()
     appStore.stopReadingSession()
     window.removeEventListener('keydown', handleKeydown)
@@ -1700,6 +1855,15 @@ watch(() => store.currentIndex, () => {
   rebuildHorizontalPages()
   updateHorizontalEndState()
 })
+
+watch(
+  () => [store.book?.bookUrl, store.currentChapter?.url, store.currentIndex, store.displayContent] as const,
+  () => {
+    resetChapterSummaryState()
+    void loadChapterSummaryForCurrentChapter()
+  },
+  { immediate: true },
+)
 
 watch(
   [() => store.content, () => config.value.fontSize, () => config.value.fontWeight, () => config.value.lineHeight, () => config.value.paragraphSpacing, () => config.value.firstLineIndent, showSearch, searchQuery],
@@ -1961,6 +2125,101 @@ watch(
   margin-bottom: 2em;
   text-align: center;
   line-height: 1.4;
+}
+
+.chapter-summary-card {
+  margin: -14px 0 24px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.035);
+}
+
+.chapter-summary-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.summary-kicker {
+  flex: 0 0 auto;
+  color: var(--color-primary, #c97f3a);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.summary-muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.62;
+  font-size: 13px;
+}
+
+.chapter-summary-body {
+  margin-top: 12px;
+  font-size: 0.92em;
+  line-height: 1.7;
+}
+
+.summary-main {
+  margin: 0 0 12px;
+}
+
+.summary-list {
+  margin-top: 10px;
+}
+
+.summary-list strong {
+  color: var(--color-primary, #c97f3a);
+  font-size: 13px;
+}
+
+.summary-list ul {
+  margin: 6px 0 0 1.2em;
+  padding: 0;
+}
+
+.summary-error {
+  margin: 10px 0 0;
+  color: #d25f4f;
+  font-size: 13px;
+}
+
+.summary-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.summary-actions.compact {
+  margin-top: 10px;
+}
+
+.summary-action {
+  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 45%, transparent);
+  border-radius: 999px;
+  padding: 5px 12px;
+  color: var(--color-primary, #c97f3a);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.summary-action:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .chapter-text {
