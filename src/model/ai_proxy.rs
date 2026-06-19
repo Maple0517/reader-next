@@ -94,7 +94,11 @@ fn parse_ai_proxy_path(raw: &str) -> Result<ParsedAiProxyPath, String> {
     }
 
     let url = Url::parse(&format!("http://reader.local{trimmed}")).map_err(|e| e.to_string())?;
-    let path = url.path().to_string();
+    let mut path = url.path().to_string();
+    if path == "/v1/response" {
+        // ponytail: tolerate common Responses API typo from saved/browser configs.
+        path = "/v1/responses".to_string();
+    }
     if path
         .split('/')
         .any(|segment| segment == "." || segment == "..")

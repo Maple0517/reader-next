@@ -23,6 +23,13 @@ fn ai_proxy_url_allows_known_model_paths() {
         "https://api.example.test/v1/responses"
     );
 
+    let response_typo_url =
+        build_ai_proxy_url("https://api.example.test/", "/v1/response", false).unwrap();
+    assert_eq!(
+        response_typo_url.as_str(),
+        "https://api.example.test/v1/responses"
+    );
+
     let claude_url =
         build_ai_proxy_url("https://api.anthropic.com/", "/v1/messages", false).unwrap();
     assert_eq!(claude_url.as_str(), "https://api.anthropic.com/v1/messages");
