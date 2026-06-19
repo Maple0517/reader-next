@@ -246,6 +246,21 @@ fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> 
                 return Ok(text.to_string());
             }
         }
+        let text = value
+            .get("output")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("content").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return Ok(text);
+        }
     }
 
     value
@@ -372,6 +387,18 @@ mod tests {
         )
         .unwrap();
         assert!(content.contains("\"summary\":\"ok\""));
+
+        let nested = extract_model_content(
+            "/v1/responses",
+            &json!({
+                "output": [{
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "{\"summary\":\"nested\",\"keyPoints\":[],\"questions\":[]}" }]
+                }]
+            }),
+        )
+        .unwrap();
+        assert!(nested.contains("\"summary\":\"nested\""));
     }
 
     #[tokio::test]
