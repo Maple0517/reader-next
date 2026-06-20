@@ -57,64 +57,6 @@
         </div>
       </div>
 
-      <div class="setting-row setting-row-top chapter-summary-settings">
-        <label>摘要</label>
-        <div class="chapter-summary-panel">
-          <div class="btn-group">
-            <button class="opt-btn" :class="{ active: config.enableChapterSummaryAuto }" @click="store.updateConfig('enableChapterSummaryAuto', true)">自动</button>
-            <button class="opt-btn" :class="{ active: !config.enableChapterSummaryAuto }" @click="store.updateConfig('enableChapterSummaryAuto', false)">手动</button>
-          </div>
-
-          <details v-if="chapterSummaryConfig?.isAdmin" class="chapter-summary-advanced">
-            <summary>高级配置</summary>
-            <p class="chapter-summary-hint">进入章节后延迟生成；已有缓存不会重复消耗模型。</p>
-            <div class="chapter-summary-grid">
-              <label>
-                功能启用
-                <select v-model="chapterSummaryDraft.enabledText">
-                  <option value="true">启用</option>
-                  <option value="false">关闭</option>
-                </select>
-              </label>
-              <label>
-                默认自动
-                <select v-model="chapterSummaryDraft.autoEnabledDefaultText">
-                  <option value="true">自动</option>
-                  <option value="false">手动</option>
-                </select>
-              </label>
-              <label>
-                详细程度
-                <select v-model="chapterSummaryDraft.detailLevel">
-                  <option value="short">简短</option>
-                  <option value="normal">正常</option>
-                  <option value="detailed">详细</option>
-                </select>
-              </label>
-              <label>
-                最大字数
-                <input v-model.number="chapterSummaryDraft.maxWords" type="number" min="80" max="600">
-              </label>
-              <label>
-                Temperature
-                <input v-model.number="chapterSummaryDraft.temperature" type="number" min="0" max="1.5" step="0.1">
-              </label>
-              <label>
-                最短正文
-                <input v-model.number="chapterSummaryDraft.minContentChars" type="number" min="0" max="5000">
-              </label>
-            </div>
-            <label class="chapter-summary-prompt">
-              Prompt
-              <textarea v-model="chapterSummaryDraft.prompt" rows="4"></textarea>
-            </label>
-            <button class="opt-btn wide" :disabled="savingChapterSummaryConfig" @click="saveChapterSummarySettings">
-              {{ savingChapterSummaryConfig ? '保存中...' : '保存摘要配置' }}
-            </button>
-          </details>
-        </div>
-      </div>
-
       <!-- 字体大小 -->
       <div class="setting-row">
         <label>字体大小</label>
@@ -452,12 +394,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useReaderStore, themePresets, fontPresets } from '../../stores/reader'
 import { useAiBookStore } from '../../stores/aiBook'
 import { useAppStore } from '../../stores/app'
-import { getChapterSummaryConfig, saveChapterSummaryConfig } from '../../api/chapterSummary'
-import type { ChapterSummaryConfigResponse } from '../../types'
 
 const store = useReaderStore()
 const aiBookStore = useAiBookStore()
@@ -466,59 +406,6 @@ const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
 const serverModelLoaded = ref(false)
 const canUseServerModel = computed(() => Boolean(aiBookStore.serverModelConfig?.canUseServerModel))
-
-const chapterSummaryConfig = ref<ChapterSummaryConfigResponse | null>(null)
-const savingChapterSummaryConfig = ref(false)
-const chapterSummaryDraft = reactive({
-  enabledText: 'true',
-  autoEnabledDefaultText: 'true',
-  detailLevel: 'normal' as 'short' | 'normal' | 'detailed',
-  maxWords: 300,
-  temperature: 0.3,
-  minContentChars: 300,
-  prompt: '',
-})
-
-function applyChapterSummaryDraft(response: ChapterSummaryConfigResponse) {
-  chapterSummaryConfig.value = response
-  chapterSummaryDraft.enabledText = response.config.enabled ? 'true' : 'false'
-  chapterSummaryDraft.autoEnabledDefaultText = response.config.autoEnabledDefault ? 'true' : 'false'
-  chapterSummaryDraft.detailLevel = response.config.detailLevel
-  chapterSummaryDraft.maxWords = response.config.maxWords
-  chapterSummaryDraft.temperature = response.config.temperature
-  chapterSummaryDraft.minContentChars = response.config.minContentChars
-  chapterSummaryDraft.prompt = response.config.prompt
-}
-
-async function loadChapterSummarySettings() {
-  try {
-    applyChapterSummaryDraft(await getChapterSummaryConfig())
-  } catch {
-    chapterSummaryConfig.value = null
-  }
-}
-
-async function saveChapterSummarySettings() {
-  if (!chapterSummaryConfig.value?.isAdmin) return
-  savingChapterSummaryConfig.value = true
-  try {
-    const saved = await saveChapterSummaryConfig({
-      enabled: chapterSummaryDraft.enabledText === 'true',
-      autoEnabledDefault: chapterSummaryDraft.autoEnabledDefaultText === 'true',
-      detailLevel: chapterSummaryDraft.detailLevel,
-      maxWords: Number(chapterSummaryDraft.maxWords) || 300,
-      temperature: Number(chapterSummaryDraft.temperature) || 0.3,
-      minContentChars: Number(chapterSummaryDraft.minContentChars) || 300,
-      prompt: chapterSummaryDraft.prompt,
-    })
-    applyChapterSummaryDraft(saved)
-    appStore.showToast('摘要配置已保存', 'success')
-  } catch (error) {
-    appStore.showToast((error as Error).message || '摘要配置保存失败', 'error')
-  } finally {
-    savingChapterSummaryConfig.value = false
-  }
-}
 
 function step(key: 'fontSize' | 'fontWeight' | 'pageWidth' | 'animateDuration' | 'scrollPixel' | 'pageSpeed', delta: number, min: number, max: number) {
   const val = Math.max(min, Math.min(max, (config.value[key] as number) + delta))
@@ -564,10 +451,7 @@ async function selectOpenAISpeechSource(source: 'browser' | 'server') {
 
 onMounted(async () => {
   store.fetchVoices()
-  await Promise.all([
-    aiBookStore.loadServerModelConfig({ force: true }),
-    loadChapterSummarySettings(),
-  ])
+  await aiBookStore.loadServerModelConfig({ force: true })
   serverModelLoaded.value = true
   if (store.speechConfig.openaiSource === 'server' && !canUseServerModel.value) {
     store.setOpenAISpeechSource('browser')
@@ -583,6 +467,7 @@ onMounted(async () => {
   padding: 24px;
   transition: background 0.3s, color 0.3s;
   -webkit-overflow-scrolling: touch;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
 }
 
 .settings-header {
@@ -679,91 +564,6 @@ onMounted(async () => {
   font-size: 12px;
   line-height: 1.6;
   color: inherit;
-}
-
-
-.chapter-summary-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  align-items: stretch;
-}
-
-.chapter-summary-panel > .btn-group {
-  justify-content: flex-start;
-}
-
-.chapter-summary-hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  opacity: 0.55;
-  text-align: left;
-  line-height: 1.5;
-}
-
-.chapter-summary-advanced {
-  align-self: flex-start;
-  box-sizing: border-box;
-}
-
-.chapter-summary-advanced[open] {
-  width: 100%;
-  border: 1px solid rgba(128, 128, 128, 0.18);
-  border-radius: 12px;
-  padding: 12px;
-}
-
-.chapter-summary-advanced summary {
-  cursor: pointer;
-  color: var(--color-primary, #c97f3a);
-  font-size: 13px;
-  font-weight: 600;
-  list-style-position: inside;
-}
-
-.chapter-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.chapter-summary-grid label,
-.chapter-summary-prompt {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  font-size: 12px;
-  opacity: 0.85;
-}
-
-.chapter-summary-grid input,
-.chapter-summary-grid select,
-.chapter-summary-prompt textarea {
-  width: 100%;
-  border: 1px solid rgba(128, 128, 128, 0.22);
-  border-radius: 8px;
-  padding: 7px 9px;
-  background: transparent;
-  color: inherit;
-}
-
-.chapter-summary-prompt {
-  margin-top: 12px;
-}
-
-.chapter-summary-prompt textarea {
-  min-height: 120px;
-  resize: vertical;
-}
-
-.chapter-summary-advanced .opt-btn.wide {
-  width: 100%;
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: 12px;
 }
 
 /* Theme swatches */

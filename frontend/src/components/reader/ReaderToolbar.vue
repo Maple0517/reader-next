@@ -91,7 +91,7 @@ defineEmits<{
 <style scoped>
 .reader-toolbar {
   position: fixed;
-  right: 16px;
+  right: calc(16px + var(--reader-summary-sider-width, 0px));
   top: 50%;
   transform: translateY(-50%);
   z-index: 20;

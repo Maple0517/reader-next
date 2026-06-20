@@ -8,7 +8,10 @@ use serde_json::{json, Value};
 use crate::error::error::AppError;
 use crate::model::ai_model::{AiModelConfig, AiModelKind};
 use crate::model::ai_proxy::{ai_proxy_timeout, build_ai_proxy_url};
-use crate::model::chapter_summary::{ChapterSummaryConfig, ChapterSummaryRecord, GenerateChapterSummaryRequest};
+use crate::model::chapter_summary::{
+    ChapterSummaryConfig, ChapterSummaryContextChapter, ChapterSummaryRecord,
+    GenerateChapterSummaryRequest,
+};
 use crate::service::json_document_service::JsonDocumentService;
 use crate::util::time::now_ts;
 
@@ -35,9 +38,14 @@ impl ChapterSummaryService {
         Ok(ChapterSummaryConfig::default().sanitized())
     }
 
-    pub async fn save_config(&self, config: ChapterSummaryConfig) -> Result<ChapterSummaryConfig, AppError> {
+    pub async fn save_config(
+        &self,
+        config: ChapterSummaryConfig,
+    ) -> Result<ChapterSummaryConfig, AppError> {
         let config = config.sanitized();
-        self.docs.set_value(APP_NAMESPACE, CONFIG_NAME, &config).await?;
+        self.docs
+            .set_value(APP_NAMESPACE, CONFIG_NAME, &config)
+            .await?;
         Ok(config)
     }
 
@@ -78,7 +86,9 @@ impl ChapterSummaryService {
             return Err(AppError::BadRequest("正文内容为空".to_string()));
         }
         if content.chars().count() < config.min_content_chars {
-            return Err(AppError::BadRequest("正文内容不足，未达到生成摘要的最短长度".to_string()));
+            return Err(AppError::BadRequest(
+                "正文内容不足，未达到生成摘要的最短长度".to_string(),
+            ));
         }
         Ok(())
     }
@@ -114,8 +124,13 @@ impl ChapterSummaryService {
         }
 
         let endpoint = ai_config.resolve(AiModelKind::Text);
-        if !endpoint.enabled || endpoint.base_url.trim().is_empty() || endpoint.model.trim().is_empty() {
-            return Err(AppError::BadRequest("后端文本模型未启用或配置不完整".to_string()));
+        if !endpoint.enabled
+            || endpoint.base_url.trim().is_empty()
+            || endpoint.model.trim().is_empty()
+        {
+            return Err(AppError::BadRequest(
+                "后端文本模型未启用或配置不完整".to_string(),
+            ));
         }
 
         let path = if endpoint.path.trim().is_empty() {
@@ -127,7 +142,16 @@ impl ChapterSummaryService {
             .map_err(AppError::BadRequest)?;
         let use_gemini_api_key_header = is_gemini_generate_content_path(path)
             && target.host_str() == Some("generativelanguage.googleapis.com");
-        let body = build_summary_model_body(path, &endpoint.model, &config, &req);
+        let previous_context = self
+            .load_previous_summary_context(
+                user_ns,
+                &req.book_url,
+                req.chapter_index,
+                &req.previous_chapters,
+            )
+            .await?;
+        let body =
+            build_summary_model_body(path, &endpoint.model, &config, &req, &previous_context);
 
         let model_client = Client::builder().timeout(ai_proxy_timeout()).build()?;
         let mut builder = model_client
@@ -156,7 +180,9 @@ impl ChapterSummaryService {
         let content = extract_model_content(path, &value)?;
         let parsed = parse_summary_payload(&content)?;
         let now = now_ts();
-        let old = self.get_summary(user_ns, &req.book_url, &req.chapter_url).await?;
+        let old = self
+            .get_summary(user_ns, &req.book_url, &req.chapter_url)
+            .await?;
         let created_at = old.as_ref().map(|v| v.created_at).unwrap_or(now);
         let record = ChapterSummaryRecord {
             book_url: req.book_url,
@@ -165,13 +191,61 @@ impl ChapterSummaryService {
             chapter_title: req.chapter_title,
             summary: parsed.summary,
             key_points: parsed.key_points,
-            questions: parsed.questions,
             prompt_version: "default-v1".to_string(),
             model: endpoint.model,
             created_at,
             updated_at: now,
         };
         self.save_summary(user_ns, record).await
+    }
+
+    async fn load_previous_summary_context(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        current_chapter_index: Option<i32>,
+        previous_chapters: &[ChapterSummaryContextChapter],
+    ) -> Result<Vec<PreviousChapterSummaryContext>, AppError> {
+        let mut context = Vec::new();
+        for chapter in previous_chapters
+            .iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            if chapter.chapter_url.trim().is_empty() {
+                continue;
+            }
+            if let (Some(current), Some(candidate)) = (current_chapter_index, chapter.chapter_index)
+            {
+                if candidate >= current {
+                    continue;
+                }
+            }
+            let Some(record) = self
+                .get_summary(user_ns, book_url, &chapter.chapter_url)
+                .await?
+            else {
+                continue;
+            };
+            if let (Some(current), Some(candidate)) = (current_chapter_index, record.chapter_index)
+            {
+                if candidate >= current {
+                    continue;
+                }
+            }
+            context.push(PreviousChapterSummaryContext {
+                chapter_index: record.chapter_index.or(chapter.chapter_index),
+                chapter_title: record
+                    .chapter_title
+                    .or_else(|| chapter.chapter_title.clone()),
+                summary: record.summary,
+                key_points: record.key_points,
+            });
+        }
+        Ok(context)
     }
 }
 
@@ -189,22 +263,81 @@ struct ModelSummaryPayload {
     summary: String,
     #[serde(default)]
     key_points: Vec<String>,
-    #[serde(default)]
-    questions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PreviousChapterSummaryContext {
+    chapter_index: Option<i32>,
+    chapter_title: Option<String>,
+    summary: String,
+    key_points: Vec<String>,
 }
 
 fn build_chapter_summary_user_prompt(
     config: &ChapterSummaryConfig,
     req: &GenerateChapterSummaryRequest,
+    previous_context: &[PreviousChapterSummaryContext],
 ) -> String {
+    let previous = format_previous_summary_context(previous_context);
     format!(
-        "书籍URL：{}\n章节：{}\n详细程度：{}\n最多{}字\n\n正文：\n{}",
+        "书籍URL：{}\n章节：{}\n{}\n最多{}字\n\n{}\n正文：\n{}",
         req.book_url,
         req.chapter_title.as_deref().unwrap_or("未命名章节"),
-        config.detail_level,
+        chapter_summary_detail_instruction(&config.detail_level),
         config.max_words,
+        previous,
         trim_content_for_summary(&req.content)
     )
+}
+
+fn chapter_summary_detail_instruction(detail_level: &str) -> &'static str {
+    match detail_level {
+        "short" => "详细程度：短。摘要控制在80-150字，要点2-4条，只保留主线变化。",
+        "detailed" => {
+            "详细程度：详细。摘要可接近字数上限，要点5-8条，保留人物动机、关系变化和关键信息。"
+        }
+        _ => "详细程度：正常。摘要控制在150-300字，要点3-6条，兼顾主线和后续需记住的信息。",
+    }
+}
+
+fn format_previous_summary_context(previous_context: &[PreviousChapterSummaryContext]) -> String {
+    if previous_context.is_empty() {
+        return "前文缓存摘要：无。".to_string();
+    }
+    let mut total_chars = 0usize;
+    let mut lines =
+        vec!["前文缓存摘要（只作轻量上下文，不要重复总结；不要推断下一章）：".to_string()];
+    for item in previous_context {
+        if total_chars >= 1_200 {
+            break;
+        }
+        let title = item
+            .chapter_title
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or("未命名章节");
+        let prefix = item
+            .chapter_index
+            .map(|idx| format!("第{}章 {}", idx + 1, title))
+            .unwrap_or_else(|| title.to_string());
+        let points = item.key_points.join("；");
+        let mut text = if points.is_empty() {
+            format!("- {}：{}", prefix, item.summary)
+        } else {
+            format!("- {}：{} 读前记住：{}", prefix, item.summary, points)
+        };
+        text = take_chars(&text, 260);
+        total_chars += text.chars().count();
+        lines.push(text);
+    }
+    lines.join("\n")
+}
+
+fn take_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    format!("{}…", text.chars().take(max_chars).collect::<String>())
 }
 
 fn trim_content_for_summary(content: &str) -> String {
@@ -223,8 +356,9 @@ fn build_summary_model_body(
     model: &str,
     config: &ChapterSummaryConfig,
     req: &GenerateChapterSummaryRequest,
+    previous_context: &[PreviousChapterSummaryContext],
 ) -> Value {
-    let user_prompt = build_chapter_summary_user_prompt(config, req);
+    let user_prompt = build_chapter_summary_user_prompt(config, req, previous_context);
     if is_gemini_generate_content_path(path) {
         return json!({
             "contents": [
@@ -276,7 +410,11 @@ fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> 
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|candidate| candidate.pointer("/content/parts").and_then(Value::as_array))
+            .filter_map(|candidate| {
+                candidate
+                    .pointer("/content/parts")
+                    .and_then(Value::as_array)
+            })
             .flatten()
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .map(str::trim)
@@ -344,7 +482,9 @@ fn is_gemini_generate_content_path(path: &str) -> bool {
 }
 
 fn is_anthropic_messages_path(path: &str) -> bool {
-    path.split('?').next().is_some_and(|path| path.ends_with("/v1/messages"))
+    path.split('?')
+        .next()
+        .is_some_and(|path| path.ends_with("/v1/messages"))
 }
 
 fn parse_summary_payload(content: &str) -> Result<ModelSummaryPayload, AppError> {
@@ -365,20 +505,113 @@ fn parse_summary_payload(content: &str) -> Result<ModelSummaryPayload, AppError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::db;
-    use crate::service::json_document_service::JsonDocumentService;
     use crate::model::chapter_summary::{ChapterSummaryConfig, ChapterSummaryRecord};
-    use uuid::Uuid;
+    use crate::service::json_document_service::JsonDocumentService;
+    use crate::storage::db;
     use std::sync::Arc;
     use tokio::fs;
+    use uuid::Uuid;
 
     async fn create_service() -> (ChapterSummaryService, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("reader-chapter-summary-test-{}", Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("reader-chapter-summary-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
         let pool = db::init_pool(&database_url).await.unwrap();
         let docs = Arc::new(JsonDocumentService::new(pool, dir.to_str().unwrap()));
         (ChapterSummaryService::new(docs), dir)
+    }
+
+    #[test]
+    fn default_prompt_outputs_only_summary_and_key_points() {
+        let prompt = crate::model::chapter_summary::default_chapter_summary_prompt();
+
+        assert!(prompt.contains("\"summary\""));
+        assert!(prompt.contains("\"keyPoints\""));
+        assert!(!prompt.contains("150-300字本章梗概"));
+        assert!(!prompt.contains("questions"));
+        assert!(!prompt.contains("疑点"));
+    }
+
+    #[test]
+    fn legacy_question_prompt_is_replaced_by_new_default() {
+        let config = ChapterSummaryConfig {
+            prompt: "你是小说阅读助手。只总结用户提供的本章正文，不预测未读内容。使用简体中文，输出 JSON：{\"summary\":\"梗概\",\"keyPoints\":[\"关键人物或线索\"],\"questions\":[\"伏笔疑点\"]}。".to_string(),
+            ..Default::default()
+        }
+        .sanitized();
+
+        assert!(config.prompt.contains("\"summary\""));
+        assert!(config.prompt.contains("\"keyPoints\""));
+        assert!(!config.prompt.contains("questions"));
+        assert!(!config.prompt.contains("伏笔疑点"));
+    }
+
+    #[test]
+    fn old_fixed_length_prompt_is_replaced_by_detail_aware_default() {
+        let config = ChapterSummaryConfig {
+            prompt: "你是小说阅读助手。严格只输出 JSON：{\"summary\":\"150-300字本章梗概\",\"keyPoints\":[\"读者后续需要记住的关键人物、关系、目标、地点、物品或已揭示信息\"]}。".to_string(),
+            ..Default::default()
+        }
+        .sanitized();
+
+        assert!(config
+            .prompt
+            .contains("摘要长度和要点数量按用户消息里的详细程度执行"));
+        assert!(!config.prompt.contains("150-300字本章梗概"));
+    }
+
+    #[test]
+    fn user_prompt_includes_previous_cached_summary_context_only_when_provided() {
+        let config = ChapterSummaryConfig::default();
+        let req = GenerateChapterSummaryRequest {
+            book_url: "book-a".to_string(),
+            chapter_url: "chapter-3".to_string(),
+            chapter_title: Some("第三章".to_string()),
+            content: "当前正文".repeat(200),
+            ..Default::default()
+        };
+        let previous = vec![PreviousChapterSummaryContext {
+            chapter_index: Some(1),
+            chapter_title: Some("第一章".to_string()),
+            summary: "前文摘要".to_string(),
+            key_points: vec!["前文要点".to_string()],
+        }];
+
+        let prompt = build_chapter_summary_user_prompt(&config, &req, &previous);
+
+        assert!(prompt.contains("前文缓存摘要"));
+        assert!(prompt.contains("只作轻量上下文"));
+        assert!(prompt.contains("第一章"));
+        assert!(prompt.contains("前文摘要"));
+        assert!(prompt.contains("前文要点"));
+        assert!(prompt.contains("正文："));
+        assert!(prompt.contains("当前正文"));
+    }
+
+    #[test]
+    fn detail_level_changes_prompt_instruction() {
+        let req = GenerateChapterSummaryRequest {
+            book_url: "book-a".to_string(),
+            chapter_url: "chapter-1".to_string(),
+            chapter_title: Some("第一章".to_string()),
+            content: "当前正文".repeat(200),
+            ..Default::default()
+        };
+        let short = ChapterSummaryConfig {
+            detail_level: "short".to_string(),
+            ..Default::default()
+        };
+        let detailed = ChapterSummaryConfig {
+            detail_level: "detailed".to_string(),
+            ..Default::default()
+        };
+
+        let short_prompt = build_chapter_summary_user_prompt(&short, &req, &[]);
+        let detailed_prompt = build_chapter_summary_user_prompt(&detailed, &req, &[]);
+
+        assert!(short_prompt.contains("要点2-4条"));
+        assert!(detailed_prompt.contains("要点5-8条"));
     }
 
     #[tokio::test]
@@ -400,8 +633,13 @@ mod tests {
     #[tokio::test]
     async fn generate_rejects_short_content() {
         let (service, dir) = create_service().await;
-        let config = ChapterSummaryConfig { min_content_chars: 10, ..Default::default() };
-        let err = service.validate_generation_input(&config, "太短").unwrap_err();
+        let config = ChapterSummaryConfig {
+            min_content_chars: 10,
+            ..Default::default()
+        };
+        let err = service
+            .validate_generation_input(&config, "太短")
+            .unwrap_err();
 
         assert!(err.to_string().contains("正文内容不足"));
         let _ = fs::remove_dir_all(dir).await;
@@ -417,7 +655,6 @@ mod tests {
             chapter_title: Some("第一章".to_string()),
             summary: "缓存摘要".to_string(),
             key_points: vec![],
-            questions: vec![],
             prompt_version: "default-v1".to_string(),
             model: "cached-model".to_string(),
             created_at: 1,
@@ -441,6 +678,61 @@ mod tests {
         let _ = fs::remove_dir_all(dir).await;
     }
 
+    #[tokio::test]
+    async fn previous_summary_context_skips_non_previous_chapters_by_index() {
+        let (service, dir) = create_service().await;
+        for (url, index, summary) in [
+            ("chapter-1", 0, "上一章摘要"),
+            ("chapter-3", 2, "下一章摘要"),
+        ] {
+            service
+                .save_summary(
+                    "u1",
+                    ChapterSummaryRecord {
+                        book_url: "book-a".to_string(),
+                        chapter_url: url.to_string(),
+                        chapter_index: Some(index),
+                        chapter_title: Some(format!("第{}章", index + 1)),
+                        summary: summary.to_string(),
+                        key_points: vec![],
+                        prompt_version: "default-v1".to_string(),
+                        model: "test-model".to_string(),
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let context = service
+            .load_previous_summary_context(
+                "u1",
+                "book-a",
+                Some(1),
+                &[
+                    ChapterSummaryContextChapter {
+                        chapter_url: "chapter-1".to_string(),
+                        chapter_index: Some(0),
+                        chapter_title: Some("第1章".to_string()),
+                    },
+                    ChapterSummaryContextChapter {
+                        chapter_url: "chapter-3".to_string(),
+                        chapter_index: Some(2),
+                        chapter_title: Some("第3章".to_string()),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].summary, "上一章摘要");
+        assert!(!context.iter().any(|item| item.summary.contains("下一章")));
+
+        let _ = fs::remove_dir_all(dir).await;
+    }
+
     #[test]
     fn responses_endpoint_uses_responses_body_and_output_text() {
         let config = ChapterSummaryConfig::default();
@@ -452,13 +744,13 @@ mod tests {
             ..Default::default()
         };
 
-        let body = build_summary_model_body("/v1/responses", "test-model", &config, &req);
+        let body = build_summary_model_body("/v1/responses", "test-model", &config, &req, &[]);
         assert!(body.get("messages").is_none());
         assert!(body.get("input").is_some());
 
         let content = extract_model_content(
             "/v1/responses",
-            &json!({ "output_text": "{\"summary\":\"ok\",\"keyPoints\":[],\"questions\":[]}" }),
+            &json!({ "output_text": "{\"summary\":\"ok\",\"keyPoints\":[]}" }),
         )
         .unwrap();
         assert!(content.contains("\"summary\":\"ok\""));
@@ -468,7 +760,7 @@ mod tests {
             &json!({
                 "output": [{
                     "type": "message",
-                    "content": [{ "type": "output_text", "text": "{\"summary\":\"nested\",\"keyPoints\":[],\"questions\":[]}" }]
+                    "content": [{ "type": "output_text", "text": "{\"summary\":\"nested\",\"keyPoints\":[]}" }]
                 }]
             }),
         )
@@ -492,10 +784,14 @@ mod tests {
             "gemini-2.5-pro",
             &config,
             &req,
+            &[],
         );
         assert!(body.get("messages").is_none());
         assert_eq!(body.pointer("/contents/0/role"), Some(&json!("user")));
-        assert_eq!(body.pointer("/systemInstruction/parts/0/text"), Some(&json!(config.prompt)));
+        assert_eq!(
+            body.pointer("/systemInstruction/parts/0/text"),
+            Some(&json!(config.prompt))
+        );
         assert!(
             (body
                 .pointer("/generationConfig/temperature")
@@ -508,7 +804,7 @@ mod tests {
 
         let content = extract_model_content(
             "/v1beta/models/gemini-2.5-pro:generateContent",
-            &json!({ "candidates": [{ "content": { "parts": [{ "text": "{\"summary\":\"gemini\",\"keyPoints\":[],\"questions\":[]}" }] } }] }),
+            &json!({ "candidates": [{ "content": { "parts": [{ "text": "{\"summary\":\"gemini\",\"keyPoints\":[]}" }] } }] }),
         )
         .unwrap();
         assert!(content.contains("\"summary\":\"gemini\""));
@@ -525,14 +821,14 @@ mod tests {
             ..Default::default()
         };
 
-        let body = build_summary_model_body("/v1/messages", "claude-sonnet-4", &config, &req);
+        let body = build_summary_model_body("/v1/messages", "claude-sonnet-4", &config, &req, &[]);
         assert!(body.get("messages").is_some());
         assert_eq!(body.get("system"), Some(&json!(config.prompt)));
         assert_eq!(body.get("max_tokens"), Some(&json!(1024)));
 
         let content = extract_model_content(
             "/v1/messages",
-            &json!({ "content": [{ "type": "text", "text": "{\"summary\":\"claude\",\"keyPoints\":[],\"questions\":[]}" }] }),
+            &json!({ "content": [{ "type": "text", "text": "{\"summary\":\"claude\",\"keyPoints\":[]}" }] }),
         )
         .unwrap();
         assert!(content.contains("\"summary\":\"claude\""));
@@ -548,7 +844,6 @@ mod tests {
             chapter_title: Some("第一章".to_string()),
             summary: "主角醒来并发现异样。".to_string(),
             key_points: vec!["主角醒来".to_string()],
-            questions: vec!["异样来源未知".to_string()],
             prompt_version: "default-v1".to_string(),
             model: "test-model".to_string(),
             created_at: 10,
@@ -557,9 +852,21 @@ mod tests {
 
         service.save_summary("u1", record.clone()).await.unwrap();
 
-        assert!(service.get_summary("u1", "book-a", "chapter-1").await.unwrap().is_some());
-        assert!(service.get_summary("u2", "book-a", "chapter-1").await.unwrap().is_none());
-        assert!(service.get_summary("u1", "book-a", "chapter-2").await.unwrap().is_none());
+        assert!(service
+            .get_summary("u1", "book-a", "chapter-1")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(service
+            .get_summary("u2", "book-a", "chapter-1")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(service
+            .get_summary("u1", "book-a", "chapter-2")
+            .await
+            .unwrap()
+            .is_none());
 
         let _ = fs::remove_dir_all(dir).await;
     }

@@ -59,7 +59,12 @@ export interface ReadConfig {
   chineseMode: 'simplified' | 'traditional'
   specialMode: 'normal' | 'simple'
   enablePreload: boolean
+  showChapterSummary: boolean
   enableChapterSummaryAuto: boolean
+  chapterSummaryLayout: 'auto' | 'side'
+  chapterSummarySiderWidth: number
+  chapterSummaryFontSize: number
+  chapterSummaryKeyPointStyle: 'card' | 'list'
 }
 
 const defaultConfig: ReadConfig = {
@@ -82,7 +87,12 @@ const defaultConfig: ReadConfig = {
   chineseMode: 'simplified',
   specialMode: 'normal',
   enablePreload: false,
+  showChapterSummary: true,
   enableChapterSummaryAuto: true,
+  chapterSummaryLayout: 'auto',
+  chapterSummarySiderWidth: 360,
+  chapterSummaryFontSize: 16,
+  chapterSummaryKeyPointStyle: 'card',
 }
 
 function loadConfig(): ReadConfig {

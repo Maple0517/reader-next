@@ -38,6 +38,9 @@ describe('chapterSummary api', () => {
       chapterTitle: '第一章',
       content: '正文内容',
       force: true,
+      previousChapters: [
+        { chapterUrl: 'chapter-0', chapterIndex: 0, chapterTitle: '序章' },
+      ],
     })
 
     expect(postMock).toHaveBeenCalledWith('/chapterSummary/generate', {
@@ -47,6 +50,9 @@ describe('chapterSummary api', () => {
       chapterTitle: '第一章',
       content: '正文内容',
       force: true,
+      previousChapters: [
+        { chapterUrl: 'chapter-0', chapterIndex: 0, chapterTitle: '序章' },
+      ],
     })
   })
 })

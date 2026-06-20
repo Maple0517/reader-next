@@ -181,3 +181,15 @@ describe('reader local txt chapters', () => {
     expect(readerStore.book?.durChapterPos).toBe(6400)
   })
 })
+
+describe('reader summary display config', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    setActivePinia(createPinia())
+  })
+
+  it('defaults key points to card style', () => {
+    const store = useReaderStore()
+    expect(store.config.chapterSummaryKeyPointStyle).toBe('card')
+  })
+})

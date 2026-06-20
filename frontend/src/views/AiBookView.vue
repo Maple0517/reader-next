@@ -416,7 +416,7 @@
             <button class="danger-btn" @click="resetMemory">重置 AI资料</button>
           </div>
 
-          <section v-if="isServerModelAdmin" class="admin-model-panel">
+          <section v-if="isServerModelAdmin" ref="adminModelPanelRef" class="admin-model-panel">
             <div class="admin-model-head">
               <h2>后端模型配置</h2>
               <button class="primary-btn" @click="saveServerConfig">保存后端配置</button>
@@ -578,7 +578,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { saveAiModelConfig } from '../api/aiModel'
 import { getBookContent, getChapterList, getShelfBook } from '../api/bookshelf'
@@ -629,6 +629,7 @@ const readerStore = useReaderStore()
 
 const loading = ref(true)
 const activeTab = ref<AiTab>('overview')
+const adminModelPanelRef = ref<HTMLElement | null>(null)
 const book = ref<Book | null>(null)
 const chapters = ref<BookChapter[]>([])
 const configDraft = reactive<AiBookConfig>({ ...aiStore.config })
@@ -805,6 +806,19 @@ onMounted(async () => {
     loading.value = false
   }
 })
+
+watch(
+  () => [route.query.tab, route.query.section, loading.value] as const,
+  async () => {
+    if (loading.value) return
+    if (route.query.tab === 'settings') activeTab.value = 'settings'
+    if (route.query.tab === 'settings' && route.query.section === 'server-model') {
+      await nextTick()
+      adminModelPanelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  },
+  { immediate: true },
+)
 
 function goBack() {
   router.back()

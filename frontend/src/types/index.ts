@@ -277,7 +277,6 @@ export interface ChapterSummaryRecord {
   chapterTitle?: string
   summary: string
   keyPoints: string[]
-  questions: string[]
   promptVersion: string
   model: string
   createdAt: number
@@ -295,6 +294,13 @@ export interface GenerateChapterSummaryRequest {
   chapterTitle?: string
   content: string
   force?: boolean
+  previousChapters?: ChapterSummaryContextChapter[]
+}
+
+export interface ChapterSummaryContextChapter {
+  chapterUrl: string
+  chapterIndex?: number
+  chapterTitle?: string
 }
 
 export interface AiServerModelConfig {

@@ -6,7 +6,8 @@
       background: theme.body,
       color: theme.fontColor,
       fontFamily: currentFontFamily,
-      '--color-primary': '#c97f3a'
+      '--color-primary': '#c97f3a',
+      '--reader-summary-sider-width': showSideChapterSummary ? `${chapterSummarySiderWidth}px` : '0px'
     }"
     @click="handleBackgroundClick"
     @contextmenu.prevent="handleContextMenu"
@@ -163,43 +164,170 @@
         <div v-else>
           <div class="chapter-title">{{ store.currentChapter?.title || '加载中...' }}</div>
 
-          <section v-if="showChapterSummary" class="chapter-summary-card" :class="{ expanded: chapterSummaryExpanded }">
-            <button class="chapter-summary-header" @click="chapterSummaryExpanded = !chapterSummaryExpanded">
-              <span class="summary-kicker">摘要</span>
-              <span v-if="chapterSummaryStatus === 'loading'" class="summary-muted">生成中…</span>
-              <span v-else-if="chapterSummary" class="summary-muted">{{ chapterSummaryExpanded ? '收起' : chapterSummaryPreview }}</span>
-              <span v-else-if="chapterSummaryError" class="summary-muted">{{ chapterSummaryError }}</span>
-              <span v-else class="summary-muted">可手动生成</span>
-            </button>
+          <button
+            v-if="showCollapsedChapterSummary"
+            class="chapter-summary-collapsed-pill"
+            type="button"
+            @click="expandCollapsedChapterSummary"
+          >
+            <span class="summary-kicker">摘要</span>
+            <span class="summary-muted">{{ chapterSummary ? '展开管理' : '打开摘要设置' }}</span>
+          </button>
 
-            <div v-if="chapterSummaryExpanded" class="chapter-summary-body">
-              <p v-if="chapterSummary?.summary" class="summary-main">{{ chapterSummary.summary }}</p>
-              <div v-if="chapterSummary?.keyPoints.length" class="summary-list">
-                <strong>关键人物/线索</strong>
+          <section v-if="showInlineChapterSummary" class="chapter-summary-card">
+            <div class="chapter-summary-header reader-ui-font">
+              <div>
+                <div class="summary-kicker">摘要</div>
+                <div class="summary-muted">{{ store.currentChapter?.title || '当前章节' }}</div>
+              </div>
+              <div class="summary-tabs" role="tablist" aria-label="摘要面板">
+                <button
+                  class="summary-tab"
+                  :class="{ active: chapterSummaryActiveTab === 'content' }"
+                  :aria-selected="chapterSummaryActiveTab === 'content'"
+                  role="tab"
+                  type="button"
+                  @click="chapterSummaryActiveTab = 'content'"
+                >正文</button>
+                <button
+                  class="summary-tab"
+                  :class="{ active: chapterSummaryActiveTab === 'settings' }"
+                  :aria-selected="chapterSummaryActiveTab === 'settings'"
+                  role="tab"
+                  type="button"
+                  @click="chapterSummaryActiveTab = 'settings'"
+                >设置</button>
+              </div>
+            </div>
+
+            <section v-if="chapterSummaryActiveTab === 'content'" class="chapter-summary-body" role="tabpanel" :style="chapterSummaryBodyStyle">
+              <div v-if="chapterSummaryStatus === 'loading'" class="summary-skeleton" aria-label="摘要生成中">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <p v-else-if="chapterSummary?.summary" class="summary-main">{{ chapterSummary.summary }}</p>
+              <p v-else-if="chapterSummaryError" class="summary-error">{{ chapterSummaryError }}</p>
+              <p v-else class="summary-main summary-muted">当前章节还没有摘要。</p>
+              <div
+                v-if="chapterSummary?.keyPoints.length"
+                class="summary-list"
+                :class="`style-${config.chapterSummaryKeyPointStyle}`"
+              >
+                <strong>要点</strong>
                 <ul>
                   <li v-for="item in chapterSummary.keyPoints" :key="item">{{ item }}</li>
                 </ul>
               </div>
-              <div v-if="chapterSummary?.questions.length" class="summary-list">
-                <strong>伏笔疑点</strong>
-                <ul>
-                  <li v-for="item in chapterSummary.questions" :key="item">{{ item }}</li>
-                </ul>
-              </div>
-              <p v-if="chapterSummaryStatus === 'error' && chapterSummaryError" class="summary-error">{{ chapterSummaryError }}</p>
-              <div class="summary-actions">
+              <div class="summary-actions reader-ui-font">
                 <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryForCurrentChapter(Boolean(chapterSummary))">
                   {{ chapterSummary ? '重新生成' : '生成摘要' }}
                 </button>
                 <button v-if="chapterSummary" class="summary-action" @click.stop="copyChapterSummary">复制</button>
               </div>
-            </div>
-
-            <div v-else-if="!chapterSummary" class="summary-actions compact">
-              <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryForCurrentChapter(false)">
-                {{ chapterSummaryStatus === 'loading' ? '生成中…' : '生成摘要' }}
-              </button>
-            </div>
+            </section>
+            <section v-else class="chapter-summary-settings-panel reader-ui-font" role="tabpanel">
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">显示</div>
+                <div class="summary-setting-row">
+                  <span>摘要栏</span>
+                  <div class="summary-switch">
+                    <button class="active" type="button">显示</button>
+                    <button type="button" @click="hideChapterSummary">隐藏</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>位置</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: config.chapterSummaryLayout === 'auto' }" type="button" @click="store.updateConfig('chapterSummaryLayout', 'auto')">智能</button>
+                    <button :class="{ active: config.chapterSummaryLayout === 'side' }" type="button" @click="store.updateConfig('chapterSummaryLayout', 'side')">右侧</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>栏宽</span>
+                  <div class="summary-stepper">
+                    <button type="button" @click="adjustChapterSummarySiderWidth(-20)">−</button>
+                    <span>{{ chapterSummarySiderWidth }}</span>
+                    <button type="button" @click="adjustChapterSummarySiderWidth(20)">+</button>
+                  </div>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">阅读</div>
+                <div class="summary-setting-row">
+                  <span>摘要字号</span>
+                  <div class="summary-stepper">
+                    <button type="button" @click="adjustChapterSummaryFontSize(-1)">A-</button>
+                    <span>{{ config.chapterSummaryFontSize }}</span>
+                    <button type="button" @click="adjustChapterSummaryFontSize(1)">A+</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>要点样式</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: config.chapterSummaryKeyPointStyle === 'card' }" type="button" @click="store.updateConfig('chapterSummaryKeyPointStyle', 'card')">整块</button>
+                    <button :class="{ active: config.chapterSummaryKeyPointStyle === 'list' }" type="button" @click="store.updateConfig('chapterSummaryKeyPointStyle', 'list')">列表</button>
+                  </div>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">生成</div>
+                <div class="summary-setting-row">
+                  <span>功能启用</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: chapterSummaryConfigDraft.enabledText === 'true' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.enabledText = 'true'">开</button>
+                    <button :class="{ active: chapterSummaryConfigDraft.enabledText === 'false' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.enabledText = 'false'">关</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>自动生成</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: config.enableChapterSummaryAuto }" type="button" @click="store.updateConfig('enableChapterSummaryAuto', true)">开</button>
+                    <button :class="{ active: !config.enableChapterSummaryAuto }" type="button" @click="store.updateConfig('enableChapterSummaryAuto', false)">关</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>详细程度</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'short' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'short'">短</button>
+                    <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'normal' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'normal'">正常</button>
+                    <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'detailed' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'detailed'">详细</button>
+                  </div>
+                </div>
+                <label class="summary-setting-field">
+                  <span>最大字数</span>
+                  <input v-model.number="chapterSummaryConfigDraft.maxWords" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="80" max="600">
+                </label>
+                <label class="summary-setting-field">
+                  <span>最短正文</span>
+                  <input v-model.number="chapterSummaryConfigDraft.minContentChars" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="0" max="5000">
+                </label>
+                <label class="summary-setting-field">
+                  <span>Temperature</span>
+                  <input v-model.number="chapterSummaryConfigDraft.temperature" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="0" max="1.5" step="0.1">
+                </label>
+                <div class="summary-actions compact">
+                  <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryAfterSavingSettings(false)">生成摘要</button>
+                  <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryAfterSavingSettings(true)">重新生成</button>
+                  <button class="summary-action" :disabled="savingChapterSummaryConfig || !chapterSummaryConfig?.isAdmin" @click="saveChapterSummaryGenerationSettings">
+                    {{ savingChapterSummaryConfig ? '保存中...' : '保存生成设置' }}
+                  </button>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">Prompt</div>
+                <textarea v-model="chapterSummaryConfigDraft.prompt" :disabled="!chapterSummaryConfig?.isAdmin" class="summary-prompt-input" rows="6"></textarea>
+                <div class="summary-actions compact">
+                  <button class="summary-action" :disabled="!chapterSummaryConfig?.isAdmin" @click="restoreDefaultChapterSummaryPrompt">恢复当前</button>
+                  <button class="summary-action" :disabled="savingChapterSummaryConfig || !chapterSummaryConfig?.isAdmin" @click="saveChapterSummaryGenerationSettings">保存 Prompt</button>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">模型</div>
+                <p class="summary-setting-note">摘要使用后端文本模型配置。API Key、Base URL 和模型名在 AI资料中统一管理。</p>
+                <button class="summary-action" type="button" @click="openAiBackendSettings">打开 AI 后端设置</button>
+              </div>
+            </section>
           </section>
 
           <div
@@ -247,6 +375,175 @@
         >
           <div class="chapter-title">{{ chapter.title }}</div>
 
+          <button
+            v-if="showCollapsedChapterSummary && chapter.index === store.currentIndex"
+            class="chapter-summary-collapsed-pill"
+            type="button"
+            @click="expandCollapsedChapterSummary"
+          >
+            <span class="summary-kicker">摘要</span>
+            <span class="summary-muted">{{ chapterSummary ? '展开管理' : '打开摘要设置' }}</span>
+          </button>
+
+          <section
+            v-if="showInlineChapterSummary && chapter.index === store.currentIndex"
+            class="chapter-summary-card"
+          >
+            <div class="chapter-summary-header reader-ui-font">
+              <div>
+                <div class="summary-kicker">摘要</div>
+                <div class="summary-muted">{{ chapter.title || '当前章节' }}</div>
+              </div>
+              <div class="summary-tabs" role="tablist" aria-label="摘要面板">
+                <button
+                  class="summary-tab"
+                  :class="{ active: chapterSummaryActiveTab === 'content' }"
+                  :aria-selected="chapterSummaryActiveTab === 'content'"
+                  role="tab"
+                  type="button"
+                  @click="chapterSummaryActiveTab = 'content'"
+                >正文</button>
+                <button
+                  class="summary-tab"
+                  :class="{ active: chapterSummaryActiveTab === 'settings' }"
+                  :aria-selected="chapterSummaryActiveTab === 'settings'"
+                  role="tab"
+                  type="button"
+                  @click="chapterSummaryActiveTab = 'settings'"
+                >设置</button>
+              </div>
+            </div>
+
+            <section v-if="chapterSummaryActiveTab === 'content'" class="chapter-summary-body" role="tabpanel" :style="chapterSummaryBodyStyle">
+              <div v-if="chapterSummaryStatus === 'loading'" class="summary-skeleton" aria-label="摘要生成中">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <p v-else-if="chapterSummary?.summary" class="summary-main">{{ chapterSummary.summary }}</p>
+              <p v-else-if="chapterSummaryError" class="summary-error">{{ chapterSummaryError }}</p>
+              <p v-else class="summary-main summary-muted">当前章节还没有摘要。</p>
+              <div
+                v-if="chapterSummary?.keyPoints.length"
+                class="summary-list"
+                :class="`style-${config.chapterSummaryKeyPointStyle}`"
+              >
+                <strong>要点</strong>
+                <ul>
+                  <li v-for="item in chapterSummary.keyPoints" :key="item">{{ item }}</li>
+                </ul>
+              </div>
+              <div class="summary-actions reader-ui-font">
+                <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryForCurrentChapter(Boolean(chapterSummary))">
+                  {{ chapterSummary ? '重新生成' : '生成摘要' }}
+                </button>
+                <button v-if="chapterSummary" class="summary-action" @click.stop="copyChapterSummary">复制</button>
+              </div>
+            </section>
+            <section v-else class="chapter-summary-settings-panel reader-ui-font" role="tabpanel">
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">显示</div>
+                <div class="summary-setting-row">
+                  <span>摘要栏</span>
+                  <div class="summary-switch">
+                    <button class="active" type="button">显示</button>
+                    <button type="button" @click="hideChapterSummary">隐藏</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>位置</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: config.chapterSummaryLayout === 'auto' }" type="button" @click="store.updateConfig('chapterSummaryLayout', 'auto')">智能</button>
+                    <button :class="{ active: config.chapterSummaryLayout === 'side' }" type="button" @click="store.updateConfig('chapterSummaryLayout', 'side')">右侧</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>栏宽</span>
+                  <div class="summary-stepper">
+                    <button type="button" @click="adjustChapterSummarySiderWidth(-20)">−</button>
+                    <span>{{ chapterSummarySiderWidth }}</span>
+                    <button type="button" @click="adjustChapterSummarySiderWidth(20)">+</button>
+                  </div>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">阅读</div>
+                <div class="summary-setting-row">
+                  <span>摘要字号</span>
+                  <div class="summary-stepper">
+                    <button type="button" @click="adjustChapterSummaryFontSize(-1)">A-</button>
+                    <span>{{ config.chapterSummaryFontSize }}</span>
+                    <button type="button" @click="adjustChapterSummaryFontSize(1)">A+</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>要点样式</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: config.chapterSummaryKeyPointStyle === 'card' }" type="button" @click="store.updateConfig('chapterSummaryKeyPointStyle', 'card')">整块</button>
+                    <button :class="{ active: config.chapterSummaryKeyPointStyle === 'list' }" type="button" @click="store.updateConfig('chapterSummaryKeyPointStyle', 'list')">列表</button>
+                  </div>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">生成</div>
+                <div class="summary-setting-row">
+                  <span>功能启用</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: chapterSummaryConfigDraft.enabledText === 'true' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.enabledText = 'true'">开</button>
+                    <button :class="{ active: chapterSummaryConfigDraft.enabledText === 'false' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.enabledText = 'false'">关</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>自动生成</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: config.enableChapterSummaryAuto }" type="button" @click="store.updateConfig('enableChapterSummaryAuto', true)">开</button>
+                    <button :class="{ active: !config.enableChapterSummaryAuto }" type="button" @click="store.updateConfig('enableChapterSummaryAuto', false)">关</button>
+                  </div>
+                </div>
+                <div class="summary-setting-row">
+                  <span>详细程度</span>
+                  <div class="summary-switch">
+                    <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'short' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'short'">短</button>
+                    <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'normal' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'normal'">正常</button>
+                    <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'detailed' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'detailed'">详细</button>
+                  </div>
+                </div>
+                <label class="summary-setting-field">
+                  <span>最大字数</span>
+                  <input v-model.number="chapterSummaryConfigDraft.maxWords" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="80" max="600">
+                </label>
+                <label class="summary-setting-field">
+                  <span>最短正文</span>
+                  <input v-model.number="chapterSummaryConfigDraft.minContentChars" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="0" max="5000">
+                </label>
+                <label class="summary-setting-field">
+                  <span>Temperature</span>
+                  <input v-model.number="chapterSummaryConfigDraft.temperature" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="0" max="1.5" step="0.1">
+                </label>
+                <div class="summary-actions compact">
+                  <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryAfterSavingSettings(false)">生成摘要</button>
+                  <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryAfterSavingSettings(true)">重新生成</button>
+                  <button class="summary-action" :disabled="savingChapterSummaryConfig || !chapterSummaryConfig?.isAdmin" @click="saveChapterSummaryGenerationSettings">
+                    {{ savingChapterSummaryConfig ? '保存中...' : '保存生成设置' }}
+                  </button>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">Prompt</div>
+                <textarea v-model="chapterSummaryConfigDraft.prompt" :disabled="!chapterSummaryConfig?.isAdmin" class="summary-prompt-input" rows="6"></textarea>
+                <div class="summary-actions compact">
+                  <button class="summary-action" :disabled="!chapterSummaryConfig?.isAdmin" @click="restoreDefaultChapterSummaryPrompt">恢复当前</button>
+                  <button class="summary-action" :disabled="savingChapterSummaryConfig || !chapterSummaryConfig?.isAdmin" @click="saveChapterSummaryGenerationSettings">保存 Prompt</button>
+                </div>
+              </div>
+              <div class="summary-setting-group">
+                <div class="summary-setting-title">模型</div>
+                <p class="summary-setting-note">摘要使用后端文本模型配置。API Key、Base URL 和模型名在 AI资料中统一管理。</p>
+                <button class="summary-action" type="button" @click="openAiBackendSettings">打开 AI 后端设置</button>
+              </div>
+            </section>
+          </section>
+
           <div
             class="chapter-text"
             data-role="continuous"
@@ -268,6 +565,171 @@
       </div>
     </div>
 
+    <aside
+      v-if="showSideChapterSummary"
+      class="chapter-summary-sider"
+      :class="{ resizing: chapterSummarySiderResizing }"
+      :style="chapterSummarySiderStyle"
+      @click.stop
+    >
+      <div class="chapter-summary-resize-handle" @pointerdown="startChapterSummarySiderResize"></div>
+      <div class="chapter-summary-sider-head reader-ui-font">
+        <div>
+          <div class="summary-kicker">摘要</div>
+          <div class="summary-muted">{{ store.currentChapter?.title || '当前章节' }}</div>
+        </div>
+        <div class="summary-tabs" role="tablist" aria-label="摘要面板">
+          <button
+            class="summary-tab"
+            :class="{ active: chapterSummaryActiveTab === 'content' }"
+            :aria-selected="chapterSummaryActiveTab === 'content'"
+            role="tab"
+            type="button"
+            @click="chapterSummaryActiveTab = 'content'"
+          >正文</button>
+          <button
+            class="summary-tab"
+            :class="{ active: chapterSummaryActiveTab === 'settings' }"
+            :aria-selected="chapterSummaryActiveTab === 'settings'"
+            role="tab"
+            type="button"
+            @click="chapterSummaryActiveTab = 'settings'"
+          >设置</button>
+        </div>
+      </div>
+
+      <section v-if="chapterSummaryActiveTab === 'content'" class="chapter-summary-card side" role="tabpanel">
+        <div class="chapter-summary-body" :style="chapterSummaryBodyStyle">
+          <div v-if="chapterSummaryStatus === 'loading'" class="summary-skeleton" aria-label="摘要生成中">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <p v-else-if="chapterSummary?.summary" class="summary-main">{{ chapterSummary.summary }}</p>
+          <p v-else-if="chapterSummaryError" class="summary-error">{{ chapterSummaryError }}</p>
+          <p v-else class="summary-main summary-muted">当前章节还没有摘要。</p>
+          <div
+            v-if="chapterSummary?.keyPoints.length"
+            class="summary-list"
+            :class="`style-${config.chapterSummaryKeyPointStyle}`"
+          >
+            <strong>要点</strong>
+            <ul>
+              <li v-for="item in chapterSummary.keyPoints" :key="item">{{ item }}</li>
+            </ul>
+          </div>
+          <div class="summary-actions reader-ui-font">
+            <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryForCurrentChapter(Boolean(chapterSummary))">
+              {{ chapterSummary ? '重新生成' : '生成摘要' }}
+            </button>
+            <button v-if="chapterSummary" class="summary-action" @click.stop="copyChapterSummary">复制</button>
+            <button class="summary-action" @click="hideChapterSummary">隐藏</button>
+          </div>
+        </div>
+      </section>
+      <section v-else class="chapter-summary-settings-panel reader-ui-font" role="tabpanel">
+        <div class="summary-setting-group">
+          <div class="summary-setting-title">显示</div>
+          <div class="summary-setting-row">
+            <span>摘要栏</span>
+            <div class="summary-switch">
+              <button class="active" type="button">显示</button>
+                <button type="button" @click="hideChapterSummary">隐藏</button>
+            </div>
+          </div>
+          <div class="summary-setting-row">
+            <span>位置</span>
+            <div class="summary-switch">
+              <button :class="{ active: config.chapterSummaryLayout === 'auto' }" type="button" @click="store.updateConfig('chapterSummaryLayout', 'auto')">智能</button>
+              <button :class="{ active: config.chapterSummaryLayout === 'side' }" type="button" @click="store.updateConfig('chapterSummaryLayout', 'side')">右侧</button>
+            </div>
+          </div>
+          <div class="summary-setting-row">
+            <span>栏宽</span>
+            <div class="summary-stepper">
+              <button type="button" @click="adjustChapterSummarySiderWidth(-20)">−</button>
+              <span>{{ chapterSummarySiderWidth }}</span>
+              <button type="button" @click="adjustChapterSummarySiderWidth(20)">+</button>
+            </div>
+          </div>
+        </div>
+        <div class="summary-setting-group">
+          <div class="summary-setting-title">阅读</div>
+          <div class="summary-setting-row">
+            <span>摘要字号</span>
+            <div class="summary-stepper">
+              <button type="button" @click="adjustChapterSummaryFontSize(-1)">A-</button>
+              <span>{{ config.chapterSummaryFontSize }}</span>
+              <button type="button" @click="adjustChapterSummaryFontSize(1)">A+</button>
+            </div>
+          </div>
+          <div class="summary-setting-row">
+            <span>要点样式</span>
+            <div class="summary-switch">
+              <button :class="{ active: config.chapterSummaryKeyPointStyle === 'card' }" type="button" @click="store.updateConfig('chapterSummaryKeyPointStyle', 'card')">整块</button>
+              <button :class="{ active: config.chapterSummaryKeyPointStyle === 'list' }" type="button" @click="store.updateConfig('chapterSummaryKeyPointStyle', 'list')">列表</button>
+            </div>
+          </div>
+        </div>
+        <div class="summary-setting-group">
+          <div class="summary-setting-title">生成</div>
+          <div class="summary-setting-row">
+            <span>功能启用</span>
+            <div class="summary-switch">
+              <button :class="{ active: chapterSummaryConfigDraft.enabledText === 'true' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.enabledText = 'true'">开</button>
+              <button :class="{ active: chapterSummaryConfigDraft.enabledText === 'false' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.enabledText = 'false'">关</button>
+            </div>
+          </div>
+          <div class="summary-setting-row">
+            <span>自动生成</span>
+            <div class="summary-switch">
+              <button :class="{ active: config.enableChapterSummaryAuto }" type="button" @click="store.updateConfig('enableChapterSummaryAuto', true)">开</button>
+              <button :class="{ active: !config.enableChapterSummaryAuto }" type="button" @click="store.updateConfig('enableChapterSummaryAuto', false)">关</button>
+            </div>
+          </div>
+          <div class="summary-setting-row">
+            <span>详细程度</span>
+            <div class="summary-switch">
+              <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'short' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'short'">短</button>
+              <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'normal' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'normal'">正常</button>
+              <button :class="{ active: chapterSummaryConfigDraft.detailLevel === 'detailed' }" :disabled="!chapterSummaryConfig?.isAdmin" type="button" @click="chapterSummaryConfigDraft.detailLevel = 'detailed'">详细</button>
+            </div>
+          </div>
+          <label class="summary-setting-field">
+            <span>最大字数</span>
+            <input v-model.number="chapterSummaryConfigDraft.maxWords" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="80" max="600">
+          </label>
+          <label class="summary-setting-field">
+            <span>最短正文</span>
+            <input v-model.number="chapterSummaryConfigDraft.minContentChars" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="0" max="5000">
+          </label>
+          <label class="summary-setting-field">
+            <span>Temperature</span>
+            <input v-model.number="chapterSummaryConfigDraft.temperature" :disabled="!chapterSummaryConfig?.isAdmin" type="number" min="0" max="1.5" step="0.1">
+          </label>
+          <div class="summary-actions compact">
+            <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryAfterSavingSettings(false)">生成摘要</button>
+            <button class="summary-action" :disabled="chapterSummaryStatus === 'loading'" @click.stop="generateChapterSummaryAfterSavingSettings(true)">重新生成</button>
+            <button class="summary-action" :disabled="savingChapterSummaryConfig || !chapterSummaryConfig?.isAdmin" @click="saveChapterSummaryGenerationSettings">
+              {{ savingChapterSummaryConfig ? '保存中...' : '保存生成设置' }}
+            </button>
+          </div>
+        </div>
+        <div class="summary-setting-group">
+          <div class="summary-setting-title">Prompt</div>
+          <textarea v-model="chapterSummaryConfigDraft.prompt" :disabled="!chapterSummaryConfig?.isAdmin" class="summary-prompt-input" rows="6"></textarea>
+          <div class="summary-actions compact">
+            <button class="summary-action" :disabled="!chapterSummaryConfig?.isAdmin" @click="restoreDefaultChapterSummaryPrompt">恢复当前</button>
+            <button class="summary-action" :disabled="savingChapterSummaryConfig || !chapterSummaryConfig?.isAdmin" @click="saveChapterSummaryGenerationSettings">保存 Prompt</button>
+          </div>
+        </div>
+        <div class="summary-setting-group">
+          <div class="summary-setting-title">模型</div>
+          <p class="summary-setting-note">摘要使用后端文本模型配置。API Key、Base URL 和模型名在 AI资料中统一管理。</p>
+          <button class="summary-action" type="button" @click="openAiBackendSettings">打开 AI 后端设置</button>
+        </div>
+      </section>
+    </aside>
 
 
     <ReaderSearchPanel
@@ -315,19 +777,25 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { getBookInfo } from '../api/bookshelf'
-import { getChapterSummary, generateChapterSummary } from '../api/chapterSummary'
+import {
+  getChapterSummary,
+  generateChapterSummary,
+  getChapterSummaryConfig,
+  saveChapterSummaryConfig,
+} from '../api/chapterSummary'
 import { applySystemTheme } from '../utils/systemUi'
 import { countBrowserBookCache } from '../utils/browserCache'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
 import { buildChapterSummaryIdentity, isCurrentChapterSummaryIdentity } from '../utils/chapterSummaryState'
-import type { Book, ChapterSummaryRecord } from '../types'
+import { chooseChapterSummaryPlacement, clampChapterSummarySiderWidth, getChapterSummaryFontSize } from '../utils/chapterSummaryLayout'
+import type { Book, ChapterSummaryConfigResponse, ChapterSummaryRecord } from '../types'
 
 import ReaderSidebar from '../components/reader/ReaderSidebar.vue'
 import ReaderToolbar from '../components/reader/ReaderToolbar.vue'
@@ -386,6 +854,7 @@ const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
 const showControls = ref(false)
 const isMobile = ref(false)
+const viewportWidth = ref(typeof window === 'undefined' ? 0 : window.innerWidth)
 let speechTimerTicker: number | null = null
 let suppressNextTapUntil = 0
 let restorePositionTimer: number | null = null
@@ -433,8 +902,24 @@ const offlineCachedCount = ref(0)
 const chapterSummary = ref<ChapterSummaryRecord | null>(null)
 const chapterSummaryStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const chapterSummaryError = ref('')
-const chapterSummaryExpanded = ref(false)
-const showChapterSummary = ref(true)
+const showChapterSummary = ref(config.value.showChapterSummary)
+type ChapterSummaryTab = 'content' | 'settings'
+const chapterSummaryActiveTab = ref<ChapterSummaryTab>('content')
+const chapterSummaryConfig = ref<ChapterSummaryConfigResponse | null>(null)
+const savingChapterSummaryConfig = ref(false)
+const chapterSummaryConfigDraft = reactive({
+  enabledText: 'true',
+  autoEnabledDefaultText: 'true',
+  detailLevel: 'normal' as 'short' | 'normal' | 'detailed',
+  maxWords: 300,
+  temperature: 0.3,
+  minContentChars: 300,
+  prompt: '',
+})
+const chapterSummarySiderWidth = ref(clampChapterSummarySiderWidth(config.value.chapterSummarySiderWidth))
+const chapterSummarySiderResizing = ref(false)
+let chapterSummaryResizeStartX = 0
+let chapterSummaryResizeStartWidth = 0
 let chapterSummaryTimer: number | null = null
 let chapterSummaryRequestId = 0
 const speechTimerNow = ref(Date.now())
@@ -500,10 +985,25 @@ const currentChapterSummaryIdentity = computed(() => buildChapterSummaryIdentity
   store.currentIndex,
 ))
 
-const chapterSummaryPreview = computed(() => {
-  const text = chapterSummary.value?.summary.trim() || ''
-  return text.length > 64 ? `${text.slice(0, 64)}…` : text
-})
+const chapterSummaryPlacement = computed(() => chooseChapterSummaryPlacement({
+  mode: config.value.chapterSummaryLayout,
+  viewportWidth: viewportWidth.value,
+  pageWidth: config.value.pageWidth,
+  isMobile: isMobile.value,
+  siderWidth: chapterSummarySiderWidth.value,
+}))
+const showSideChapterSummary = computed(() => showChapterSummary.value && chapterSummaryPlacement.value === 'side' && !isHorizontalPageMode.value)
+const showCollapsedChapterSummary = computed(() => showChapterSummary.value && chapterSummaryPlacement.value === 'collapsed' && !isHorizontalPageMode.value)
+const showInlineChapterSummary = computed(() => showChapterSummary.value && chapterSummaryPlacement.value === 'inline' && !isHorizontalPageMode.value)
+const chapterSummarySiderStyle = computed(() => ({
+  width: `${chapterSummarySiderWidth.value}px`,
+  background: chromeTheme.value.popup,
+  color: chromeTheme.value.fontColor,
+}))
+const chapterSummaryBodyStyle = computed(() => ({
+  fontSize: `${getChapterSummaryFontSize(config.value.chapterSummaryFontSize)}px`,
+  fontFamily: currentFontFamily.value || 'var(--font-body)',
+}))
 
 function clearChapterSummaryTimer() {
   if (!chapterSummaryTimer) return
@@ -516,7 +1016,70 @@ function resetChapterSummaryState() {
   chapterSummary.value = null
   chapterSummaryStatus.value = 'idle'
   chapterSummaryError.value = ''
-  chapterSummaryExpanded.value = false
+}
+
+function applyChapterSummaryConfigDraft(response: ChapterSummaryConfigResponse) {
+  chapterSummaryConfig.value = response
+  chapterSummaryConfigDraft.enabledText = response.config.enabled ? 'true' : 'false'
+  chapterSummaryConfigDraft.autoEnabledDefaultText = response.config.autoEnabledDefault ? 'true' : 'false'
+  chapterSummaryConfigDraft.detailLevel = response.config.detailLevel
+  chapterSummaryConfigDraft.maxWords = response.config.maxWords
+  chapterSummaryConfigDraft.temperature = response.config.temperature
+  chapterSummaryConfigDraft.minContentChars = response.config.minContentChars
+  chapterSummaryConfigDraft.prompt = response.config.prompt
+}
+
+async function loadChapterSummaryConfigForSider() {
+  try {
+    applyChapterSummaryConfigDraft(await getChapterSummaryConfig())
+  } catch {
+    chapterSummaryConfig.value = null
+  }
+}
+
+function normalizeFiniteNumber(value: unknown, fallback: number) {
+  if (value === '' || value === null || value === undefined) return fallback
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : fallback
+}
+
+async function saveChapterSummaryGenerationSettings(options: { silent?: boolean } | Event = {}) {
+  const silent = !(options instanceof Event) && Boolean(options.silent)
+  if (!chapterSummaryConfig.value?.isAdmin) {
+    appStore.showToast('请输入管理密码后再保存生成设置', 'warning')
+    return
+  }
+  savingChapterSummaryConfig.value = true
+  try {
+    const saved = await saveChapterSummaryConfig({
+      enabled: chapterSummaryConfigDraft.enabledText === 'true',
+      autoEnabledDefault: chapterSummaryConfigDraft.autoEnabledDefaultText === 'true',
+      detailLevel: chapterSummaryConfigDraft.detailLevel,
+      maxWords: normalizeFiniteNumber(chapterSummaryConfigDraft.maxWords, 300),
+      temperature: normalizeFiniteNumber(chapterSummaryConfigDraft.temperature, 0.3),
+      minContentChars: normalizeFiniteNumber(chapterSummaryConfigDraft.minContentChars, 300),
+      prompt: chapterSummaryConfigDraft.prompt,
+    })
+    applyChapterSummaryConfigDraft(saved)
+    if (!silent) appStore.showToast('摘要生成设置已保存', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '摘要生成设置保存失败', 'error')
+  } finally {
+    savingChapterSummaryConfig.value = false
+  }
+}
+
+async function generateChapterSummaryAfterSavingSettings(force: boolean) {
+  if (chapterSummaryConfig.value?.isAdmin) {
+    await saveChapterSummaryGenerationSettings({ silent: true })
+  }
+  await generateChapterSummaryForCurrentChapter(force)
+}
+
+function restoreDefaultChapterSummaryPrompt() {
+  // Task 4 UI 文案计划为“恢复当前”，这里恢复的是当前已保存到服务端的 prompt。
+  const fallback = chapterSummaryConfig.value?.config.prompt || ''
+  chapterSummaryConfigDraft.prompt = fallback
 }
 
 async function loadChapterSummaryForCurrentChapter() {
@@ -545,10 +1108,12 @@ async function loadChapterSummaryForCurrentChapter() {
 
 function scheduleAutoChapterSummary(identity: string) {
   clearChapterSummaryTimer()
+  if (!showChapterSummary.value) return
   if (!config.value.enableChapterSummaryAuto) return
-  if (isContinuousMode.value || isHorizontalPageMode.value) return
+  if (isHorizontalPageMode.value) return
   if (!store.displayContent || store.displayContent.trim().length < 300) return
   chapterSummaryTimer = window.setTimeout(() => {
+    if (!showChapterSummary.value) return
     if (!isCurrentChapterSummaryIdentity(currentChapterSummaryIdentity.value, identity)) return
     void generateChapterSummaryForCurrentChapter(false)
   }, 1500)
@@ -572,11 +1137,11 @@ async function generateChapterSummaryForCurrentChapter(force: boolean) {
       chapterTitle: chapter.title,
       content: store.displayContent,
       force,
+      previousChapters: buildPreviousChapterSummaryContext(),
     })
     if (requestId !== chapterSummaryRequestId || !isCurrentChapterSummaryIdentity(currentChapterSummaryIdentity.value, identity)) return
     chapterSummary.value = res.summary
     chapterSummaryStatus.value = res.summary ? 'ready' : 'idle'
-    chapterSummaryExpanded.value = Boolean(res.summary)
   } catch (error) {
     if (requestId !== chapterSummaryRequestId) return
     chapterSummaryStatus.value = chapterSummary.value ? 'ready' : 'error'
@@ -584,15 +1149,62 @@ async function generateChapterSummaryForCurrentChapter(force: boolean) {
   }
 }
 
+
+function expandCollapsedChapterSummary() {
+  chapterSummaryActiveTab.value = chapterSummary.value ? 'content' : 'settings'
+  store.updateConfig('chapterSummaryLayout', 'auto')
+}
+
 function copyChapterSummary() {
   if (!chapterSummary.value) return
   const text = [
     chapterSummary.value.summary,
-    chapterSummary.value.keyPoints.length ? `关键人物/线索：${chapterSummary.value.keyPoints.join('；')}` : '',
-    chapterSummary.value.questions.length ? `伏笔疑点：${chapterSummary.value.questions.join('；')}` : '',
+    chapterSummary.value.keyPoints.length ? `要点：${chapterSummary.value.keyPoints.join('；')}` : '',
   ].filter(Boolean).join('\n')
   void navigator.clipboard?.writeText(text)
   appStore.showToast('摘要已复制', 'success')
+}
+
+function buildPreviousChapterSummaryContext() {
+  const end = Math.max(0, store.currentIndex)
+  return store.chapters
+    .slice(Math.max(0, end - 5), end)
+    .map((chapter) => ({
+      chapterUrl: chapter.url,
+      chapterIndex: chapter.index,
+      chapterTitle: chapter.title,
+    }))
+}
+
+function adjustChapterSummaryFontSize(delta: number) {
+  store.updateConfig('chapterSummaryFontSize', getChapterSummaryFontSize(config.value.chapterSummaryFontSize + delta))
+}
+
+function adjustChapterSummarySiderWidth(delta: number) {
+  chapterSummarySiderWidth.value = clampChapterSummarySiderWidth(chapterSummarySiderWidth.value + delta)
+  store.updateConfig('chapterSummarySiderWidth', chapterSummarySiderWidth.value)
+}
+
+function handleChapterSummarySiderResize(event: PointerEvent) {
+  if (!chapterSummarySiderResizing.value) return
+  chapterSummarySiderWidth.value = clampChapterSummarySiderWidth(chapterSummaryResizeStartWidth + chapterSummaryResizeStartX - event.clientX)
+}
+
+function stopChapterSummarySiderResize() {
+  if (!chapterSummarySiderResizing.value) return
+  chapterSummarySiderResizing.value = false
+  window.removeEventListener('pointermove', handleChapterSummarySiderResize)
+  window.removeEventListener('pointerup', stopChapterSummarySiderResize)
+  store.updateConfig('chapterSummarySiderWidth', chapterSummarySiderWidth.value)
+}
+
+function startChapterSummarySiderResize(event: PointerEvent) {
+  event.preventDefault()
+  chapterSummarySiderResizing.value = true
+  chapterSummaryResizeStartX = event.clientX
+  chapterSummaryResizeStartWidth = chapterSummarySiderWidth.value
+  window.addEventListener('pointermove', handleChapterSummarySiderResize)
+  window.addEventListener('pointerup', stopChapterSummarySiderResize)
 }
 
 async function refreshOfflineCacheState() {
@@ -613,6 +1225,7 @@ function scheduleRefreshOfflineCacheState() {
 }
 
 function checkMedia() {
+  viewportWidth.value = window.innerWidth
   isMobile.value = window.innerWidth <= 768
   window.setTimeout(() => {
     updateHorizontalMetrics()
@@ -1729,12 +2342,19 @@ async function openInfo() {
 
 function toggleChapterSummary() {
   showChapterSummary.value = !showChapterSummary.value
+  store.updateConfig('showChapterSummary', showChapterSummary.value)
   if (showChapterSummary.value && !chapterSummary.value && chapterSummaryStatus.value !== 'loading') {
     scheduleAutoChapterSummary(currentChapterSummaryIdentity.value)
   } else if (!showChapterSummary.value) {
     clearChapterSummaryTimer()
   }
   appStore.showToast(showChapterSummary.value ? '已显示摘要' : '已隐藏摘要', 'success')
+}
+
+function hideChapterSummary() {
+  showChapterSummary.value = false
+  store.updateConfig('showChapterSummary', false)
+  clearChapterSummaryTimer()
 }
 
 function openAiBook() {
@@ -1745,14 +2365,25 @@ function openAiBook() {
   })
 }
 
+function openAiBackendSettings() {
+  const bookUrl = store.book?.bookUrl
+  const query = bookUrl
+    ? { bookUrl, tab: 'settings', section: 'server-model' }
+    : { tab: 'settings', section: 'server-model' }
+  void '打开 AI 后端设置'
+  void router.push({ name: 'ai-book', query })
+}
+
 onBeforeRouteLeave(() => {
   clearChapterSummaryTimer()
+  stopChapterSummarySiderResize()
   persistReadingProgressKeepalive()
   return true
 })
 
 onMounted(async () => {
   syncViewportSize()
+  void loadChapterSummaryConfigForSider()
   appStore.startReadingSession()
   if (!store.book) {
     const restored = await store.restorePersistedSession()
@@ -1796,6 +2427,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     clearChapterSummaryTimer()
+    stopChapterSummarySiderResize()
     persistReadingProgressKeepalive()
     appStore.stopReadingSession()
     window.removeEventListener('keydown', handleKeydown)
@@ -1863,6 +2495,15 @@ watch(
     void loadChapterSummaryForCurrentChapter()
   },
   { immediate: true },
+)
+
+watch(
+  () => config.value.chapterSummarySiderWidth,
+  (width) => {
+    if (!chapterSummarySiderResizing.value) {
+      chapterSummarySiderWidth.value = clampChapterSummarySiderWidth(width)
+    }
+  },
 )
 
 watch(
@@ -2128,12 +2769,16 @@ watch(
 }
 
 .chapter-summary-card {
-  margin: -14px 0 24px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
-  border-radius: 14px;
-  background: color-mix(in srgb, currentColor 4%, transparent);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.035);
+  margin: -8px 0 32px;
+  padding: 20px 22px;
+  border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.chapter-summary-card:hover {
+  border-color: var(--color-primary, #c97f3a);
 }
 
 .chapter-summary-header {
@@ -2141,7 +2786,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 20px;
   border: 0;
   padding: 0;
   color: inherit;
@@ -2152,10 +2797,22 @@ watch(
 
 .summary-kicker {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--color-primary, #c97f3a);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
+}
+
+.summary-kicker::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: currentColor;
+  opacity: 0.75;
 }
 
 .summary-muted {
@@ -2164,62 +2821,418 @@ watch(
   text-overflow: ellipsis;
   white-space: nowrap;
   opacity: 0.62;
-  font-size: 13px;
+  font-size: 0.92em;
 }
 
 .chapter-summary-body {
-  margin-top: 12px;
-  font-size: 0.92em;
-  line-height: 1.7;
+  margin-top: 10px;
+  line-height: 1.75;
 }
 
 .summary-main {
   margin: 0 0 12px;
+  max-width: 68ch;
+  font-weight: 400;
+  text-indent: 2em;
+  text-wrap: pretty;
+}
+
+.summary-main.summary-muted {
+  text-indent: 0;
 }
 
 .summary-list {
-  margin-top: 10px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 16%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 7%, transparent);
+  font-size: 0.88em;
+  line-height: 1.65;
 }
 
 .summary-list strong {
-  color: var(--color-primary, #c97f3a);
-  font-size: 13px;
+  display: block;
+  margin-bottom: 6px;
+  color: inherit;
+  font-size: 0.9em;
+  font-weight: 600;
+  opacity: 0.72;
+  letter-spacing: 0;
 }
 
 .summary-list ul {
-  margin: 6px 0 0 1.2em;
+  display: grid;
+  gap: 1px;
+  margin: 0;
   padding: 0;
+  list-style: none;
+}
+
+.summary-list li {
+  position: relative;
+  padding: 1px 0 1px 18px;
+  text-wrap: pretty;
+}
+
+.summary-list li::before {
+  content: '';
+  position: absolute;
+  top: 0.95em;
+  left: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--color-primary, #c97f3a);
+}
+
+.summary-list.style-card ul {
+  display: grid;
+  gap: 1px;
+}
+
+.summary-list.style-card li {
+  padding: 1px 0 1px 18px;
+}
+
+.summary-list.style-card li::before {
+  display: block;
+}
+
+.summary-list.style-list {
+  padding: 12px 0 0;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  border-radius: 0;
+  background: transparent;
+}
+
+.summary-list.style-list li {
+  position: relative;
+  padding: 1px 0 1px 18px;
+}
+
+.summary-skeleton {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.summary-skeleton span {
+  height: 12px;
+  border-radius: 99px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, currentColor 7%, transparent),
+    color-mix(in srgb, currentColor 13%, transparent),
+    color-mix(in srgb, currentColor 7%, transparent)
+  );
+}
+
+.summary-skeleton span:nth-child(2) {
+  width: 86%;
+}
+
+.summary-skeleton span:nth-child(3) {
+  width: 62%;
 }
 
 .summary-error {
-  margin: 10px 0 0;
+  margin: 12px 0 0;
   color: #d25f4f;
-  font-size: 13px;
+  font-size: 0.9em;
 }
 
 .summary-actions {
   display: flex;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 16px;
 }
 
 .summary-actions.compact {
-  margin-top: 10px;
+  margin-top: 12px;
 }
 
 .summary-action {
-  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 45%, transparent);
-  border-radius: 999px;
-  padding: 5px 12px;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 20px;
+  padding: 6px 14px;
+  color: inherit;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  opacity: 0.78;
+  transition: border-color 0.2s, color 0.2s, background 0.2s, transform 0.18s;
+}
+
+.summary-action:hover:not(:disabled) {
+  border-color: var(--color-primary, #c97f3a);
   color: var(--color-primary, #c97f3a);
   background: transparent;
-  font-size: 12px;
-  cursor: pointer;
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.summary-action:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.summary-action:focus-visible,
+.summary-panel-close:focus-visible,
+.chapter-summary-header:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-primary, #c97f3a) 70%, transparent);
+  outline-offset: 3px;
 }
 
 .summary-action:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+.reader-ui-font,
+.reader-drawer,
+.reader-toolbar,
+.reader-mobile-controls,
+.reader-overlay,
+.chapter-summary-sider,
+.selection-menu,
+.summary-action,
+.summary-tabs,
+.summary-setting-group,
+.summary-setting-field,
+.summary-prompt-input {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+}
+
+
+.chapter-summary-card.side {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.chapter-summary-sider {
+  position: relative;
+  flex: 0 0 auto;
+  height: auto;
+  overflow-y: auto;
+  margin: 16px 16px 16px 0;
+  border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  border-radius: 24px;
+  box-shadow: -10px 10px 30px rgba(0, 0, 0, 0.08);
+  padding: 0 20px 24px;
+  box-sizing: border-box;
+  transition: background 0.3s, color 0.3s, box-shadow 0.2s;
+}
+
+.chapter-summary-sider.resizing {
+  user-select: none;
+}
+
+.chapter-summary-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  cursor: col-resize;
+}
+
+.chapter-summary-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 28px;
+  bottom: 28px;
+  left: 3px;
+  width: 2px;
+  border-radius: 99px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.chapter-summary-sider-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 -20px 10px;
+  padding: 14px 20px 10px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  font-size: 12px;
+}
+
+.chapter-summary-sider-head .summary-kicker {
+  font-size: 12px;
+}
+
+.chapter-summary-sider-head .summary-muted {
+  font-size: 11px;
+}
+
+.chapter-summary-card.side .chapter-summary-body {
+  margin-top: 0;
+}
+
+.chapter-summary-settings-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.summary-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+}
+
+.summary-tab {
+  border: 0;
+  border-radius: 8px;
+  padding: 5px 9px;
+  color: inherit;
+  background: transparent;
+  font-size: 12px;
+  opacity: 0.68;
+  cursor: pointer;
+}
+
+.summary-tab.active {
+  color: var(--color-primary, #c97f3a);
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  opacity: 1;
+}
+
+.summary-setting-group {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, currentColor 9%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+}
+
+.summary-setting-title {
+  color: var(--color-primary, #c97f3a);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.summary-setting-row,
+.summary-setting-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: inherit;
+  font-size: 12px;
+}
+
+.summary-setting-row > span,
+.summary-setting-field > span {
+  opacity: 0.72;
+}
+
+.summary-setting-field input,
+.summary-prompt-input {
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 10px;
+  padding: 7px 9px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+}
+
+.summary-setting-field input {
+  width: 96px;
+  box-sizing: border-box;
+}
+
+.summary-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  line-height: 1.55;
+  font-size: 12px;
+}
+
+.summary-switch,
+.summary-stepper {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+}
+
+.summary-switch button,
+.summary-stepper button,
+.summary-stepper span {
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 9px;
+  color: inherit;
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.16s, color 0.16s, opacity 0.16s;
+}
+
+.summary-switch button.active {
+  color: var(--color-primary, #c97f3a);
+  background: color-mix(in srgb, currentColor 5%, transparent);
+}
+
+.summary-switch button:disabled,
+.summary-stepper button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.summary-stepper span {
+  min-width: 40px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-setting-note {
+  margin: 0;
+  color: inherit;
+  opacity: 0.62;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chapter-summary-collapsed-pill {
+  position: fixed;
+  right: 88px;
+  top: calc(var(--safe-area-top) + 84px);
+  z-index: 25;
+  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 45%, transparent);
+  border-radius: 999px;
+  padding: 8px 14px;
+  color: var(--color-primary, #c97f3a);
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 8%, transparent);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+
+.summary-panel-close {
+  flex: 0 0 auto;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  opacity: 0.6;
+  cursor: pointer;
 }
 
 .chapter-text {
@@ -2420,6 +3433,11 @@ watch(
   .chapter-footer {
     margin-top: 12px;
     padding-bottom: 0;
+  }
+
+  .chapter-summary-sider,
+  .chapter-summary-collapsed-pill {
+    display: none;
   }
 
   .reader-drawer {
