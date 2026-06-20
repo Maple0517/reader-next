@@ -1,7 +1,8 @@
-import type { AiBookConfig } from '../types'
+import type { AiBookConfig, ImageProviderPreset, SpeechProviderPreset, TextProviderPreset } from '../types'
 
 export const DEFAULT_TEXT_MODEL_PATH = '/v1/chat/completions'
 export const DEFAULT_IMAGE_MODEL_PATH = '/v1/images/generations'
+export const DEFAULT_SPEECH_MODEL_PATH = '/v1/audio/speech'
 
 export const DEFAULT_AI_BOOK_CONFIG: AiBookConfig = {
   modelSource: 'browser',
@@ -41,6 +42,29 @@ function normalizeBaseUrl(url?: string | null) {
 function normalizeProxyPath(path: string | undefined, fallback: string) {
   const value = (path || '').trim() || fallback
   return value.startsWith('/') ? value : `/${value}`
+}
+
+export function textPathForPreset(preset: TextProviderPreset, model: string) {
+  if (preset === 'responses') return '/v1/responses'
+  if (preset === 'gemini') return `/v1beta/models/${encodeURIComponent(model.trim() || 'gemini-2.5-pro')}:generateContent`
+  if (preset === 'anthropic') return '/v1/messages'
+  return DEFAULT_TEXT_MODEL_PATH
+}
+
+export function textPresetFromPath(path: string): TextProviderPreset {
+  const value = normalizeProxyPath(path, DEFAULT_TEXT_MODEL_PATH)
+  if (value.endsWith(':generateContent') || value.endsWith(':streamGenerateContent')) return 'gemini'
+  if (value === '/v1/responses') return 'responses'
+  if (value === '/v1/messages') return 'anthropic'
+  if (value.endsWith('/chat/completions')) return 'chat'
+  return 'custom'
+}
+
+export function mediaPresetFromPath(path: string, kind: 'image' | 'speech'): ImageProviderPreset | SpeechProviderPreset {
+  const fallback = kind === 'image' ? DEFAULT_IMAGE_MODEL_PATH : DEFAULT_SPEECH_MODEL_PATH
+  const value = normalizeProxyPath(path, fallback)
+  if (kind === 'image') return value.endsWith('/images/generations') ? 'openai-image' : 'custom'
+  return value.endsWith('/audio/speech') ? 'openai-speech' : 'custom'
 }
 
 export function getAiBookConfig(username?: string | null): AiBookConfig {

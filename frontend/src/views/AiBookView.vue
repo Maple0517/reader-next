@@ -339,6 +339,16 @@
                   <input v-model="configDraft.textModel" />
                 </label>
                 <label class="field">
+                  <span>接口类型</span>
+                  <select v-model="textProviderPreset">
+                    <option value="chat">Chat 兼容</option>
+                    <option value="responses">OpenAI Responses</option>
+                    <option value="gemini">Gemini 原生</option>
+                    <option value="anthropic">Anthropic 原生</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label v-if="textProviderPreset === 'custom'" class="field">
                   <span>接口路径</span>
                   <input v-model="configDraft.textPath" placeholder="/v1/chat/completions" />
                 </label>
@@ -368,6 +378,13 @@
                   <input v-model="configDraft.imageModel" />
                 </label>
                 <label class="field">
+                  <span>接口类型</span>
+                  <select v-model="imageProviderPreset">
+                    <option value="openai-image">OpenAI 图片兼容</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label v-if="imageProviderPreset === 'custom'" class="field">
                   <span>接口路径</span>
                   <input v-model="configDraft.imagePath" placeholder="/v1/images/generations" />
                 </label>
@@ -424,6 +441,16 @@
                     <input v-model="serverConfigDraft.text.model" placeholder="gpt-4o-mini" />
                   </label>
                   <label class="field">
+                    <span>接口类型</span>
+                    <select v-model="serverTextProviderPreset">
+                      <option value="chat">Chat 兼容</option>
+                      <option value="responses">OpenAI Responses</option>
+                      <option value="gemini">Gemini 原生</option>
+                      <option value="anthropic">Anthropic 原生</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </label>
+                  <label v-if="serverTextProviderPreset === 'custom'" class="field">
                     <span>接口路径</span>
                     <input v-model="serverConfigDraft.text.path" placeholder="/v1/chat/completions" />
                   </label>
@@ -458,6 +485,13 @@
                     <input v-model="serverConfigDraft.image.model" placeholder="gpt-image-1" />
                   </label>
                   <label class="field">
+                    <span>接口类型</span>
+                    <select v-model="serverImageProviderPreset">
+                      <option value="openai-image">OpenAI 图片兼容</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </label>
+                  <label v-if="serverImageProviderPreset === 'custom'" class="field">
                     <span>接口路径</span>
                     <input v-model="serverConfigDraft.image.path" placeholder="/v1/images/generations" />
                   </label>
@@ -500,6 +534,13 @@
                     <input v-model="serverConfigDraft.speech.model" placeholder="gpt-4o-mini-tts" />
                   </label>
                   <label class="field">
+                    <span>接口类型</span>
+                    <select v-model="serverSpeechProviderPreset">
+                      <option value="openai-speech">OpenAI Speech 兼容</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </label>
+                  <label v-if="serverSpeechProviderPreset === 'custom'" class="field">
                     <span>接口路径</span>
                     <input v-model="serverConfigDraft.speech.path" placeholder="/v1/audio/speech" />
                   </label>
@@ -553,14 +594,21 @@ import type {
   AiServerModelConfig,
   Book,
   BookChapter,
+  ImageProviderPreset,
+  SpeechProviderPreset,
+  TextProviderPreset,
 } from '../types'
 import { buildAiBookRelationshipGraph, layoutAiBookRelationshipGraph } from '../utils/aiBookGraph'
 import { buildAiBookLocationRows, groupAiBookWorldview } from '../utils/aiBookPresentation'
 import { isAiBookMemoryV2, toAiBookDisplayMemory } from '../utils/aiBookV2'
 import {
   DEFAULT_IMAGE_MODEL_PATH,
+  DEFAULT_SPEECH_MODEL_PATH,
   DEFAULT_TEXT_MODEL_PATH,
+  mediaPresetFromPath,
   shouldAutoUseServerAiBookConfig,
+  textPathForPreset,
+  textPresetFromPath,
 } from '../utils/aiBookConfig'
 import { collapseWhitespace, summarizeDisplayError } from '../utils/httpError'
 
@@ -589,7 +637,6 @@ const selectedGraphNodeId = ref('')
 const characterSearch = ref('')
 const collapsedLocationIds = ref(new Set<string>())
 const collapsedWorldviewCategories = ref(new Set<string>())
-const DEFAULT_SPEECH_MODEL_PATH = '/v1/audio/speech'
 
 const tabs: Array<{ key: AiTab; label: string }> = [
   { key: 'overview', label: '总览' },
@@ -625,6 +672,32 @@ const displayMemory = computed<AiBookMemory | null>(() => displayBaseMemory.valu
       locations: displayLocations.value,
     }
   : null)
+const textProviderPreset = computed<TextProviderPreset>({
+  get: () => textPresetFromPath(configDraft.textPath),
+  set: (preset) => applyTextPreset(configDraft, preset),
+})
+const imageProviderPreset = computed<ImageProviderPreset | 'custom'>({
+  get: () => mediaPresetFromPath(configDraft.imagePath, 'image') as ImageProviderPreset,
+  set: (preset) => {
+    if (preset !== 'custom') configDraft.imagePath = DEFAULT_IMAGE_MODEL_PATH
+  },
+})
+const serverTextProviderPreset = computed<TextProviderPreset>({
+  get: () => textPresetFromPath(serverConfigDraft.text.path),
+  set: (preset) => applyTextPreset(serverConfigDraft.text, preset),
+})
+const serverImageProviderPreset = computed<ImageProviderPreset | 'custom'>({
+  get: () => mediaPresetFromPath(serverConfigDraft.image.path, 'image') as ImageProviderPreset,
+  set: (preset) => {
+    if (preset !== 'custom') serverConfigDraft.image.path = DEFAULT_IMAGE_MODEL_PATH
+  },
+})
+const serverSpeechProviderPreset = computed<SpeechProviderPreset | 'custom'>({
+  get: () => mediaPresetFromPath(serverConfigDraft.speech.path, 'speech') as SpeechProviderPreset,
+  set: (preset) => {
+    if (preset !== 'custom') serverConfigDraft.speech.path = DEFAULT_SPEECH_MODEL_PATH
+  },
+})
 const relationshipGraph = computed(() => displayMemory.value
   ? buildAiBookRelationshipGraph(displayMemory.value)
   : { nodes: [], links: [] })
@@ -676,6 +749,22 @@ watch(
   () => aiStore.config,
   (next) => Object.assign(configDraft, next),
   { deep: true },
+)
+
+watch(
+  () => configDraft.textModel,
+  () => {
+    if (textProviderPreset.value === 'gemini') configDraft.textPath = textPathForPreset('gemini', configDraft.textModel)
+  },
+)
+
+watch(
+  () => serverConfigDraft.text.model,
+  () => {
+    if (serverTextProviderPreset.value === 'gemini') {
+      serverConfigDraft.text.path = textPathForPreset('gemini', serverConfigDraft.text.model)
+    }
+  },
 )
 
 watch(
@@ -1052,6 +1141,14 @@ function cloneServerModelConfig(config: AiServerModelConfig): AiServerModelConfi
   cloned.image.path = normalizeModelPath(cloned.image.path, DEFAULT_IMAGE_MODEL_PATH)
   cloned.speech.path = normalizeModelPath(cloned.speech.path, DEFAULT_SPEECH_MODEL_PATH)
   return cloned
+}
+
+function applyTextPreset(target: { textModel?: string; textPath?: string; model?: string; path?: string }, preset: TextProviderPreset) {
+  if (preset === 'custom') return
+  const model = target.textModel ?? target.model ?? ''
+  const path = textPathForPreset(preset, model)
+  if ('textPath' in target) target.textPath = path
+  else target.path = path
 }
 
 function normalizeModelPath(path: string | undefined, fallback: string) {

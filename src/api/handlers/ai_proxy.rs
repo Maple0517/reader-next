@@ -187,7 +187,18 @@ fn apply_server_model_body_defaults(
 }
 
 fn adapt_ai_proxy_body(path: &str, kind: Option<AiModelKind>, body: &mut Value) {
-    if kind != Some(AiModelKind::Text) || !is_native_gemini_generate_content_path(path) {
+    if kind != Some(AiModelKind::Text) {
+        return;
+    }
+    if is_responses_path(path) {
+        openai_chat_body_to_responses_body(body);
+        return;
+    }
+    if is_anthropic_messages_path(path) {
+        openai_chat_body_to_anthropic_messages_body(body);
+        return;
+    }
+    if !is_native_gemini_generate_content_path(path) {
         return;
     }
     let Some(obj) = body.as_object() else {
@@ -197,6 +208,52 @@ fn adapt_ai_proxy_body(path: &str, kind: Option<AiModelKind>, body: &mut Value) 
         return;
     }
     *body = openai_chat_body_to_gemini_generate_content(obj);
+}
+
+fn openai_chat_body_to_responses_body(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let Some(messages) = obj.remove("messages") else {
+        return;
+    };
+    obj.insert("input".to_string(), messages);
+}
+
+fn openai_chat_body_to_anthropic_messages_body(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let Some(messages) = obj.get("messages").and_then(Value::as_array) else {
+        return;
+    };
+    let mut system_texts = Vec::new();
+    let mut next_messages = Vec::new();
+    for message in messages {
+        let Some(message) = message.as_object() else {
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let text = message_content_to_text(message.get("content"));
+        if role == "system" {
+            if !text.is_empty() {
+                system_texts.push(text);
+            }
+            continue;
+        }
+        if role == "user" || role == "assistant" {
+            next_messages.push(serde_json::json!({ "role": role, "content": text }));
+        }
+    }
+    if !system_texts.is_empty() {
+        obj.insert("system".to_string(), Value::String(system_texts.join("\n")));
+    }
+    obj.insert("messages".to_string(), Value::Array(next_messages));
+    obj.entry("max_tokens".to_string())
+        .or_insert_with(|| serde_json::json!(4096));
 }
 
 fn openai_chat_body_to_gemini_generate_content(body: &Map<String, Value>) -> Value {
@@ -455,6 +512,14 @@ fn is_native_gemini_generate_content_path(path: &str) -> bool {
     path.split('?').next().is_some_and(|path| {
         path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent")
     })
+}
+
+fn is_responses_path(path: &str) -> bool {
+    path.split('?').next().is_some_and(|path| path.ends_with("/responses"))
+}
+
+fn is_anthropic_messages_path(path: &str) -> bool {
+    path.split('?').next().is_some_and(|path| path.ends_with("/v1/messages"))
 }
 
 fn should_use_gemini_api_key_header(target: &Url, path: &str, kind: Option<AiModelKind>) -> bool {
@@ -731,5 +796,42 @@ mod tests {
             body.pointer("/generationConfig/responseSchema/properties/chapterDigest/type"),
             Some(&Value::String("object".to_string()))
         );
+    }
+
+    #[test]
+    fn responses_text_path_converts_chat_body_to_responses_input() {
+        let mut body = serde_json::json!({
+            "model": "browser-model",
+            "messages": [
+                {"role": "system", "content": "系统"},
+                {"role": "user", "content": "正文"}
+            ],
+            "temperature": 0.2
+        });
+
+        adapt_ai_proxy_body("/v1/responses", Some(AiModelKind::Text), &mut body);
+
+        assert!(body.get("messages").is_none());
+        assert_eq!(body.pointer("/input/0/role"), Some(&Value::String("system".to_string())));
+        assert_eq!(body.pointer("/input/1/role"), Some(&Value::String("user".to_string())));
+    }
+
+    #[test]
+    fn anthropic_text_path_converts_chat_body_to_messages_shape() {
+        let mut body = serde_json::json!({
+            "model": "browser-model",
+            "messages": [
+                {"role": "system", "content": "系统"},
+                {"role": "user", "content": "正文"}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4096
+        });
+
+        adapt_ai_proxy_body("/v1/messages", Some(AiModelKind::Text), &mut body);
+
+        assert_eq!(body.get("system"), Some(&Value::String("系统".to_string())));
+        assert_eq!(body.pointer("/messages/0/role"), Some(&Value::String("user".to_string())));
+        assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(4096)));
     }
 }

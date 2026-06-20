@@ -1554,6 +1554,10 @@ async function requestModelJson({
 function extractAiBookModelMessage(data: unknown): AiBookModelMessage {
   if (!isRecord(data)) return {}
 
+  if (typeof data.output_text === 'string' && data.output_text.trim()) {
+    return { content: data.output_text }
+  }
+
   const choices = data.choices
   if (Array.isArray(choices)) {
     const firstChoice = choices.find(isRecord)
@@ -1565,6 +1569,12 @@ function extractAiBookModelMessage(data: unknown): AiBookModelMessage {
       }
     }
   }
+
+  const responsesText = extractTextParts(data.output)
+  if (responsesText) return { content: responsesText }
+
+  const anthropicText = extractTextParts(data.content)
+  if (anthropicText) return { content: anthropicText }
 
   const candidates = data.candidates
   const firstCandidate = Array.isArray(candidates) ? candidates.find(isRecord) : null
@@ -1590,6 +1600,17 @@ function extractAiBookModelMessage(data: unknown): AiBookModelMessage {
     content: text || (typeof data.text === 'string' ? data.text : undefined),
     tool_calls: toolCalls.length ? toolCalls : sdkFunctionCalls.length ? sdkFunctionCalls : undefined,
   }
+}
+
+function extractTextParts(value: unknown) {
+  if (!Array.isArray(value)) return ''
+  return value
+    .filter(isRecord)
+    .flatMap((item) => Array.isArray(item.content) ? item.content : [item])
+    .filter(isRecord)
+    .map((part) => typeof part.text === 'string' ? part.text.trim() : '')
+    .filter(Boolean)
+    .join('\n')
 }
 
 function geminiFunctionCallToOpenAiToolCall(value: unknown, index: number): AiBookToolCall | null {

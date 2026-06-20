@@ -231,6 +231,10 @@ export interface AiBookConfig {
   useBackendProxy: boolean
 }
 
+export type TextProviderPreset = 'chat' | 'responses' | 'gemini' | 'anthropic' | 'custom'
+export type ImageProviderPreset = 'openai-image' | 'custom'
+export type SpeechProviderPreset = 'openai-speech' | 'custom'
+
 export interface AiModelEndpointConfig {
   enabled: boolean
   baseUrl: string

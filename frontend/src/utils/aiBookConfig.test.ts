@@ -6,7 +6,10 @@ import {
   isAiBookImageConfigReady,
   shouldAutoUseServerAiBookConfig,
   isAiBookConfigReady,
+  mediaPresetFromPath,
   saveAiBookConfig,
+  textPathForPreset,
+  textPresetFromPath,
 } from './aiBookConfig'
 
 beforeEach(() => {
@@ -153,6 +156,24 @@ describe('aiBookConfig', () => {
       false,
       'http://127.0.0.1:8081',
     )).toBe(false)
+  })
+
+  it('maps text provider presets to existing path values', () => {
+    expect(textPathForPreset('chat', 'gpt-4o-mini')).toBe('/v1/chat/completions')
+    expect(textPathForPreset('responses', 'gpt-5.5')).toBe('/v1/responses')
+    expect(textPathForPreset('gemini', 'gemini-2.5-pro')).toBe('/v1beta/models/gemini-2.5-pro:generateContent')
+    expect(textPathForPreset('anthropic', 'claude-sonnet-4')).toBe('/v1/messages')
+  })
+
+  it('infers provider presets from saved paths', () => {
+    expect(textPresetFromPath('/v1/chat/completions')).toBe('chat')
+    expect(textPresetFromPath('/v1/responses')).toBe('responses')
+    expect(textPresetFromPath('/v1beta/models/gemini-2.5-pro:generateContent')).toBe('gemini')
+    expect(textPresetFromPath('/v1/messages')).toBe('anthropic')
+    expect(textPresetFromPath('/custom/path')).toBe('custom')
+    expect(mediaPresetFromPath('/v1/images/generations', 'image')).toBe('openai-image')
+    expect(mediaPresetFromPath('/v1/audio/speech', 'speech')).toBe('openai-speech')
+    expect(mediaPresetFromPath('/custom/image', 'image')).toBe('custom')
   })
 })
 

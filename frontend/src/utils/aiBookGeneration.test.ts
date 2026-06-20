@@ -1382,6 +1382,50 @@ describe('aiBookGeneration', () => {
     })
   })
 
+  it('reads OpenAI Responses output_text for AI memory update', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        output_text: JSON.stringify({
+          memory: { summary: 'Responses 更新。', worldview: [], characters: [], relationships: [], locations: [] },
+        }),
+      }),
+    }))
+
+    const update = await requestAiBookMemoryUpdate({
+      config: { ...readyConfig, textPath: '/v1/responses' },
+      book: { name: '山海旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' },
+      chapter: { title: '第八章', url: 'chapter-8', index: 7 },
+      chapterContent: '主角抵达北境。',
+      memory: { bookUrl: 'book-1', enabled: true, updatedAt: 0, worldview: [], characters: [], relationships: [], locations: [] },
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })
+
+    expect(update.memory.summary).toBe('Responses 更新。')
+  })
+
+  it('reads Anthropic content text for AI memory update', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        content: [{ type: 'text', text: JSON.stringify({
+          memory: { summary: 'Claude 更新。', worldview: [], characters: [], relationships: [], locations: [] },
+        }) }],
+      }),
+    }))
+
+    const update = await requestAiBookMemoryUpdate({
+      config: { ...readyConfig, textPath: '/v1/messages' },
+      book: { name: '山海旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' },
+      chapter: { title: '第八章', url: 'chapter-8', index: 7 },
+      chapterContent: '主角抵达北境。',
+      memory: { bookUrl: 'book-1', enabled: true, updatedAt: 0, worldview: [], characters: [], relationships: [], locations: [] },
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })
+
+    expect(update.memory.summary).toBe('Claude 更新。')
+  })
+
   it('uses backend configured image model without browser credentials when selected', async () => {
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => ({
       ok: true,

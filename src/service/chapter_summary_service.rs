@@ -125,6 +125,8 @@ impl ChapterSummaryService {
         };
         let target = build_ai_proxy_url(&endpoint.base_url, path, endpoint.use_full_url)
             .map_err(AppError::BadRequest)?;
+        let use_gemini_api_key_header = is_gemini_generate_content_path(path)
+            && target.host_str() == Some("generativelanguage.googleapis.com");
         let body = build_summary_model_body(path, &endpoint.model, &config, &req);
 
         let model_client = Client::builder().timeout(ai_proxy_timeout()).build()?;
@@ -133,7 +135,11 @@ impl ChapterSummaryService {
             .header(reqwest::header::ACCEPT, "application/json")
             .json(&body);
         if !endpoint.api_key.trim().is_empty() {
-            builder = builder.bearer_auth(endpoint.api_key.trim());
+            if use_gemini_api_key_header {
+                builder = builder.header("x-goog-api-key", endpoint.api_key.trim());
+            } else {
+                builder = builder.bearer_auth(endpoint.api_key.trim());
+            }
         }
         let response = builder.send().await?;
         if !response.status().is_success() {
@@ -219,6 +225,30 @@ fn build_summary_model_body(
     req: &GenerateChapterSummaryRequest,
 ) -> Value {
     let user_prompt = build_chapter_summary_user_prompt(config, req);
+    if is_gemini_generate_content_path(path) {
+        return json!({
+            "contents": [
+                { "role": "user", "parts": [{ "text": user_prompt }] }
+            ],
+            "systemInstruction": { "parts": [{ "text": config.prompt }] },
+            "generationConfig": {
+                "temperature": config.temperature,
+                "maxOutputTokens": 1024,
+                "responseMimeType": "application/json"
+            }
+        });
+    }
+    if is_anthropic_messages_path(path) {
+        return json!({
+            "model": model,
+            "system": config.prompt,
+            "temperature": config.temperature,
+            "max_tokens": 1024,
+            "messages": [
+                { "role": "user", "content": user_prompt }
+            ]
+        });
+    }
     if path.ends_with("/responses") {
         return json!({
             "model": model,
@@ -240,6 +270,40 @@ fn build_summary_model_body(
 }
 
 fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> {
+    if is_gemini_generate_content_path(path) {
+        let text = value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| candidate.pointer("/content/parts").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+
+    if is_anthropic_messages_path(path) {
+        let text = value
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+
     if path.ends_with("/responses") {
         if let Some(text) = value.get("output_text").and_then(Value::as_str) {
             let text = text.trim();
@@ -271,6 +335,16 @@ fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> 
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| AppError::BadRequest("摘要模型返回内容为空".to_string()))
+}
+
+fn is_gemini_generate_content_path(path: &str) -> bool {
+    path.split('?').next().is_some_and(|path| {
+        path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent")
+    })
+}
+
+fn is_anthropic_messages_path(path: &str) -> bool {
+    path.split('?').next().is_some_and(|path| path.ends_with("/v1/messages"))
 }
 
 fn parse_summary_payload(content: &str) -> Result<ModelSummaryPayload, AppError> {
@@ -400,6 +474,68 @@ mod tests {
         )
         .unwrap();
         assert!(nested.contains("\"summary\":\"nested\""));
+    }
+
+    #[test]
+    fn gemini_endpoint_uses_generate_content_body_and_extracts_candidate_text() {
+        let config = ChapterSummaryConfig::default();
+        let req = GenerateChapterSummaryRequest {
+            book_url: "book-a".to_string(),
+            chapter_url: "chapter-1".to_string(),
+            chapter_title: Some("第一章".to_string()),
+            content: "足够长的正文".repeat(80),
+            ..Default::default()
+        };
+
+        let body = build_summary_model_body(
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "gemini-2.5-pro",
+            &config,
+            &req,
+        );
+        assert!(body.get("messages").is_none());
+        assert_eq!(body.pointer("/contents/0/role"), Some(&json!("user")));
+        assert_eq!(body.pointer("/systemInstruction/parts/0/text"), Some(&json!(config.prompt)));
+        assert!(
+            (body
+                .pointer("/generationConfig/temperature")
+                .and_then(Value::as_f64)
+                .unwrap()
+                - 0.3)
+                .abs()
+                < 0.0001
+        );
+
+        let content = extract_model_content(
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            &json!({ "candidates": [{ "content": { "parts": [{ "text": "{\"summary\":\"gemini\",\"keyPoints\":[],\"questions\":[]}" }] } }] }),
+        )
+        .unwrap();
+        assert!(content.contains("\"summary\":\"gemini\""));
+    }
+
+    #[test]
+    fn anthropic_endpoint_uses_messages_body_and_extracts_content_text() {
+        let config = ChapterSummaryConfig::default();
+        let req = GenerateChapterSummaryRequest {
+            book_url: "book-a".to_string(),
+            chapter_url: "chapter-1".to_string(),
+            chapter_title: Some("第一章".to_string()),
+            content: "足够长的正文".repeat(80),
+            ..Default::default()
+        };
+
+        let body = build_summary_model_body("/v1/messages", "claude-sonnet-4", &config, &req);
+        assert!(body.get("messages").is_some());
+        assert_eq!(body.get("system"), Some(&json!(config.prompt)));
+        assert_eq!(body.get("max_tokens"), Some(&json!(1024)));
+
+        let content = extract_model_content(
+            "/v1/messages",
+            &json!({ "content": [{ "type": "text", "text": "{\"summary\":\"claude\",\"keyPoints\":[],\"questions\":[]}" }] }),
+        )
+        .unwrap();
+        assert!(content.contains("\"summary\":\"claude\""));
     }
 
     #[tokio::test]
