@@ -56,6 +56,19 @@ describe('reader local txt chapters', () => {
     vi.mocked(setBrowserCachedChapter).mockReset()
   })
 
+  it('switches chinese mode back to simplified after traditional conversion is loaded', async () => {
+    const readerStore = useReaderStore()
+    readerStore.content = '爱学习'
+
+    readerStore.updateConfig('chineseMode', 'traditional')
+    await vi.dynamicImportSettled()
+    expect(readerStore.displayContent).toBe('愛學習')
+
+    readerStore.updateConfig('chineseMode', 'simplified')
+
+    expect(readerStore.displayContent).toBe('爱学习')
+  })
+
   it('fetches uploaded local txt content from backend even when browser reports offline', async () => {
     vi.mocked(getBookContent).mockResolvedValue('本地正文')
     vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
