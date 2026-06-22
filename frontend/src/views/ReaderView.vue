@@ -2795,6 +2795,12 @@ watch(
   cursor: pointer;
 }
 
+.chapter-summary-header > :first-child,
+.chapter-summary-sider-head > :first-child {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .summary-kicker {
   flex: 0 0 auto;
   display: inline-flex;
@@ -3086,6 +3092,7 @@ watch(
 }
 
 .summary-tabs {
+  flex: 0 0 auto;
   display: inline-flex;
   gap: 4px;
   padding: 4px;
