@@ -90,13 +90,19 @@ describe('aiBookV2', () => {
 
     expect(display.summary).toBe('林舟抵达北境，旧神传说仍未确认。')
     expect(display.worldview[0]).toMatchObject({ category: '历史传说', title: '旧神传说' })
+    expect(display.worldview[0].evidence).toEqual([
+      { chapterIndex: 7, chapterTitle: '第八章 北境', note: '北境首次提到旧神' },
+    ])
     expect(display.characters[0]).toMatchObject({ name: '林舟', location: '北境', status: '抵达北境' })
+    expect(display.characters[0].evidence).toEqual([])
     expect(display.relationships[0]).toMatchObject({
       source: '林舟',
       relation: '临时同伴',
       target: 'char-shen-yue',
     })
+    expect(display.relationships[0].evidence).toEqual([])
     expect(display.locations[0]).toMatchObject({ name: '北境', description: '寒冷边境。' })
+    expect(display.locations[0].evidence).toEqual([])
     expect(display.map).toMatchObject({
       imageUrl: '/assets/ai-maps/north.png',
       prompt: '绘制北境地图',
@@ -173,7 +179,7 @@ describe('aiBookV2', () => {
     ])
   })
 
-  it('rejects invalid location parents and records an open question', () => {
+  it('rejects invalid location parents without adding user-facing open questions', () => {
     const memory = reconcileAiBookMemoryV2(createEmptyAiBookMemoryV2(book), {
       chapterDigest: digest('阿尔托与维克托住宅出现。'),
       locations: [
@@ -199,7 +205,29 @@ describe('aiBookV2', () => {
 
     const alto = memory.locations.find((item) => item.name === '阿尔托')
     expect(alto?.parentId).toBeUndefined()
-    expect(memory.summary.openQuestions.join('\n')).toContain('阿尔托')
+    expect(memory.summary.openQuestions.join('\n')).not.toContain('层级不可信')
+    expect(memory.summary.openQuestions.join('\n')).not.toContain('阿尔托')
+  })
+
+  it('infers internal scale from free-form English location kinds', () => {
+    const memory = reconcileAiBookMemoryV2(createEmptyAiBookMemoryV2(book), {
+      chapterDigest: digest('北境学院、图书馆和遗迹出现。'),
+      locations: [
+        { name: 'Northern Province', kind: 'region', description: '北境行省。', importance: 'high', evidence: evidence() },
+        { name: 'North Academy', kind: 'school', description: '北境学院。', importance: 'high', evidence: evidence() },
+        { name: 'Old Library', kind: 'building', description: '学院旧图书馆。', importance: 'medium', evidence: evidence() },
+        { name: 'Training Grounds', kind: 'facility', description: '学院训练场。', importance: 'medium', evidence: evidence() },
+        { name: 'Unknown Gate', kind: 'unknown', description: '无法确认层级的门。', importance: 'medium', evidence: evidence() },
+      ],
+    }, book, chapter).memory
+
+    expect(memory.locations.map((item) => [item.name, item.kind, item.scale])).toEqual(expect.arrayContaining([
+      ['Northern Province', 'region', 'region'],
+      ['North Academy', 'school', 'building'],
+      ['Old Library', 'building', 'building'],
+      ['Training Grounds', 'facility', 'site'],
+      ['Unknown Gate', 'unknown', 'unknown'],
+    ]))
   })
 
   it('marks map dirty when an important location is added', () => {

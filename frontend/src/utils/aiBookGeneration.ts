@@ -230,7 +230,8 @@ export function buildAiBookPromptMessages({
         '角色和关系必须填写 importance: high|medium|low；只保留推动剧情、反复出现或明确影响主角行动的 high/medium 项。',
         '不要输出不重要、路人、一次性提及、无状态变化的角色；不要输出寒暄、同村、路过、单纯“认识”等低价值关系。',
         '人物关系必须去重：同一对人物的同类关系只输出一条，不要再输出反向重复项；保留信息量更高的描述。',
-        '地点必须填写 parentName 表示层级归属；父级必须比子级尺度更大：国家 > 区域/郡 > 城市 > 街区/村镇 > 学校/建筑/住宅 > 房间/设施。',
+        '地点 kind 是自由文本（如 学校、遗迹、facility），不是固定枚举；scale 才是内部粗粒度层级：world/continent/country/region/city/district/site/building/room/unknown。',
+        '地点必须填写 parentName 表示层级归属；父级通常必须比子级尺度更大：国家 > 区域/郡 > 城市 > 街区/村镇 > 学校/建筑/住宅 > 房间/设施；学校下的 facility/site 可作为子地点。',
         '禁止把国家挂在城市下面，禁止把城市挂在学校、建筑、住宅、房间等子地点下面；无法确认父级时 parentName 留空。',
         '只有新增重要地点、地点层级、路线、区域边界或地图结构变化时，shouldRegenerateMap 才能为 true；单纯角色状态或人物关系变化必须为 false。',
         '生成 mapPrompt 时必须写成俯视地图/二维制图提示词，强调区域边界、路线、图例、地图符号和地点标签。',
@@ -350,7 +351,8 @@ export function buildAiBookPromptMessages({
           '剧情经过、角色行动、调查过程、战斗过程写入 summary 或角色状态，不要写入 worldview。',
           'characters 只输出重要角色；背景人物、一次性称呼、无独立状态者不要输出。',
           'relationships 只输出重要关系；同一 source/target/relation 只保留一条，不要反向重复。',
-          'locations 必须尽量给 parentName 形成正确层级，父级尺度必须大于子级；无法确认父级时留空。',
+          'locations 的 kind 是自由文本，不要当作固定分类；scale 才使用 world/continent/country/region/city/district/site/building/room/unknown。',
+          'locations 必须尽量给 parentName 形成正确层级，父级尺度通常大于子级；学校下的 facility/site 可作为子地点；无法确认父级时留空。',
           'shouldRegenerateMap 只在地图相关地点信息发生重要变化时为 true。',
           '所有信息只来自工具返回的当前资料和当前章节；不确定就写 推断/未知。',
         ],
@@ -377,6 +379,17 @@ export async function requestAiBookMemoryUpdate({
     config.textPath || DEFAULT_TEXT_MODEL_PATH,
     config.textUseFullUrl,
   )
+  if (isAiBookMemoryV2(memory)) {
+    return requestAiBookMemoryUpdateDirectJson({
+      config,
+      book,
+      chapter,
+      chapterContent,
+      memory,
+      isNativeGeminiTextTarget,
+      fetchImpl,
+    })
+  }
   const messages: AiBookChatMessage[] = buildAiBookPromptMessages({
     bookName: book.name,
     chapterTitle: chapter.title,
@@ -445,12 +458,13 @@ export async function requestAiBookMemoryUpdate({
     }
 
     if (shouldFallbackToDirectJsonMemoryUpdate(config, isNativeGeminiTextTarget) && step === 0 && isAiBookMemoryV2(memory)) {
-      return requestAiBookMemoryUpdateGeminiJson({
+      return requestAiBookMemoryUpdateDirectJson({
         config,
         book,
         chapter,
         chapterContent,
         memory,
+        isNativeGeminiTextTarget,
         fetchImpl,
       })
     }
@@ -459,12 +473,13 @@ export async function requestAiBookMemoryUpdate({
   throw new Error('AI 资料生成超过工具调用轮次限制')
 }
 
-async function requestAiBookMemoryUpdateGeminiJson({
+async function requestAiBookMemoryUpdateDirectJson({
   config,
   book,
   chapter,
   chapterContent,
   memory,
+  isNativeGeminiTextTarget,
   fetchImpl,
 }: {
   config: AiBookConfig
@@ -472,6 +487,7 @@ async function requestAiBookMemoryUpdateGeminiJson({
   chapter: BookChapter
   chapterContent: string
   memory: AiBookMemoryV2
+  isNativeGeminiTextTarget: boolean
   fetchImpl: typeof fetch
 }): Promise<AiBookModelUpdate> {
   const response = await requestModelJson({
@@ -483,14 +499,21 @@ async function requestAiBookMemoryUpdateGeminiJson({
     path: config.textPath || DEFAULT_TEXT_MODEL_PATH,
     fetchImpl,
     body: {
+      model: config.textModel,
       messages: buildAiBookGeminiJsonPromptMessages({
         book,
         chapter,
         chapterContent,
         memory,
       }),
-      responseMimeType: 'application/json',
-      responseSchema: buildAiBookGeminiJsonResponseSchema(),
+      ...(isNativeGeminiTextTarget
+        ? {
+            responseMimeType: 'application/json',
+            responseSchema: buildAiBookGeminiJsonResponseSchema(),
+          }
+        : shouldUseChatJsonObjectResponseFormat(config)
+          ? { response_format: { type: 'json_object' } }
+          : {}),
       max_tokens: 8192,
       temperature: 0.2,
     },
@@ -511,6 +534,14 @@ async function requestAiBookMemoryUpdateGeminiJson({
 
 function shouldFallbackToDirectJsonMemoryUpdate(config: AiBookConfig, isNativeGeminiTextTarget: boolean) {
   return isNativeGeminiTextTarget || config.modelSource === 'server'
+}
+
+function shouldUseChatJsonObjectResponseFormat(config: AiBookConfig) {
+  return textPathForRequest(config).endsWith('/chat/completions')
+}
+
+function textPathForRequest(config: AiBookConfig) {
+  return config.textPath || DEFAULT_TEXT_MODEL_PATH
 }
 
 function executeAiBookToolCall(
@@ -607,6 +638,7 @@ function buildAiBookGeminiJsonPromptMessages({
         '所有关键条目必须带 evidence；如果不确定，写“推断”或“未知”。',
         'worldFacts 只记录可复用设定；不要写章节流水账。',
         'characters 只输出重要角色；relationships 只输出重要关系；locations 必须尽量给 parentName。',
+        'locations.kind 是自由文本，不是固定枚举；locations.scale 才使用 world/continent/country/region/city/district/site/building/room/unknown。学校下的 facility/site 可作为子地点。',
         '每类数组最多输出 8 条，evidence.note 控制在 30 字以内，quote 只在必要时填写。',
         '必须输出紧凑 JSON，避免重复长句，避免超长字段。',
         '不要输出空白说明文字，不要包裹在代码块里。',

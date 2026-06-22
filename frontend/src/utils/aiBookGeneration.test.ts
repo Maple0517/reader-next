@@ -89,6 +89,59 @@ describe('aiBookGeneration', () => {
     expect(serialized).toContain('mapChanges')
   })
 
+  it('updates V2 memory with a single direct JSON request by default', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      expect(body.tools).toBeUndefined()
+      expect(JSON.stringify(body.messages)).toContain('currentMemory')
+      expect(JSON.stringify(body.messages)).toContain('林舟抵达北境')
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                chapterDigest: {
+                  chapterIndex: 7,
+                  chapterTitle: '第八章 北境',
+                  digest: '林舟抵达北境。',
+                  keyEvents: ['林舟抵达北境'],
+                },
+                summary: {
+                  current: '林舟抵达北境。',
+                  recentChanges: ['林舟抵达北境'],
+                  openQuestions: [],
+                },
+                worldFacts: [],
+                characters: [],
+                relationships: [],
+                locations: [],
+                mapChanges: {
+                  changed: false,
+                  affectedLocationNames: [],
+                  routeHints: [],
+                },
+              }),
+            },
+          }],
+        }),
+      }
+    })
+
+    const update = await requestAiBookMemoryUpdate({
+      config: readyConfig,
+      book: { name: '山海旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' },
+      chapter: { title: '第八章 北境', url: 'chapter-8', index: 7 },
+      chapterContent: '林舟抵达北境。',
+      memory: createEmptyAiBookMemoryV2({ name: '山海旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' }),
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(isAiBookMemoryV2(update.memory)).toBe(true)
+    expect(toAiBookDisplayMemory(update.memory).summary).toBe('林舟抵达北境。')
+  })
+
   it('reconciles V2 chapter knowledge patches into layered memory', async () => {
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => ({
       ok: true,
@@ -1038,16 +1091,6 @@ describe('aiBookGeneration', () => {
   it('repairs truncated direct JSON output with an open array from Gemini', async () => {
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body))
-      if (fetchMock.mock.calls.length === 1) {
-        expect(body.body.tools).toEqual(expect.any(Array))
-        return {
-          ok: true,
-          json: async () => ({
-            candidates: [{ content: { parts: [{ text: '' }] } }],
-          }),
-        }
-      }
-
       expect(body.body.tools).toBeUndefined()
       return {
         ok: true,
@@ -1090,20 +1133,8 @@ describe('aiBookGeneration', () => {
   it('repairs truncated direct JSON output from Gemini', async () => {
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body))
-      if (fetchMock.mock.calls.length === 1) {
-        expect(body.body.tools).toEqual(expect.any(Array))
-        return {
-          ok: true,
-          json: async () => ({
-            candidates: [{
-              content: { parts: [{ text: '' }] },
-            }],
-          }),
-        }
-      }
-
       expect(body.body.tools).toBeUndefined()
-      expect(body.body.responseMimeType).toBe('application/json')
+      expect(body.body.response_format).toEqual({ type: 'json_object' })
       return {
         ok: true,
         json: async () => ({
@@ -1150,23 +1181,9 @@ describe('aiBookGeneration', () => {
     expect(update.memory.chapterDigests[0]?.digest).toBe('林舟进入北境学院。')
   })
 
-  it('falls back to direct JSON generation when Gemini returns empty text without tool calls', async () => {
+  it('uses direct JSON generation with schema for Gemini targets', async () => {
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body))
-      if (fetchMock.mock.calls.length === 1) {
-        expect(body.body.tools).toEqual(expect.any(Array))
-        return {
-          ok: true,
-          json: async () => ({
-            candidates: [{
-              content: {
-                parts: [{ text: '' }],
-              },
-            }],
-          }),
-        }
-      }
-
       expect(body.body.tools).toBeUndefined()
       expect(body.body.tool_choice).toBeUndefined()
       expect(body.body.responseMimeType).toBe('application/json')
@@ -1232,6 +1249,7 @@ describe('aiBookGeneration', () => {
       config: {
         ...readyConfig,
         modelSource: 'server',
+        textPath: '/v1beta/models/gemini-2.5-pro:generateContent',
       },
       book: { name: '北境旧事', author: '佚名', bookUrl: 'book-1', origin: 'source-1' },
       chapter: { title: '第一章', url: 'chapter-1', index: 0 },
@@ -1254,7 +1272,7 @@ describe('aiBookGeneration', () => {
       fetchImpl: fetchMock as unknown as typeof fetch,
     })
 
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(isAiBookMemoryV2(update.memory)).toBe(true)
     if (!isAiBookMemoryV2(update.memory)) throw new Error('expected v2 memory')
     expect(update.memory.summary.current).toBe('林舟进入北境学院并得知灵脉复苏。')

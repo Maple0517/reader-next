@@ -160,7 +160,10 @@ async fn ai_book_memory_json_round_trips_v1_and_v2_extension_fields() {
     assert_eq!(loaded["locations"][0]["parentName"], "山海大陆");
     assert_eq!(loaded["map"]["fallbackReason"], "图片模型不可用");
     assert_eq!(loaded["mapState"]["reason"], "新增北境");
-    assert_eq!(loaded["renderArtifacts"]["mapFallbackReason"], "图片模型不可用");
+    assert_eq!(
+        loaded["renderArtifacts"]["mapFallbackReason"],
+        "图片模型不可用"
+    );
     assert_eq!(loaded, memory);
 
     let _ = std::fs::remove_dir_all(storage_dir);
@@ -179,5 +182,99 @@ async fn ai_book_memory_rejects_mismatched_book_url_on_save() {
         .expect_err("mismatched bookUrl should fail");
 
     assert!(err.to_string().contains("bookUrl mismatch"));
+    let _ = std::fs::remove_dir_all(storage_dir);
+}
+
+#[tokio::test]
+async fn ai_book_memory_rejects_invalid_schema_version() {
+    let (service, storage_dir) = create_service("invalid-schema").await;
+    let memory = serde_json::json!({
+        "schemaVersion": 3,
+        "bookUrl": "https://example.test/book/schema",
+        "updatedAt": 1,
+        "summary": {"current": "有内容", "recentChanges": [], "openQuestions": []},
+        "worldFacts": [],
+        "characters": [],
+        "relationships": [],
+        "locations": [],
+        "chapterDigests": [],
+        "mapState": {"dirty": false, "nodes": [], "edges": []},
+        "renderArtifacts": {}
+    });
+
+    let err = service
+        .save_value_for_book("alice", "https://example.test/book/schema", memory)
+        .await
+        .expect_err("schemaVersion outside 1/2 should fail");
+
+    assert!(err.to_string().contains("schemaVersion"));
+    let _ = std::fs::remove_dir_all(storage_dir);
+}
+
+#[tokio::test]
+async fn ai_book_memory_rejects_processed_but_semantically_empty_json() {
+    let (service, storage_dir) = create_service("empty-processed").await;
+    let memory = serde_json::json!({
+        "schemaVersion": 2,
+        "bookUrl": "https://example.test/book/empty",
+        "enabled": true,
+        "processedChapterIndex": 4,
+        "processedChapterTitle": "第五章",
+        "updatedAt": 1,
+        "summary": {"current": "", "recentChanges": [], "openQuestions": []},
+        "worldFacts": [],
+        "characters": [],
+        "relationships": [],
+        "locations": [],
+        "chapterDigests": [],
+        "mapState": {"dirty": false, "nodes": [], "edges": []},
+        "renderArtifacts": {}
+    });
+
+    let err = service
+        .save_value_for_book("alice", "https://example.test/book/empty", memory)
+        .await
+        .expect_err("processed empty memory should fail");
+
+    assert!(err.to_string().contains("AI memory is empty"));
+    let _ = std::fs::remove_dir_all(storage_dir);
+}
+
+#[tokio::test]
+async fn ai_book_memory_rejects_oversized_entity_arrays() {
+    let (service, storage_dir) = create_service("oversized-array").await;
+    let world_facts: Vec<_> = (0..501)
+        .map(|idx| {
+            serde_json::json!({
+                "id": format!("fact-{idx}"),
+                "category": "基础设定",
+                "title": format!("设定 {idx}"),
+                "content": "内容",
+                "confidence": "已知",
+                "importance": "medium",
+                "evidence": []
+            })
+        })
+        .collect();
+    let memory = serde_json::json!({
+        "schemaVersion": 2,
+        "bookUrl": "https://example.test/book/too-many",
+        "updatedAt": 1,
+        "summary": {"current": "有内容", "recentChanges": [], "openQuestions": []},
+        "worldFacts": world_facts,
+        "characters": [],
+        "relationships": [],
+        "locations": [],
+        "chapterDigests": [],
+        "mapState": {"dirty": false, "nodes": [], "edges": []},
+        "renderArtifacts": {}
+    });
+
+    let err = service
+        .save_value_for_book("alice", "https://example.test/book/too-many", memory)
+        .await
+        .expect_err("oversized arrays should fail");
+
+    assert!(err.to_string().contains("worldFacts"));
     let _ = std::fs::remove_dir_all(storage_dir);
 }

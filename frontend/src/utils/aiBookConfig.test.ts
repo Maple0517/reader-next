@@ -8,6 +8,7 @@ import {
   isAiBookConfigReady,
   mediaPresetFromPath,
   saveAiBookConfig,
+  describeAiBookTextRuntime,
   textPathForPreset,
   textPresetFromPath,
 } from './aiBookConfig'
@@ -69,7 +70,7 @@ describe('aiBookConfig', () => {
   })
 
   it('falls back to defaults and reports readiness', () => {
-    expect(getAiBookConfig('guest')).toEqual(DEFAULT_AI_BOOK_CONFIG)
+    expect(getAiBookConfig('guest')).toEqual({ ...DEFAULT_AI_BOOK_CONFIG, useBackendProxy: true })
     expect(isAiBookConfigReady(getAiBookConfig('guest'))).toBe(false)
     expect(isAiBookImageConfigReady(getAiBookConfig('guest'))).toBe(false)
 
@@ -86,7 +87,7 @@ describe('aiBookConfig', () => {
       imagePath: '/v1/images/generations',
       imageSize: '1024x1024',
       imageUseFullUrl: false,
-      useBackendProxy: false,
+      useBackendProxy: true,
     })
     expect(isAiBookConfigReady(getAiBookConfig('guest'))).toBe(true)
     expect(isAiBookImageConfigReady(getAiBookConfig('guest'))).toBe(false)
@@ -120,11 +121,11 @@ describe('aiBookConfig', () => {
       imageModel: 'old-image',
       imageSize: '1024x1792',
       imageUseFullUrl: false,
-      useBackendProxy: false,
+      useBackendProxy: true,
     })
   })
 
-  it('auto-prefers server config whenever server model is available', () => {
+  it('auto-prefers server config only when browser text config is empty', () => {
     const baseConfig = {
       ...DEFAULT_AI_BOOK_CONFIG,
       modelSource: 'browser' as const,
@@ -140,22 +141,87 @@ describe('aiBookConfig', () => {
       { ...baseConfig, textBaseUrl: 'http://127.0.0.1:8081' },
       true,
       'http://127.0.0.1:8081',
-    )).toBe(true)
+    )).toBe(false)
     expect(shouldAutoUseServerAiBookConfig(
       { ...baseConfig, textBaseUrl: 'http://localhost:8081' },
       true,
       'http://127.0.0.1:8081',
-    )).toBe(true)
+    )).toBe(false)
     expect(shouldAutoUseServerAiBookConfig(
       { ...baseConfig, textBaseUrl: 'http://127.0.0.1:8080' },
       true,
       'http://127.0.0.1:8081',
-    )).toBe(true)
+    )).toBe(false)
     expect(shouldAutoUseServerAiBookConfig(
       { ...baseConfig, textBaseUrl: 'http://127.0.0.1:8081' },
       false,
       'http://127.0.0.1:8081',
     )).toBe(false)
+  })
+
+  it('describes the actual text runtime used by AI book generation', () => {
+    expect(describeAiBookTextRuntime({
+      ...DEFAULT_AI_BOOK_CONFIG,
+      modelSource: 'browser',
+      useBackendProxy: true,
+      textModel: 'story-model',
+      textPath: '/v1/responses',
+    }, null)).toEqual({
+      source: 'browser',
+      sourceLabel: '浏览器配置，经后端代理',
+      model: 'story-model',
+      path: '/reader3/aiProxy → /v1/responses',
+    })
+
+    expect(describeAiBookTextRuntime({
+      ...DEFAULT_AI_BOOK_CONFIG,
+      modelSource: 'browser',
+      useBackendProxy: false,
+      textModel: 'direct-model',
+      textPath: '/v1/chat/completions',
+    }, null)).toMatchObject({
+      sourceLabel: '浏览器直连',
+      model: 'direct-model',
+      path: '/v1/chat/completions',
+    })
+
+    expect(describeAiBookTextRuntime({
+      ...DEFAULT_AI_BOOK_CONFIG,
+      modelSource: 'server',
+    }, {
+      text: {
+        enabled: true,
+        baseUrl: 'https://api.example.test',
+        apiKey: '',
+        model: 'server-model',
+        path: '/v1/chat/completions',
+        useFullUrl: false,
+      },
+      image: {
+        enabled: false,
+        baseUrl: '',
+        apiKey: '',
+        model: '',
+        path: '/v1/images/generations',
+        imageSize: '1024x1024',
+        useFullUrl: false,
+      },
+      speech: {
+        enabled: false,
+        baseUrl: '',
+        apiKey: '',
+        model: '',
+        path: '/v1/audio/speech',
+        voice: 'alloy',
+        responseFormat: 'mp3',
+        useFullUrl: false,
+      },
+    })).toEqual({
+      source: 'server',
+      sourceLabel: '后端配置',
+      model: 'server-model',
+      path: '/reader3/aiProxy → /v1/chat/completions',
+    })
   })
 
   it('maps text provider presets to existing path values', () => {

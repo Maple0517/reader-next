@@ -1,4 +1,10 @@
-import type { AiBookConfig, ImageProviderPreset, SpeechProviderPreset, TextProviderPreset } from '../types'
+import type {
+  AiBookConfig,
+  AiServerModelConfig,
+  ImageProviderPreset,
+  SpeechProviderPreset,
+  TextProviderPreset,
+} from '../types'
 
 export const DEFAULT_TEXT_MODEL_PATH = '/v1/chat/completions'
 export const DEFAULT_IMAGE_MODEL_PATH = '/v1/images/generations'
@@ -17,7 +23,7 @@ export const DEFAULT_AI_BOOK_CONFIG: AiBookConfig = {
   imagePath: DEFAULT_IMAGE_MODEL_PATH,
   imageSize: '1024x1024',
   imageUseFullUrl: false,
-  useBackendProxy: false,
+  useBackendProxy: true,
 }
 
 const AI_BOOK_CONFIG_PREFIX = 'reader-ai-book-config:'
@@ -88,7 +94,7 @@ export function getAiBookConfig(username?: string | null): AiBookConfig {
       imagePath: normalizeProxyPath(parsed.imagePath, DEFAULT_IMAGE_MODEL_PATH),
       imageSize: (parsed.imageSize || DEFAULT_AI_BOOK_CONFIG.imageSize).trim(),
       imageUseFullUrl: Boolean(parsed.imageUseFullUrl),
-      useBackendProxy: Boolean(parsed.useBackendProxy),
+      useBackendProxy: parsed.useBackendProxy == null ? DEFAULT_AI_BOOK_CONFIG.useBackendProxy : Boolean(parsed.useBackendProxy),
     }
   } catch {
     return { ...DEFAULT_AI_BOOK_CONFIG }
@@ -131,7 +137,37 @@ export function shouldAutoUseServerAiBookConfig(
   _currentOrigin = globalThis.location?.origin || '',
 ) {
   if (!canUseServerModel || config.modelSource === 'server') return false
-  return true
+  return !config.textBaseUrl.trim()
+}
+
+export interface AiBookTextRuntimeDescription {
+  source: 'browser' | 'server'
+  sourceLabel: string
+  model: string
+  path: string
+}
+
+export function describeAiBookTextRuntime(
+  config: AiBookConfig,
+  serverConfig: AiServerModelConfig | null | undefined,
+): AiBookTextRuntimeDescription {
+  if (config.modelSource === 'server') {
+    const path = normalizeProxyPath(serverConfig?.text.path, DEFAULT_TEXT_MODEL_PATH)
+    return {
+      source: 'server',
+      sourceLabel: '后端配置',
+      model: (serverConfig?.text.model || '').trim() || '未配置',
+      path: `/reader3/aiProxy → ${path}`,
+    }
+  }
+
+  const path = normalizeProxyPath(config.textPath, DEFAULT_TEXT_MODEL_PATH)
+  return {
+    source: 'browser',
+    sourceLabel: config.useBackendProxy ? '浏览器配置，经后端代理' : '浏览器直连',
+    model: config.textModel.trim() || '未配置',
+    path: config.useBackendProxy ? `/reader3/aiProxy → ${path}` : path,
+  }
 }
 
 export function aiBookConfigStorageKey(username?: string | null) {

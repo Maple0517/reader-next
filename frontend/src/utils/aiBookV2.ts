@@ -81,6 +81,7 @@ export function toAiBookDisplayMemory(memory: AiBookAnyMemory): AiBookMemory {
       category: fact.category,
       confidence: fact.confidence,
       importance: fact.importance,
+      evidence: fact.evidence,
     })),
     characters: memory.characters.map((character): AiBookCharacter => ({
       name: character.name,
@@ -91,6 +92,7 @@ export function toAiBookDisplayMemory(memory: AiBookAnyMemory): AiBookMemory {
       description: character.description,
       lastSeenChapter: formatChapterLabel(character.lastSeenChapterIndex),
       importance: character.importance,
+      evidence: character.evidence,
     })),
     relationships: memory.relationships.map((relationship): AiBookRelationship => {
       const source = charactersById.get(relationship.sourceCharacterId)
@@ -107,6 +109,7 @@ export function toAiBookDisplayMemory(memory: AiBookAnyMemory): AiBookMemory {
         status: relationship.currentStatus,
         description: relationship.description,
         importance: relationship.importance,
+        evidence: relationship.evidence,
       }
     }),
     locations: memory.locations.map((location): AiBookLocation => ({
@@ -120,6 +123,7 @@ export function toAiBookDisplayMemory(memory: AiBookAnyMemory): AiBookMemory {
         .filter(Boolean),
       firstSeenChapter: formatChapterLabel(location.firstSeenChapterIndex),
       importance: location.importance,
+      evidence: location.evidence,
     })),
     map: memory.renderArtifacts.mapImageUrl || memory.renderArtifacts.mapImagePrompt || memory.renderArtifacts.mapFallbackReason
       ? {
@@ -384,13 +388,9 @@ function mergeLocations(
     if (!parentId || parentId === child.id) continue
     const parent = byId.get(parentId)
     if (!parent) continue
-    if (isValidParent(parent.scale, child.scale)) {
+    if (isValidParent(parent, child)) {
       child.parentId = parent.id
     } else {
-      memory.summary.openQuestions = uniqueStrings([
-        ...memory.summary.openQuestions,
-        `${child.name} 的上级地点 ${parent.name} 层级不可信，已暂不挂靠。`,
-      ]).slice(0, MAX_OPEN_QUESTIONS)
       child.parentId = undefined
     }
   }
@@ -604,6 +604,48 @@ function stableId(prefix: string, value: string) {
 function inferScale(kind: string | undefined): AiBookLocationScale {
   const key = normalizeKey(kind)
   if (!key) return 'unknown'
+  if (['unknown', '未知', '不明', '无法确认', 'unclear'].some((item) => key.includes(item))) return 'unknown'
+  if (key.includes('world') || key.includes('世界')) return 'world'
+  if (key.includes('continent') || key.includes('大陆') || key.includes('洲')) return 'continent'
+  if (['country', 'nation', 'kingdom', 'empire'].some((item) => key.includes(item))
+    || key.includes('国家')
+    || key.includes('王国')
+    || key.includes('帝国')) return 'country'
+  if (['region', 'province', 'state', 'county', 'territory'].some((item) => key.includes(item))
+    || key.includes('区域')
+    || key.includes('地区')
+    || key.includes('省')
+    || key.includes('州')
+    || key.includes('郡')) return 'region'
+  if (['district', 'neighborhood', 'quarter', 'village', 'street'].some((item) => key.includes(item))
+    || key.includes('街区')
+    || key.includes('城区')
+    || key.includes('社区')
+    || key.includes('村')) return 'district'
+  if (['city', 'town'].some((item) => key.includes(item))
+    || key.includes('城市')
+    || key.includes('城镇')
+    || key.endsWith('市')
+    || key.endsWith('城')) return 'city'
+  if (['room', 'classroom', 'office', 'bedroom', 'study', 'lab', 'laboratory'].some((item) => key.includes(item))
+    || key.includes('房间')
+    || key.includes('教室')
+    || key.includes('办公室')
+    || key.includes('卧室')
+    || key.includes('书房')
+    || key.includes('实验室')) return 'room'
+  if (['building', 'school', 'academy', 'college', 'university', 'house', 'apartment', 'home'].some((item) => key.includes(item))
+    || key.includes('学校')
+    || key.includes('学院')
+    || key.includes('大学')
+    || key.includes('住宅')
+    || key.includes('公寓')
+    || key.includes('建筑')) return 'building'
+  if (['site', 'facility', 'grounds', 'campus', 'yard'].some((item) => key.includes(item))
+    || key.includes('地点')
+    || key.includes('遗址')
+    || key.includes('设施')
+    || key.includes('场地')) return 'site'
   if (key.includes('世界')) return 'world'
   if (key.includes('大陆') || key.includes('洲')) return 'continent'
   if (key.includes('国家') || key.includes('王国') || key.includes('帝国')) return 'country'
@@ -612,11 +654,12 @@ function inferScale(kind: string | undefined): AiBookLocationScale {
   if (key.includes('街区') || key.includes('城区') || key.includes('社区')) return 'district'
   if (key.includes('学校') || key.includes('学院') || key.includes('住宅') || key.includes('建筑') || key.includes('设施')) return 'building'
   if (key.includes('房间') || key.includes('教室') || key.includes('书房')) return 'room'
-  return 'site'
+  return 'unknown'
 }
 
-function isValidParent(parentScale: AiBookLocationScale, childScale: AiBookLocationScale) {
-  return scaleRank(parentScale) > scaleRank(childScale)
+function isValidParent(parent: AiBookLocationV2, child: AiBookLocationV2) {
+  if (scaleRank(parent.scale) > scaleRank(child.scale)) return true
+  return isSchoolLike(parent.kind) && isFacilityLike(child.kind)
 }
 
 function scaleRank(scale: AiBookLocationScale) {
@@ -633,6 +676,16 @@ function scaleRank(scale: AiBookLocationScale) {
     unknown: 0,
   }
   return ranks[scale] || 0
+}
+
+function isSchoolLike(kind: string | undefined) {
+  const key = normalizeKey(kind)
+  return ['school', 'academy', 'college', 'university', '学校', '学院', '大学'].some((item) => key.includes(item))
+}
+
+function isFacilityLike(kind: string | undefined) {
+  const key = normalizeKey(kind)
+  return ['facility', 'site', 'grounds', 'campus', 'yard', '设施', '场地', '训练场', '遗址'].some((item) => key.includes(item))
 }
 
 function locationImportance(location: AiBookLocationV2): AiBookImportance {

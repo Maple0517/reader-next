@@ -194,48 +194,60 @@ function parentScore(location: AiBookLocation) {
 
 function isStrongParentKind(kind: string | undefined) {
   const key = normalizeKey(kind)
-  return ['大陆', '世界', '国家', '王国', '帝国', '区域', '地区', '省', '州', '郡', '城市', '城镇', '市', '城', '村落', '村', '街区', '社区']
+  return ['world', 'continent', 'country', 'nation', 'kingdom', 'empire', 'region', 'province', 'state', 'county', 'territory', 'city', 'town', 'district', 'neighborhood', 'quarter', 'village', 'street', '大陆', '世界', '国家', '王国', '帝国', '区域', '地区', '省', '州', '郡', '城市', '城镇', '市', '城', '村落', '村', '街区', '社区']
     .some((item) => key.includes(item))
 }
 
 function isParentLikeKind(kind: string | undefined) {
   const key = normalizeKey(kind)
-  return isStrongParentKind(kind) || ['教会', '组织', '庄园', '营地'].some((item) => key.includes(item))
+  return isStrongParentKind(kind)
+    || ['school', 'academy', 'college', 'university', 'campus', 'church', 'organization', 'manor', 'camp', '教会', '组织', '庄园', '营地', '学校', '学院', '大学'].some((item) => key.includes(item))
 }
 
 function isChildLikeKind(kind: string | undefined) {
   const key = normalizeKey(kind)
-  return ['住宅', '公寓', '住处', '房间', '建筑', '机构', '学校', '学院', '大学', '教室', '书房', '酒馆', '店铺', '商店', '机房', '实验室', '避难所', '设施']
+  return ['building', 'school', 'academy', 'college', 'university', 'house', 'apartment', 'home', 'room', 'classroom', 'study', 'shop', 'store', 'lab', 'laboratory', 'facility', 'site', 'grounds', '住宅', '公寓', '住处', '房间', '建筑', '机构', '学校', '学院', '大学', '教室', '书房', '酒馆', '店铺', '商店', '机房', '实验室', '避难所', '设施']
     .some((item) => key.includes(item))
 }
 
 function isValidLocationParent(parent: AiBookLocation, child: AiBookLocation) {
-  return locationHierarchyLevel(parent.kind) > locationHierarchyLevel(child.kind)
+  if (locationHierarchyLevel(parent.kind) > locationHierarchyLevel(child.kind)) return true
+  return isSchoolLikeKind(parent.kind) && isFacilityLikeKind(child.kind)
 }
 
 function locationHierarchyLevel(kind: string | undefined) {
   const key = normalizeKey(kind)
   if (!key) return 35
-  if (['世界'].some((item) => key.includes(item))) return 90
-  if (['大陆', '洲'].some((item) => key.includes(item))) return 80
-  if (['国家', '王国', '帝国'].some((item) => key.includes(item))) return 70
-  if (['区域', '地区', '省', '州', '郡', '领'].some((item) => key.includes(item))) return 60
+  if (['world', '世界'].some((item) => key.includes(item))) return 90
+  if (['continent', '大陆', '洲'].some((item) => key.includes(item))) return 80
+  if (['country', 'nation', 'kingdom', 'empire', '国家', '王国', '帝国'].some((item) => key.includes(item))) return 70
+  if (['region', 'province', 'state', 'county', 'territory', '区域', '地区', '省', '州', '郡', '领'].some((item) => key.includes(item))) return 60
   if (isCityLikeKind(kind)) return 50
   if (isTownLikeKind(kind)) return 40
-  if (['庄园', '营地', '教会', '组织'].some((item) => key.includes(item))) return 35
-  if (['学校', '学院', '大学', '建筑', '机构', '住宅', '公寓', '住处', '酒馆', '店铺', '商店', '避难所'].some((item) => key.includes(item))) return 30
-  if (['房间', '教室', '书房', '机房', '实验室', '设施'].some((item) => key.includes(item))) return 20
+  if (['manor', 'camp', 'church', 'organization', '庄园', '营地', '教会', '组织'].some((item) => key.includes(item))) return 35
+  if (['building', 'school', 'academy', 'college', 'university', 'house', 'apartment', 'home', 'shop', 'store', '学校', '学院', '大学', '建筑', '机构', '住宅', '公寓', '住处', '酒馆', '店铺', '商店', '避难所'].some((item) => key.includes(item))) return 30
+  if (['room', 'classroom', 'study', 'lab', 'laboratory', 'facility', 'site', 'grounds', 'yard', '房间', '教室', '书房', '机房', '实验室', '设施', '场地', '遗址'].some((item) => key.includes(item))) return 20
   return 35
 }
 
 function isCityLikeKind(kind: string | undefined) {
   const key = normalizeKey(kind)
-  return ['城市', '城镇', '市', '城'].some((item) => key.includes(item))
+  return ['city', 'town', '城市', '城镇', '市', '城'].some((item) => key.includes(item))
 }
 
 function isTownLikeKind(kind: string | undefined) {
   const key = normalizeKey(kind)
-  return ['村落', '村', '街区', '社区', '街道'].some((item) => key.includes(item))
+  return ['district', 'neighborhood', 'quarter', 'village', 'street', '村落', '村', '街区', '社区', '街道'].some((item) => key.includes(item))
+}
+
+function isSchoolLikeKind(kind: string | undefined) {
+  const key = normalizeKey(kind)
+  return ['school', 'academy', 'college', 'university', '学校', '学院', '大学'].some((item) => key.includes(item))
+}
+
+function isFacilityLikeKind(kind: string | undefined) {
+  const key = normalizeKey(kind)
+  return ['facility', 'site', 'grounds', 'campus', 'yard', '设施', '场地', '训练场', '遗址'].some((item) => key.includes(item))
 }
 
 function isLowImportance(value: string | undefined) {

@@ -9,6 +9,8 @@ use crate::model::ai_book::AiBookMemory;
 use crate::util::hash::md5_hex;
 use crate::util::time::now_ts;
 
+const MAX_AI_BOOK_ARRAY_ITEMS: usize = 500;
+
 #[derive(Clone)]
 pub struct AiBookService {
     pool: SqlitePool,
@@ -97,21 +99,28 @@ impl AiBookService {
             return Err(AppError::BadRequest("bookUrl required".to_string()));
         }
 
+        {
+            let object = memory.as_object_mut().ok_or_else(|| {
+                AppError::BadRequest("AI memory must be a JSON object".to_string())
+            })?;
+            let memory_book_url = object
+                .get("bookUrl")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if memory_book_url.is_empty() {
+                object.insert("bookUrl".to_string(), Value::String(book_url.to_string()));
+            } else if memory_book_url != book_url {
+                return Err(AppError::BadRequest("bookUrl mismatch".to_string()));
+            }
+        }
+
+        validate_ai_book_memory_value(&memory)?;
+
         let object = memory
             .as_object_mut()
             .ok_or_else(|| AppError::BadRequest("AI memory must be a JSON object".to_string()))?;
-        let memory_book_url = object
-            .get("bookUrl")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if memory_book_url.is_empty() {
-            object.insert("bookUrl".to_string(), Value::String(book_url.to_string()));
-        } else if memory_book_url != book_url {
-            return Err(AppError::BadRequest("bookUrl mismatch".to_string()));
-        }
-
         let updated_at = object.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
         let updated_at = if updated_at > 0 {
             updated_at
@@ -178,4 +187,93 @@ impl AiBookService {
             .join("ai-books")
             .join(format!("{}.json", md5_hex(book_url)))
     }
+}
+
+fn validate_ai_book_memory_value(memory: &Value) -> Result<(), AppError> {
+    let object = memory
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("AI memory must be a JSON object".to_string()))?;
+
+    if let Some(schema_version) = object.get("schemaVersion").filter(|value| !value.is_null()) {
+        match schema_version.as_i64() {
+            Some(1 | 2) => {}
+            _ => {
+                return Err(AppError::BadRequest(
+                    "schemaVersion must be 1 or 2".to_string(),
+                ));
+            }
+        }
+    }
+
+    for key in [
+        "worldview",
+        "worldFacts",
+        "characters",
+        "relationships",
+        "locations",
+        "chapterDigests",
+        "arcs",
+    ] {
+        if let Some(length) = object.get(key).and_then(Value::as_array).map(Vec::len) {
+            if length > MAX_AI_BOOK_ARRAY_ITEMS {
+                return Err(AppError::BadRequest(format!(
+                    "{key} exceeds {MAX_AI_BOOK_ARRAY_ITEMS} items"
+                )));
+            }
+        }
+    }
+
+    if claims_processed_chapter(object)
+        && !has_ai_book_semantic_content(object)
+        && !has_non_empty_string(object.get("lastError"))
+    {
+        return Err(AppError::BadRequest("AI memory is empty".to_string()));
+    }
+
+    Ok(())
+}
+
+fn claims_processed_chapter(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("processedChapterIndex")
+        .and_then(Value::as_i64)
+        .is_some()
+        || has_non_empty_string(object.get("processedChapterTitle"))
+}
+
+fn has_ai_book_semantic_content(object: &serde_json::Map<String, Value>) -> bool {
+    if has_non_empty_string(object.get("summary")) {
+        return true;
+    }
+    if let Some(summary) = object.get("summary").and_then(Value::as_object) {
+        if has_non_empty_string(summary.get("current"))
+            || has_non_empty_array(summary.get("recentChanges"))
+            || has_non_empty_array(summary.get("openQuestions"))
+        {
+            return true;
+        }
+    }
+    [
+        "worldview",
+        "worldFacts",
+        "characters",
+        "relationships",
+        "locations",
+    ]
+    .iter()
+    .any(|key| has_non_empty_array(object.get(*key)))
+}
+
+fn has_non_empty_array(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false)
+}
+
+fn has_non_empty_string(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false)
 }

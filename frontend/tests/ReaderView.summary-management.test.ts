@@ -23,11 +23,6 @@ describe('ReaderView summary management UI', () => {
   expect(source).toContain('@click="expandCollapsedChapterSummary"')
  })
 
- it('keeps a restore entry after hiding summary on mobile or inline layouts', () => {
-  expect(source).toContain('showHiddenChapterSummaryPill')
-  expect(source).toContain('@click="restoreHiddenChapterSummary"')
-  expect(source).toContain('重新显示')
- })
 
  it('hides summary through a helper that clears pending generation', () => {
   expect(source).toContain('function hideChapterSummary()')

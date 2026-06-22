@@ -82,6 +82,16 @@
                       <span v-if="note.confidence">{{ note.confidence }}</span>
                     </div>
                     <p>{{ note.content }}</p>
+                    <details v-if="hasEvidence(note.evidence)" class="evidence-block">
+                      <summary>来源</summary>
+                      <ul>
+                        <li v-for="item in visibleEvidence(note.evidence)" :key="evidenceKey(item)">
+                          <strong>{{ evidenceChapterLabel(item) }}</strong>
+                          <span>{{ item.note }}</span>
+                          <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
+                        </li>
+                      </ul>
+                    </details>
                   </article>
                 </div>
               </section>
@@ -131,6 +141,16 @@
               <span v-if="character.lastSeenChapter">最近：{{ character.lastSeenChapter }}</span>
               <span v-if="character.aliases?.length">别名：{{ character.aliases.join('、') }}</span>
             </div>
+            <details v-if="hasEvidence(character.evidence)" class="evidence-block">
+              <summary>来源</summary>
+              <ul>
+                <li v-for="item in visibleEvidence(character.evidence)" :key="evidenceKey(item)">
+                  <strong>{{ evidenceChapterLabel(item) }}</strong>
+                  <span>{{ item.note }}</span>
+                  <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
+                </li>
+              </ul>
+            </details>
           </article>
           <EmptyState v-if="!filteredCharacters.length" :text="importantCharacters.length ? '没有匹配的角色' : '暂无重要角色资料'" />
         </section>
@@ -143,6 +163,16 @@
               <strong>{{ relationship.target }}</strong>
             </div>
             <p>{{ relationship.description || relationship.status || '暂无说明' }}</p>
+            <details v-if="hasEvidence(relationship.evidence)" class="evidence-block">
+              <summary>来源</summary>
+              <ul>
+                <li v-for="item in visibleEvidence(relationship.evidence)" :key="evidenceKey(item)">
+                  <strong>{{ evidenceChapterLabel(item) }}</strong>
+                  <span>{{ item.note }}</span>
+                  <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
+                </li>
+              </ul>
+            </details>
           </article>
           <EmptyState v-if="!displayRelationships.length" text="暂无重要人物关系" />
         </section>
@@ -151,7 +181,8 @@
           <div class="map-toolbar">
             <div class="map-title">
               <h2>世界地图</h2>
-              <p>{{ displayBaseMemory?.map?.updatedAt ? formatTime(displayBaseMemory.map.updatedAt) : '未生成' }}</p>
+              <p>{{ mapStatusText }}</p>
+              <p v-if="displayBaseMemory?.mapDirty" class="map-dirty-hint">地点有新变化，点击重绘地图手动生成。</p>
             </div>
             <button class="secondary-btn" :disabled="aiStore.isBusy" @click="redrawMap">
               {{ aiStore.phase === 'map' ? '绘制中...' : '重绘地图' }}
@@ -264,6 +295,16 @@
                 <span v-if="row.location.parentName">上级：{{ row.location.parentName }}</span>
                 <span v-if="row.location.relatedCharacters?.length">相关：{{ row.location.relatedCharacters.join('、') }}</span>
               </div>
+              <details v-if="hasEvidence(row.location.evidence)" class="evidence-block">
+                <summary>来源</summary>
+                <ul>
+                  <li v-for="item in visibleEvidence(row.location.evidence)" :key="evidenceKey(item)">
+                    <strong>{{ evidenceChapterLabel(item) }}</strong>
+                    <span>{{ item.note }}</span>
+                    <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
+                  </li>
+                </ul>
+              </details>
             </article>
             <EmptyState v-if="!visibleLocationRows.length" text="暂无地点资料" />
           </div>
@@ -293,6 +334,11 @@
             <p class="settings-hint">
               后端配置由管理员保存到服务器；只有开启 AI 模型权限的账号才能使用。自己配置仍只保存在当前浏览器。
             </p>
+            <div class="runtime-card">
+              <span>当前实际使用</span>
+              <strong>{{ activeTextRuntime.sourceLabel }} · {{ activeTextRuntime.model }}</strong>
+              <small>{{ activeTextRuntime.path }}</small>
+            </div>
           </article>
 
           <div v-if="configDraft.modelSource === 'server'" class="settings-cards">
@@ -586,11 +632,9 @@ import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
 import { useReaderStore } from '../stores/reader'
 import type {
-  AiBookCharacter,
   AiBookConfig,
-  AiBookLocation,
+  AiBookEvidence,
   AiBookMemory,
-  AiBookRelationship,
   AiServerModelConfig,
   Book,
   BookChapter,
@@ -600,11 +644,18 @@ import type {
 } from '../types'
 import { buildAiBookRelationshipGraph, layoutAiBookRelationshipGraph } from '../utils/aiBookGraph'
 import { buildAiBookLocationRows, groupAiBookWorldview } from '../utils/aiBookPresentation'
+import {
+  filterDisplayCharacters,
+  normalizeDisplayCharacters,
+  normalizeDisplayLocations,
+  normalizeDisplayRelationships,
+} from '../utils/aiBookSelectors'
 import { isAiBookMemoryV2, toAiBookDisplayMemory } from '../utils/aiBookV2'
 import {
   DEFAULT_IMAGE_MODEL_PATH,
   DEFAULT_SPEECH_MODEL_PATH,
   DEFAULT_TEXT_MODEL_PATH,
+  describeAiBookTextRuntime,
   mediaPresetFromPath,
   shouldAutoUseServerAiBookConfig,
   textPathForPreset,
@@ -659,12 +710,17 @@ const serverConfig = computed(() => aiStore.serverModelConfig?.config || null)
 const serverTextReady = computed(() => Boolean(serverConfig.value?.text.enabled && serverConfig.value.text.baseUrl && serverConfig.value.text.model))
 const serverImageReady = computed(() => Boolean(serverConfig.value?.image.enabled && serverConfig.value.image.baseUrl && serverConfig.value.image.model))
 const serverSpeechReady = computed(() => Boolean(serverConfig.value?.speech.enabled && serverConfig.value.speech.baseUrl && serverConfig.value.speech.model))
+const activeTextRuntime = computed(() => describeAiBookTextRuntime(aiStore.config, serverConfig.value))
 const worldviewGroups = computed(() => groupAiBookWorldview(displayBaseMemory.value?.worldview || [], collapsedWorldviewCategories.value))
 const importantCharacters = computed(() => normalizeDisplayCharacters(displayBaseMemory.value?.characters || []))
-const filteredCharacters = computed(() => filterCharacters(importantCharacters.value, characterSearch.value))
+const filteredCharacters = computed(() => filterDisplayCharacters(importantCharacters.value, characterSearch.value))
 const displayRelationships = computed(() => normalizeDisplayRelationships(displayBaseMemory.value?.relationships || []))
 const displayLocations = computed(() => normalizeDisplayLocations(displayBaseMemory.value?.locations || []))
 const visibleLocationRows = computed(() => buildAiBookLocationRows(displayLocations.value, collapsedLocationIds.value))
+const mapStatusText = computed(() => {
+  if (displayBaseMemory.value?.mapDirty) return '待手动重绘'
+  return displayBaseMemory.value?.map?.updatedAt ? formatTime(displayBaseMemory.value.map.updatedAt) : '未生成'
+})
 const displayMemory = computed<AiBookMemory | null>(() => displayBaseMemory.value
   ? {
       ...displayBaseMemory.value,
@@ -842,7 +898,10 @@ async function updateToCurrent() {
     appStore.showToast('目录未加载，无法更新', 'warning')
     return
   }
-  const startIndex = Math.max(0, (memory.value.processedChapterIndex ?? -1) + 1)
+  const retryIndex = typeof memory.value.lastErrorChapterIndex === 'number'
+    ? memory.value.lastErrorChapterIndex
+    : undefined
+  const startIndex = Math.max(0, retryIndex ?? ((memory.value.processedChapterIndex ?? -1) + 1))
   if (startIndex > targetIndex) {
     appStore.showToast('当前进度已更新', 'success')
     return
@@ -860,6 +919,7 @@ async function updateToCurrent() {
         chapterContent,
         current: currentMemory,
         chapters: chapters.value,
+        throwOnError: true,
       })
     }
     appStore.showToast('AI资料已更新', 'success')
@@ -963,113 +1023,20 @@ function formatTime(value: number) {
   return new Date(value).toLocaleString()
 }
 
-function normalizeDisplayCharacters(characters: AiBookCharacter[]) {
-  const byName = new Map<string, AiBookCharacter>()
-  for (const character of characters) {
-    if (!character.name || isLowImportance(character.importance)) continue
-    const key = normalizeKey(character.name)
-    const existing = byName.get(key)
-    byName.set(key, existing ? mergeDisplayCharacter(existing, character) : character)
-  }
-  return [...byName.values()]
+function hasEvidence(evidence: AiBookEvidence[] | undefined) {
+  return Boolean(evidence?.length)
 }
 
-function filterCharacters(characters: AiBookCharacter[], query: string) {
-  const normalizedQuery = normalizeSearch(query)
-  if (!normalizedQuery) return characters
-  return characters.filter((character) => normalizeSearch([
-    character.name,
-    character.aliases?.join(' '),
-    character.status,
-    character.faction,
-    character.location,
-    character.description,
-  ].filter(Boolean).join(' ')).includes(normalizedQuery))
+function visibleEvidence(evidence: AiBookEvidence[] | undefined) {
+  return (evidence || []).slice(-3).reverse()
 }
 
-function normalizeDisplayRelationships(relationships: AiBookRelationship[]) {
-  const byPair = new Map<string, AiBookRelationship>()
-  for (const relationship of relationships) {
-    if (
-      !relationship.source
-      || !relationship.target
-      || !relationship.relation
-      || normalizeKey(relationship.source) === normalizeKey(relationship.target)
-      || isLowImportance(relationship.importance)
-      || isLowValueRelationship(relationship)
-    ) {
-      continue
-    }
-    const key = relationshipKey(relationship.source, relationship.target, relationship.relation)
-    const existing = byPair.get(key)
-    byPair.set(key, existing ? mergeDisplayRelationship(existing, relationship) : relationship)
-  }
-  return [...byPair.values()]
+function evidenceKey(evidence: AiBookEvidence) {
+  return `${evidence.chapterIndex}-${evidence.chapterTitle}-${evidence.note}-${evidence.quote || ''}`
 }
 
-function normalizeDisplayLocations(locations: AiBookLocation[]) {
-  const byName = new Map<string, AiBookLocation>()
-  for (const location of locations) {
-    if (!location.name || isLowImportance(location.importance)) continue
-    const parentName = location.parentName && normalizeKey(location.parentName) !== normalizeKey(location.name)
-      ? location.parentName
-      : undefined
-    const normalized = { ...location, parentName }
-    const key = normalizeKey(location.name)
-    const existing = byName.get(key)
-    byName.set(key, existing ? mergeDisplayLocation(existing, normalized) : normalized)
-  }
-  return [...byName.values()]
-}
-
-function mergeDisplayCharacter(current: AiBookCharacter, next: AiBookCharacter): AiBookCharacter {
-  return {
-    ...current,
-    aliases: uniqueStrings([...(current.aliases || []), ...(next.aliases || [])]),
-    status: richerString(current.status, next.status),
-    faction: current.faction || next.faction,
-    location: current.location || next.location,
-    description: richerString(current.description, next.description),
-    lastSeenChapter: current.lastSeenChapter || next.lastSeenChapter,
-    importance: preferImportance(current.importance, next.importance),
-  }
-}
-
-function mergeDisplayRelationship(current: AiBookRelationship, next: AiBookRelationship): AiBookRelationship {
-  return {
-    ...current,
-    status: richerString(current.status, next.status),
-    description: richerString(current.description, next.description),
-    importance: preferImportance(current.importance, next.importance),
-  }
-}
-
-function mergeDisplayLocation(current: AiBookLocation, next: AiBookLocation): AiBookLocation {
-  return {
-    ...current,
-    kind: current.kind || next.kind,
-    parentName: current.parentName || next.parentName,
-    description: richerString(current.description, next.description),
-    status: richerString(current.status, next.status),
-    relatedCharacters: uniqueStrings([...(current.relatedCharacters || []), ...(next.relatedCharacters || [])]),
-    firstSeenChapter: current.firstSeenChapter || next.firstSeenChapter,
-    importance: preferImportance(current.importance, next.importance),
-  }
-}
-
-function relationshipKey(source: string, target: string, relation: string) {
-  return `${[normalizeKey(source), normalizeKey(target)].sort().join('::')}::${normalizeKey(relation)}`
-}
-
-function isLowValueRelationship(relationship: AiBookRelationship) {
-  if (importanceRank(relationship.importance) >= 2) return false
-  const relation = normalizeKey(relationship.relation)
-  if (!['认识', '见过', '路过', '同村', '同校', '位于', '相关'].includes(relation)) return false
-  return normalizeKey(relationship.description || relationship.status || '').length < 18
-}
-
-function normalizeSearch(value: string) {
-  return value.trim().toLowerCase().replace(/\s+/g, '')
+function evidenceChapterLabel(evidence: AiBookEvidence) {
+  return evidence.chapterTitle || `第 ${evidence.chapterIndex + 1} 章`
 }
 
 function normalizeKey(value: string | undefined) {
@@ -1078,43 +1045,6 @@ function normalizeKey(value: string | undefined) {
     .toLowerCase()
     .replace(/[·•・]/g, '.')
     .replace(/\s+/g, '')
-}
-
-function isLowImportance(value: string | undefined) {
-  const key = normalizeKey(value)
-  if (!key) return false
-  return ['low', '低', '低重要性', '不重要', '路人', '背景', 'minor', 'background', 'oneoff', '一次性']
-    .some((term) => key.includes(term))
-}
-
-function importanceRank(value: string | undefined) {
-  const key = normalizeKey(value)
-  if (key.includes('high') || key.includes('高')) return 3
-  if (key.includes('medium') || key.includes('中')) return 2
-  if (isLowImportance(value)) return 1
-  return 0
-}
-
-function richerString(current: string | undefined, next: string | undefined) {
-  if (!current) return next || ''
-  if (!next) return current
-  return next.length > current.length ? next : current
-}
-
-function preferImportance(current: string | undefined, next: string | undefined) {
-  return importanceRank(next) > importanceRank(current) ? next : current || next
-}
-
-function uniqueStrings(values: string[]) {
-  const seen = new Set<string>()
-  const result: string[] = []
-  for (const value of values) {
-    const key = normalizeKey(value)
-    if (!key || seen.has(key)) continue
-    seen.add(key)
-    result.push(value)
-  }
-  return result
 }
 
 function createEmptyServerModelConfig(): AiServerModelConfig {
@@ -1597,6 +1527,43 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   margin-top: 10px;
 }
 
+.evidence-block {
+  margin-top: 10px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.evidence-block summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.evidence-block ul {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding-left: 16px;
+}
+
+.evidence-block li {
+  line-height: 1.55;
+}
+
+.evidence-block strong {
+  display: block;
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.evidence-block blockquote {
+  margin: 4px 0 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
 .panel-toolbar {
   display: flex;
   align-items: center;
@@ -1671,6 +1638,11 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
 .map-title p {
   margin: 0;
   white-space: nowrap;
+}
+
+.map-dirty-hint {
+  color: var(--color-primary);
+  font-weight: 600;
 }
 
 .map-frame {
@@ -2055,6 +2027,27 @@ marker#graph-arrow path {
   color: var(--color-text-tertiary);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.runtime-card {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  background: var(--color-bg-sunken);
+}
+
+.runtime-card span,
+.runtime-card small {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.runtime-card strong {
+  color: var(--color-text);
+  font-size: 13px;
 }
 
 .admin-model-panel {

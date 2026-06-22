@@ -88,4 +88,24 @@ describe('aiBookPresentation', () => {
       { name: '莫雷蒂家公寓', parentName: '廷根市', depth: 2 },
     ]))
   })
+
+  it('allows facilities and sites to nest under a school kind', () => {
+    const rows = buildAiBookLocationRows([
+      { name: 'North Academy', kind: 'school', description: '主校区。' },
+      { name: 'Training Grounds', parentName: 'North Academy', kind: 'facility', description: '学院训练设施。' },
+      { name: 'Old Library', parentName: 'North Academy', kind: 'site', description: '旧馆遗址。' },
+    ], new Set())
+
+    const simplified = rows.map((row) => ({
+      name: row.location.name,
+      parentName: row.location.parentName,
+      depth: row.depth,
+    }))
+
+    expect(simplified[0]).toEqual({ name: 'North Academy', parentName: undefined, depth: 0 })
+    expect(simplified.slice(1)).toEqual(expect.arrayContaining([
+      { name: 'Old Library', parentName: 'North Academy', depth: 1 },
+      { name: 'Training Grounds', parentName: 'North Academy', depth: 1 },
+    ]))
+  })
 })

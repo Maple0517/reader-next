@@ -148,6 +148,7 @@ export const useAiBookStore = defineStore('aiBook', () => {
     chapterContent: string
     current?: AiBookAnyMemory
     allowSkip?: boolean
+    throwOnError?: boolean
     chapters?: BookChapter[]
   }) {
     const currentConfig = refreshConfig()
@@ -174,12 +175,8 @@ export const useAiBookStore = defineStore('aiBook', () => {
         chapterContent: params.chapterContent,
         memory: current,
       })
-      let next = await saveAiBookMemory(update.memory)
+      const next = await saveAiBookMemory(update.memory)
       memory.value = next
-
-      if (update.shouldRegenerateMap && update.mapPrompt) {
-        next = await redrawMap(params.book, update.mapPrompt, params.chapter.index, next)
-      }
 
       phase.value = 'idle'
       statusText.value = ''
@@ -194,9 +191,12 @@ export const useAiBookStore = defineStore('aiBook', () => {
         bookName: params.book.name,
         author: params.book.author,
         lastError: message,
+        lastErrorChapterIndex: params.chapter.index,
+        lastErrorChapterTitle: params.chapter.title,
         updatedAt: Date.now(),
       }
       memory.value = await saveAiBookMemory(failed).catch(() => failed)
+      if (params.throwOnError) throw error
       return memory.value
     } finally {
       updatingChapterKeys.delete(key)

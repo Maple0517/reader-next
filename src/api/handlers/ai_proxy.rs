@@ -328,7 +328,9 @@ fn openai_chat_body_to_gemini_generate_content(body: &Map<String, Value>) -> Val
             "tools".to_string(),
             serde_json::json!([{ "functionDeclarations": declarations }]),
         );
-        if let Some(function_calling_config) = gemini_function_calling_config(body.get("tools"), body.get("tool_choice")) {
+        if let Some(function_calling_config) =
+            gemini_function_calling_config(body.get("tools"), body.get("tool_choice"))
+        {
             result.insert(
                 "toolConfig".to_string(),
                 serde_json::json!({ "functionCallingConfig": function_calling_config }),
@@ -499,7 +501,10 @@ fn gemini_generation_config(body: &Map<String, Value>) -> Map<String, Value> {
     {
         config.insert("responseMimeType".to_string(), value.clone());
     }
-    if let Some(value) = body.get("responseSchema").or_else(|| body.get("response_schema")) {
+    if let Some(value) = body
+        .get("responseSchema")
+        .or_else(|| body.get("response_schema"))
+    {
         config.insert(
             "responseSchema".to_string(),
             strip_gemini_unsupported_schema_keys(value),
@@ -515,11 +520,15 @@ fn is_native_gemini_generate_content_path(path: &str) -> bool {
 }
 
 fn is_responses_path(path: &str) -> bool {
-    path.split('?').next().is_some_and(|path| path.ends_with("/responses"))
+    path.split('?')
+        .next()
+        .is_some_and(|path| path.ends_with("/responses"))
 }
 
 fn is_anthropic_messages_path(path: &str) -> bool {
-    path.split('?').next().is_some_and(|path| path.ends_with("/v1/messages"))
+    path.split('?')
+        .next()
+        .is_some_and(|path| path.ends_with("/v1/messages"))
 }
 
 fn should_use_gemini_api_key_header(target: &Url, path: &str, kind: Option<AiModelKind>) -> bool {
@@ -812,8 +821,14 @@ mod tests {
         adapt_ai_proxy_body("/v1/responses", Some(AiModelKind::Text), &mut body);
 
         assert!(body.get("messages").is_none());
-        assert_eq!(body.pointer("/input/0/role"), Some(&Value::String("system".to_string())));
-        assert_eq!(body.pointer("/input/1/role"), Some(&Value::String("user".to_string())));
+        assert_eq!(
+            body.pointer("/input/0/role"),
+            Some(&Value::String("system".to_string()))
+        );
+        assert_eq!(
+            body.pointer("/input/1/role"),
+            Some(&Value::String("user".to_string()))
+        );
     }
 
     #[test]
@@ -831,7 +846,10 @@ mod tests {
         adapt_ai_proxy_body("/v1/messages", Some(AiModelKind::Text), &mut body);
 
         assert_eq!(body.get("system"), Some(&Value::String("系统".to_string())));
-        assert_eq!(body.pointer("/messages/0/role"), Some(&Value::String("user".to_string())));
+        assert_eq!(
+            body.pointer("/messages/0/role"),
+            Some(&Value::String("user".to_string()))
+        );
         assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(4096)));
     }
 }
