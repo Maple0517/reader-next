@@ -1672,12 +1672,8 @@ fn merge_name_candidates<'a>(primary: impl IntoIterator<Item = &'a String>, alia
     dedupe_strings(values)
 }
 
-fn stable_character_id(name: &str, aliases: &[String]) -> String {
-    let token = merge_name_candidates(std::slice::from_ref(&name.to_string()), aliases)
-        .into_iter()
-        .min_by_key(|value| canonical_key(value).len())
-        .unwrap_or_else(|| clean_required(name));
-    format!("character:{}", canonical_key(&token))
+fn stable_character_id(name: &str, _aliases: &[String]) -> String {
+    format!("character:{}", canonical_key(name))
 }
 
 fn stable_location_id(name: &str) -> String {
@@ -2185,6 +2181,41 @@ mod tests {
 
         assert_eq!(normalized.characters.len(), 1);
         assert_eq!(normalized.characters[0].id, "character:stable-legacy");
+    }
+
+    #[test]
+    fn ai_book_v3_alias_growth_does_not_shorten_character_id() {
+        let mut memory = create_empty_ai_book_memory_v3("book://test", None, None);
+        memory.characters.push(AiBookCharacterV3 {
+            name: "Alexandra".to_string(),
+            ..AiBookCharacterV3::default()
+        });
+        let digest = AiBookChapterDigestV3 {
+            chapter_index: 6,
+            chapter_title: "第六章".to_string(),
+            summary: "Alex 出场".to_string(),
+            ..AiBookChapterDigestV3::default()
+        };
+        let context = select_working_context_v3(&memory, Some(&digest), "Alex 出场");
+        let patch = AiBookKnowledgePatchV3 {
+            chapter_index: 6,
+            characters: vec![AiBookCharacterPatchV3 {
+                name: "Alex".to_string(),
+                aliases: vec!["Alexandra".to_string()],
+                ..AiBookCharacterPatchV3::default()
+            }],
+            ..AiBookKnowledgePatchV3::default()
+        };
+
+        let normalized = normalize_knowledge_patch_v3(patch, &context);
+        assert_eq!(normalized.characters[0].id, "character:alexandra");
+
+        let merged = merge_ai_book_memory_v3(memory, normalized);
+        let display = select_ai_book_display_memory_v3(&merged);
+        let next_context = select_working_context_v3(&merged, Some(&digest), "Alex 出场");
+
+        assert_eq!(display.characters[0].id, "character:alexandra");
+        assert_eq!(next_context.relevant_characters[0].id, "character:alexandra");
     }
 
     #[test]
