@@ -474,6 +474,8 @@ async fn idle_catchup_status(
         processed_chapter_index,
         processed_chapter_title,
         error,
+        current_stage: Some("idle".to_string()),
+        stats: None,
         updated_at: memory
             .as_ref()
             .and_then(|value| value.get("updatedAt"))
@@ -681,6 +683,7 @@ fn build_catchup_start_failure_memory(
 mod tests {
     use super::*;
     use serde_json::json;
+    use crate::model::ai_book_catchup::AiBookCatchupTaskStats;
 
     #[test]
     fn start_failure_memory_records_last_error_without_advancing_processed_chapter() {
@@ -766,6 +769,8 @@ mod tests {
             processed_chapter_index: Some(6),
             processed_chapter_title: Some("第7章".to_string()),
             error: None,
+            current_stage: Some("patch".to_string()),
+            stats: Some(AiBookCatchupTaskStats::default()),
             updated_at: 222,
         };
 

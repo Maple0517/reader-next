@@ -1,5 +1,5 @@
 use crate::error::error::AppError;
-use crate::model::ai_book_catchup::{AiBookCatchupTaskStatus, AiBookCatchupTaskView};
+use crate::model::ai_book_catchup::{AiBookCatchupTaskStats, AiBookCatchupTaskStatus, AiBookCatchupTaskView};
 use crate::model::ai_model::{AiModelConfig, AiModelKind, ResolvedAiModelEndpoint};
 use crate::model::ai_proxy::build_ai_proxy_url;
 use crate::util::time::now_ts;
@@ -57,6 +57,8 @@ impl TaskState {
                 processed_chapter_title: None,
                 error: None,
                 updated_at: now_ts() * 1000,
+                current_stage: Some("fetching".to_string()),
+                stats: Some(AiBookCatchupTaskStats::default()),
             },
             pause_requested: false,
             pause_tx,
@@ -151,7 +153,7 @@ impl AiBookCatchupService {
         let key = task_key(&user_ns, &book_url);
         let mut tasks = self.tasks.write().await;
         if let Some(existing) = tasks.get(&key) {
-            if matches_status(&existing.view.status, &["running", "pausing"]) {
+            if matches_status(&existing.view.status, &["running", "pausing", "canceling"]) {
                 return Ok(existing.snapshot());
             }
         }
@@ -191,12 +193,13 @@ impl AiBookCatchupService {
         let task = tasks
             .get_mut(&task_key(user_ns, book_url))
             .ok_or_else(|| AppError::BadRequest("任务不存在".to_string()))?;
-        if matches_status(&task.view.status, &["completed", "failed", "paused"]) {
+        if matches_status(&task.view.status, &["completed", "failed", "paused", "canceled"]) {
             return Ok(task.snapshot());
         }
         task.pause_requested = true;
         let _ = task.pause_tx.send(true);
-        task.view.status = AiBookCatchupTaskStatus::Pausing.as_str().to_string();
+        task.view.status = AiBookCatchupTaskStatus::Canceling.as_str().to_string();
+        task.view.current_stage = None;
         task.view.updated_at = now_ts() * 1000;
         Ok(task.snapshot())
     }
@@ -445,7 +448,8 @@ impl AiBookCatchupService {
             task.view.error = None;
             task.view.updated_at = now_ts() * 1000;
             if task.pause_requested {
-                task.view.status = AiBookCatchupTaskStatus::Pausing.as_str().to_string();
+                task.view.status = AiBookCatchupTaskStatus::Canceling.as_str().to_string();
+        task.view.current_stage = None;
             }
         }
     }
@@ -462,7 +466,8 @@ impl AiBookCatchupService {
     async fn mark_paused(&self, key: &str) {
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(key) {
-            task.view.status = AiBookCatchupTaskStatus::Paused.as_str().to_string();
+            task.view.status = AiBookCatchupTaskStatus::Canceled.as_str().to_string();
+            task.view.current_stage = None;
             task.view.current_chapter_index = None;
             task.view.current_chapter_title = None;
             task.view.updated_at = now_ts() * 1000;
