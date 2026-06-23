@@ -10,6 +10,16 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
+const AI_BOOK_MEMORY_ROUTE: &str = "/reader3/aiBook/memory";
+const AI_BOOK_CHAPTER_MEMORY_ROUTE: &str = "/reader3/aiBook/chapterMemory";
+const AI_BOOK_MEMORY_RESET_ROUTE: &str = "/reader3/aiBook/memory/reset";
+const AI_BOOK_ENABLED_ROUTE: &str = "/reader3/aiBook/enabled";
+const AI_BOOK_CHAPTER_GENERATE_ROUTE: &str = "/reader3/aiBook/chapterMemory/generate";
+const AI_BOOK_MAP_GENERATE_ROUTE: &str = "/reader3/aiBook/map/generate";
+const AI_BOOK_CATCHUP_START_ROUTE: &str = "/reader3/aiBook/catchup/start";
+const AI_BOOK_CATCHUP_STATUS_ROUTE: &str = "/reader3/aiBook/catchup/status";
+const AI_BOOK_CATCHUP_CANCEL_ROUTE: &str = "/reader3/aiBook/catchup/cancel";
+
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(handlers::health))
@@ -209,37 +219,37 @@ pub fn build_router(state: AppState) -> Router {
         .route("/reader3/saveBookmarks", post(handlers::save_bookmarks))
         .route("/reader3/deleteBookmark", post(handlers::delete_bookmark))
         .route("/reader3/deleteBookmarks", post(handlers::delete_bookmarks))
-        .route("/reader3/aiBook/memory", get(handlers::get_ai_book_memory))
+        .route(AI_BOOK_MEMORY_ROUTE, get(handlers::get_ai_book_memory))
         .route(
-            "/reader3/aiBook/chapterMemory",
+            AI_BOOK_CHAPTER_MEMORY_ROUTE,
             get(handlers::get_ai_book_chapter_memory),
         )
         .route(
-            "/reader3/aiBook/memory/reset",
+            AI_BOOK_MEMORY_RESET_ROUTE,
             post(handlers::reset_ai_book_memory),
         )
         .route(
-            "/reader3/aiBook/enabled",
+            AI_BOOK_ENABLED_ROUTE,
             post(handlers::set_ai_book_enabled),
         )
         .route(
-            "/reader3/aiBook/chapterMemory/generate",
+            AI_BOOK_CHAPTER_GENERATE_ROUTE,
             post(handlers::generate_ai_book_chapter_memory),
         )
         .route(
-            "/reader3/aiBook/map/generate",
+            AI_BOOK_MAP_GENERATE_ROUTE,
             post(handlers::generate_ai_book_map),
         )
         .route(
-            "/reader3/aiBook/catchup/start",
+            AI_BOOK_CATCHUP_START_ROUTE,
             post(handlers::start_ai_book_catchup),
         )
         .route(
-            "/reader3/aiBook/catchup/status",
+            AI_BOOK_CATCHUP_STATUS_ROUTE,
             get(handlers::get_ai_book_catchup_status),
         )
         .route(
-            "/reader3/aiBook/catchup/cancel",
+            AI_BOOK_CATCHUP_CANCEL_ROUTE,
             post(handlers::cancel_ai_book_catchup),
         )
         .route(
@@ -347,21 +357,168 @@ pub fn build_router(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn ai_book_v3_no_raw_save_route_registered() {
-        let source = std::fs::read_to_string(file!()).unwrap();
-        assert!(source.contains("\"/reader3/aiBook/memory\""));
-        assert!(source.contains("\"/reader3/aiBook/chapterMemory\""));
-        assert!(source.contains("\"/reader3/aiBook/memory/reset\""));
-        assert!(source.contains("\"/reader3/aiBook/enabled\""));
-        assert!(source.contains("\"/reader3/aiBook/chapterMemory/generate\""));
-        assert!(source.contains("\"/reader3/aiBook/map/generate\""));
-        assert!(source.contains("\"/reader3/aiBook/catchup/start\""));
-        assert!(source.contains("\"/reader3/aiBook/catchup/status\""));
-        assert!(source.contains("\"/reader3/aiBook/catchup/cancel\""));
-        assert!(!source.contains("\"/reader3/saveAiBookMemory\""));
-        assert!(!source.contains("\"/reader3/getAiBookMemory\""));
-        assert!(!source.contains("\"/reader3/deleteAiBookMemory\""));
-        assert!(!source.contains("\"/reader3/aiBookCatchup/pause\""));
+    use super::*;
+    use crate::app::config::AppConfig;
+    use crate::service::ai_book_catchup_service::AiBookCatchupService;
+    use crate::service::ai_book_generation_service::AiBookGenerationService;
+    use crate::service::ai_book_service::AiBookService;
+    use crate::service::ai_model_service::AiModelService;
+    use crate::service::book_group_service::BookGroupService;
+    use crate::service::book_service::BookService;
+    use crate::service::book_source_service::BookSourceService;
+    use crate::service::chapter_summary_service::ChapterSummaryService;
+    use crate::service::json_document_service::JsonDocumentService;
+    use crate::service::local_txt_book::LocalTxtBookService;
+    use crate::service::update_service::UpdateService;
+    use crate::service::user_service::UserService;
+    use crate::storage::cache::file_cache::FileCache;
+    use crate::storage::db;
+    use crate::storage::db::repo::BookSourceRepo;
+    use crate::util::crypto::random_string;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tower::util::ServiceExt;
+
+    async fn create_test_state() -> (AppState, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("reader-ai-book-router-{}", random_string(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
+        let pool = db::init_pool(&database_url).await.unwrap();
+        let cfg = AppConfig {
+            storage_dir: dir.to_string_lossy().to_string(),
+            assets_dir: dir.join("assets").to_string_lossy().to_string(),
+            web_root: dir.join("web").to_string_lossy().to_string(),
+            database_url,
+            ..AppConfig::default()
+        };
+        let http = crate::crawler::http_client::HttpClient::new(cfg.request_timeout_secs, None).unwrap();
+        let parser = crate::parser::rule_engine::RuleEngine::new().unwrap();
+        let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
+        let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
+        let book_source_service = Arc::new(BookSourceService::new(BookSourceRepo::new(pool.clone()), &cfg.storage_dir));
+        let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
+        let json_document_service = Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
+        let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
+        user_service.migrate_legacy_users_from_json().await.unwrap();
+        let book_group_service = Arc::new(BookGroupService::new(json_document_service.clone()));
+        let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
+        let ai_book_generation_service = Arc::new(AiBookGenerationService::new(
+            ai_book_service.clone(),
+            book_service.clone(),
+            book_source_service.clone(),
+            local_txt_book_service.clone(),
+        ));
+        let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
+        let ai_model_service = Arc::new(AiModelService::new(json_document_service.clone(), &cfg.storage_dir));
+        let chapter_summary_service = Arc::new(ChapterSummaryService::new(json_document_service.clone()));
+        let update_service = Arc::new(UpdateService::new(
+            json_document_service.clone(),
+            cfg.request_timeout_secs,
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+        ).unwrap());
+        let state = AppState {
+            config: cfg,
+            book_service,
+            book_source_service,
+            user_service,
+            book_group_service,
+            local_txt_book_service,
+            json_document_service,
+            ai_book_service,
+            ai_book_generation_service,
+            ai_book_catchup_service,
+            ai_model_service,
+            chapter_summary_service,
+            update_service,
+        };
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn ai_book_v3_routes_are_registered_without_legacy_aliases() {
+        let (state, dir) = create_test_state().await;
+        let mut app = build_router(state);
+
+        for (method, path) in [
+            (Method::POST, "/reader3/saveAiBookMemory"),
+            (Method::GET, "/reader3/getAiBookMemory"),
+            (Method::POST, "/reader3/aiBookCatchup/pause"),
+        ] {
+            let response = app
+                .as_service::<Body>()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ));
+        }
+
+        for (method, path) in [
+            (Method::GET, AI_BOOK_MEMORY_ROUTE),
+            (Method::GET, AI_BOOK_CHAPTER_MEMORY_ROUTE),
+            (Method::POST, AI_BOOK_MEMORY_RESET_ROUTE),
+            (Method::POST, AI_BOOK_ENABLED_ROUTE),
+            (Method::POST, AI_BOOK_CHAPTER_GENERATE_ROUTE),
+            (Method::POST, AI_BOOK_MAP_GENERATE_ROUTE),
+            (Method::POST, AI_BOOK_CATCHUP_START_ROUTE),
+            (Method::GET, AI_BOOK_CATCHUP_STATUS_ROUTE),
+            (Method::POST, AI_BOOK_CATCHUP_CANCEL_ROUTE),
+        ] {
+            let response = app
+                .as_service::<Body>()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            assert_ne!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path}"
+            );
+        }
+
+        let wrong_method_memory = app
+            .as_service::<Body>()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(AI_BOOK_MEMORY_ROUTE)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_method_memory.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let wrong_method_enabled = app
+            .as_service::<Body>()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(AI_BOOK_ENABLED_ROUTE)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_method_enabled.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }

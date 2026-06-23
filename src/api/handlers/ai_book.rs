@@ -155,10 +155,20 @@ pub async fn set_ai_book_enabled(
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let user_ns = resolve_user_ns(&state, &auth).await?;
     let book_url = required_book_url(req.book_url)?;
-    ensure_shelf_book(&state, &user_ns, &book_url).await?;
+    let shelf_book = ensure_shelf_book(&state, &user_ns, &book_url).await?;
+    let mut memory = state
+        .ai_book_service
+        .get_or_create_v3(
+            &user_ns,
+            &book_url,
+            Some(shelf_book.name.clone()),
+            Some(shelf_book.author.clone()),
+        )
+        .await?;
+    memory.enabled = req.enabled;
     let memory = state
         .ai_book_service
-        .set_enabled(&user_ns, &book_url, req.enabled)
+        .save_v3(&user_ns, &book_url, memory)
         .await?;
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(AiBookMemoryViewResponse {
@@ -951,6 +961,8 @@ mod tests {
         assert_eq!(enabled_payload["isSuccess"], json!(true));
         assert_eq!(enabled_payload["data"]["memory"]["bookUrl"], json!(book_url));
         assert_eq!(enabled_payload["data"]["memory"]["enabled"], json!(true));
+        assert_eq!(enabled_payload["data"]["memory"]["bookName"], json!("测试书"));
+        assert_eq!(enabled_payload["data"]["memory"]["author"], json!("测试作者"));
 
         let reset = reset_ai_book_memory(
             State(state),
