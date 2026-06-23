@@ -116,8 +116,8 @@ impl AiBookGenerationService {
             .await?;
         apply_generation_result(
             &mut memory,
+            &loaded.chapter,
             loaded.chapter_text.as_str(),
-            loaded.chapter.title.as_str(),
             generation,
         )?;
         let saved = self.ai_book_service.save_v3(user_ns, &book_url, memory).await?;
@@ -278,10 +278,12 @@ impl AiBookGenerationService {
 
 fn apply_generation_result(
     memory: &mut AiBookMemoryV3,
+    chapter: &LoadedChapter,
     chapter_text: &str,
-    chapter_title: &str,
-    generation: AiBookCombinedChapterGenerationV3,
+    mut generation: AiBookCombinedChapterGenerationV3,
 ) -> Result<(), AppError> {
+    generation.chapter_digest.chapter_index = chapter.index;
+    generation.chapter_digest.chapter_title = chapter.title.clone();
     if generation.chapter_digest.chapter_title.trim().is_empty() {
         return Err(AppError::BadRequest("chapter digest title required".to_string()));
     }
@@ -298,7 +300,7 @@ fn apply_generation_result(
         location_edges: Vec::new(),
     };
     let mut patch = generation.patch;
-    patch.chapter_index = generation.chapter_digest.chapter_index;
+    patch.chapter_index = chapter.index;
     if patch.summary.as_deref().is_none_or(|summary| summary.trim().is_empty()) {
         patch.summary = Some(generation.chapter_digest.summary.clone());
     }
@@ -306,7 +308,7 @@ fn apply_generation_result(
     let normalized_patch = normalize_knowledge_patch_v3(patch, &working_context);
     let next = merge_ai_book_memory_v3(memory.clone(), normalized_patch);
     *memory = upsert_digest(next, generation.chapter_digest);
-    memory.processed_chapter_title = Some(chapter_title.to_string());
+    memory.processed_chapter_title = Some(chapter.title.clone());
     memory.last_error = None;
     memory.last_error_chapter_index = None;
     memory.last_error_chapter_title = None;
@@ -691,6 +693,66 @@ mod tests {
         drop(guard);
         assert!(service.acquire_write_guard("reader-a", "book://same").is_ok());
         runtime.block_on(async { let _ = fs::remove_dir_all(dir).await; });
+    }
+
+    #[tokio::test]
+    async fn ai_book_v3_combined_current_chapter_rewrites_model_chapter_identity() {
+        let model = Arc::new(FakeChapterGenerationModel::with_combined(
+            0,
+            AiBookCombinedChapterGenerationV3 {
+                chapter_digest: AiBookChapterDigestCandidateV3 {
+                    chapter_index: 99,
+                    chapter_title: "模型乱写标题".to_string(),
+                    summary: "错误索引也要落到当前章".to_string(),
+                    key_points: vec!["当前章关键点".to_string()],
+                },
+                patch: AiBookKnowledgePatchV3 {
+                    chapter_index: 77,
+                    summary: Some("错误索引也要落到当前章".to_string()),
+                    knowledge_facts: vec![crate::model::ai_book_generation::AiBookKnowledgeFactPatchV3 {
+                        title: "当前章事实".to_string(),
+                        content: "必须写到第0章".to_string(),
+                        category: "geography".to_string(),
+                        confidence: "high".to_string(),
+                        importance: "high".to_string(),
+                    }],
+                    ..Default::default()
+                },
+            },
+        ));
+        let (service, dir) = create_services_with_model(model).await;
+        let book = save_local_txt_book(
+            &service,
+            "reader-a",
+            "chapter.txt",
+            "第一章 开场
+当前章节正文。",
+        )
+        .await;
+
+        let response = service
+            .generate_current_chapter("reader-a", &book, 0, AiBookGenerationMode::Auto)
+            .await
+            .unwrap();
+
+        assert_eq!(response.chapter.chapter_index, 0);
+        assert_eq!(response.chapter.chapter_title.as_deref(), Some("第一章 开场"));
+        assert_eq!(response.chapter.digest.as_ref().map(|d| d.chapter_index), Some(0));
+        assert_eq!(response.chapter.digest.as_ref().map(|d| d.chapter_title.as_str()), Some("第一章 开场"));
+
+        let saved = service
+            .ai_book_service
+            .get_or_create_v3("reader-a", &book.book_url, None, None)
+            .await
+            .unwrap();
+        assert_eq!(saved.processed_chapter_index, Some(0));
+        assert_eq!(saved.processed_chapter_title.as_deref(), Some("第一章 开场"));
+        assert_eq!(saved.chapter_digests.len(), 1);
+        assert_eq!(saved.chapter_digests[0].chapter_index, 0);
+        assert_eq!(saved.chapter_digests[0].chapter_title, "第一章 开场");
+        assert!(saved.knowledge_facts.iter().any(|fact| fact.title == "当前章事实"));
+
+        let _ = fs::remove_dir_all(dir).await;
     }
 
     #[tokio::test]
