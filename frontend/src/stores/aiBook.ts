@@ -46,7 +46,13 @@ export const useAiBookStore = defineStore('aiBook', () => {
   const config = ref<AiBookConfig>(getAiBookConfig(username.value))
   const serverModelConfig = ref<AiServerModelConfigResponse | null>(null)
   const memory = computed<AiBookMemory | null>(() => toLegacyMemory(memoryView.value))
-  const isBusy = computed(() => loading.value || phase.value !== 'idle' || catchupPolling.value)
+  const isBusy = computed(() => (
+    loading.value
+    || phase.value === 'loading'
+    || phase.value === 'text'
+    || phase.value === 'map'
+    || catchupPolling.value
+  ))
   const canUseServerModel = computed(() => Boolean(serverModelConfig.value?.canUseServerModel))
   const isServerModelAdmin = computed(() => Boolean(serverModelConfig.value?.isAdmin))
   let serverModelConfigRequest: Promise<AiServerModelConfigResponse | null> | null = null

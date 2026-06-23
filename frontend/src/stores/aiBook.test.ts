@@ -169,6 +169,32 @@ describe('aiBook store v3', () => {
       worldview: [],
     })
   })
+
+  it('allows retry after chapter generation failure', async () => {
+    const book = createBook()
+    const generatedResponse = createChapterResponse(book)
+    const failure = new Error('生成失败')
+    generateAiBookChapterMemoryMock
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(generatedResponse)
+    const store = useAiBookStore()
+
+    await expect(store.generateChapterMemory({ bookUrl: book.bookUrl, chapterIndex: 3, mode: 'manual' }))
+      .rejects
+      .toThrow('生成失败')
+
+    expect(store.phase).toBe('error')
+    expect(store.statusText).toBe('生成失败')
+    expect(store.isBusy).toBe(false)
+
+    await expect(store.generateChapterMemory({ bookUrl: book.bookUrl, chapterIndex: 3, mode: 'manual' }))
+      .resolves
+      .toEqual(generatedResponse.chapter)
+
+    expect(generateAiBookChapterMemoryMock).toHaveBeenCalledTimes(2)
+    expect(store.phase).toBe('idle')
+    expect(store.statusText).toBe('')
+  })
 })
 
 function createBook(): Book {
