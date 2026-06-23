@@ -592,10 +592,11 @@ pub fn merge_ai_book_memory_v3(
             let existing = &mut memory.character_states[index];
             merge_state_into_memory(existing, &state);
         } else {
+            let description = clean_optional(Some(render_state_description(&state)));
             memory.character_states.push(AiBookCharacterStateV3 {
                 name: state.canonical_name.clone(),
                 status: state.current_status.clone().unwrap_or_default(),
-                description: Some(render_state_description(&state)),
+                description,
                 last_seen_chapter_index: patch.chapter_index.into(),
                 last_seen_chapter_title: None,
                 updated_at: Some(now_ts()),
@@ -887,6 +888,10 @@ pub fn select_working_context_v3(
         .collect::<Vec<_>>();
 
     let allowed_character_ids: HashSet<_> = relevant_characters.iter().map(|item| item.id.clone()).collect();
+    let relevant_character_name_map: HashMap<_, _> = relevant_characters
+        .iter()
+        .map(|item| (item.id.clone(), item.name.clone()))
+        .collect();
     let relevant_relations = select_relationship_views(&memory.characters, &memory.character_relations)
         .into_iter()
         .filter(|relation| {
@@ -895,10 +900,16 @@ pub fn select_working_context_v3(
         })
         .take(MAX_RELEVANT_RELATIONS)
         .map(|relation| WorkingContextRelationV3 {
+            source_name: relevant_character_name_map
+                .get(&relation.source_character_id)
+                .cloned()
+                .unwrap_or_else(|| relation.source_character_id.clone()),
+            target_name: relevant_character_name_map
+                .get(&relation.target_character_id)
+                .cloned()
+                .unwrap_or_else(|| relation.target_character_id.clone()),
             source_character_id: relation.source_character_id,
-            source_name: relation.label.split('·').next().unwrap_or_default().to_string(),
             target_character_id: relation.target_character_id,
-            target_name: relation.label.split('·').next_back().unwrap_or_default().to_string(),
             kind: format!("{:?}", relation.kind),
             subtype: relation.subtype,
             label: relation.label,
@@ -1395,7 +1406,9 @@ fn merge_character_into_memory(existing: &mut AiBookCharacterV3, patch: &Normali
 
 fn merge_state_into_memory(existing: &mut AiBookCharacterStateV3, patch: &NormalizedCharacterStateV3) {
     existing.status = patch.current_status.clone().unwrap_or_else(|| existing.status.clone());
-    existing.description = Some(render_state_description(patch));
+    if let Some(description) = clean_optional(Some(render_state_description(patch))) {
+        existing.description = Some(description);
+    }
     existing.updated_at = Some(now_ts());
 }
 
@@ -2219,6 +2232,40 @@ mod tests {
     }
 
     #[test]
+    fn ai_book_v3_working_context_relation_names_do_not_come_from_label() {
+        let mut memory = memory_with_characters(&["张羽", "白真真"]);
+        let digest = AiBookChapterDigestV3 {
+            chapter_index: 8,
+            chapter_title: "第八章".to_string(),
+            summary: "张羽与白真真继续合作".to_string(),
+            ..AiBookChapterDigestV3::default()
+        };
+        let context = select_working_context_v3(&memory, Some(&digest), "张羽与白真真继续合作");
+        let patch = AiBookKnowledgePatchV3 {
+            chapter_index: 8,
+            character_relations: vec![AiBookCharacterRelationPatchV3 {
+                source: "张羽".to_string(),
+                target: "白真真".to_string(),
+                kind: "friend".to_string(),
+                polarity: "positive".to_string(),
+                strength: "major".to_string(),
+                status: "active".to_string(),
+                description: Some("两人继续合作".to_string()),
+            }],
+            ..AiBookKnowledgePatchV3::default()
+        };
+
+        let normalized = normalize_knowledge_patch_v3(patch, &context);
+        memory = merge_ai_book_memory_v3(memory, normalized);
+        let next_context = select_working_context_v3(&memory, Some(&digest), "张羽与白真真继续合作");
+
+        assert_eq!(next_context.relevant_relations.len(), 1);
+        assert_eq!(next_context.relevant_relations[0].label, "friend");
+        assert_eq!(next_context.relevant_relations[0].source_name, "张羽");
+        assert_eq!(next_context.relevant_relations[0].target_name, "白真真");
+    }
+
+    #[test]
     fn ai_book_v3_preserves_directed_relation_storage() {
         let mut memory = memory_with_characters(&["苏海峰", "张羽"]);
         let digest = AiBookChapterDigestV3 {
@@ -2267,6 +2314,59 @@ mod tests {
 
         assert_eq!(memory.character_relations.len(), 2);
         assert_ne!(memory.character_relations[0].source, memory.character_relations[1].source);
+    }
+
+    #[test]
+    fn ai_book_v3_status_only_state_patch_preserves_existing_description_and_new_empty_state_is_none() {
+        let mut existing_state = AiBookCharacterStateV3 {
+            name: "张羽".to_string(),
+            status: "旧状态".to_string(),
+            description: Some("abilities=健体三十六式;resources=灵石".to_string()),
+            ..AiBookCharacterStateV3::default()
+        };
+        let status_only_patch = NormalizedCharacterStateV3 {
+            character_id: "character:张羽".to_string(),
+            canonical_name: "张羽".to_string(),
+            current_status: Some("新状态".to_string()),
+            ..NormalizedCharacterStateV3::default()
+        };
+
+        merge_state_into_memory(&mut existing_state, &status_only_patch);
+
+        assert_eq!(existing_state.status, "新状态");
+        assert_eq!(
+            existing_state.description.as_deref(),
+            Some("abilities=健体三十六式;resources=灵石")
+        );
+
+        let mut memory = memory_with_characters(&["白真真"]);
+        let digest = AiBookChapterDigestV3 {
+            chapter_index: 11,
+            chapter_title: "第十一章".to_string(),
+            summary: "白真真状态更新".to_string(),
+            ..AiBookChapterDigestV3::default()
+        };
+        let context = select_working_context_v3(&memory, Some(&digest), "白真真状态更新");
+        let patch = NormalizedKnowledgePatchV3 {
+            chapter_index: 11,
+            character_states: vec![NormalizedCharacterStateV3 {
+                character_id: "character:白真真".to_string(),
+                canonical_name: "白真真".to_string(),
+                current_status: Some("警觉".to_string()),
+                evidence: vec![test_evidence()],
+                ..NormalizedCharacterStateV3::default()
+            }],
+            ..NormalizedKnowledgePatchV3::default()
+        };
+
+        memory = merge_ai_book_memory_v3(memory, patch);
+        let context_after = select_working_context_v3(&memory, Some(&digest), "白真真状态更新");
+
+        assert_eq!(memory.character_states.len(), 1);
+        assert_eq!(memory.character_states[0].status, "警觉");
+        assert_eq!(memory.character_states[0].description, None);
+        assert_eq!(context_after.relevant_characters[0].abilities, Vec::<String>::new());
+        drop(context);
     }
 
     #[test]
