@@ -11,7 +11,7 @@ use crate::model::ai_book_generation::{
 use crate::model::book::Book;
 use crate::service::ai_book_memory_v3::{
     merge_ai_book_memory_v3, normalize_knowledge_patch_v3, select_ai_book_chapter_view_v3,
-    select_ai_book_display_memory_v3, select_working_context_v3,
+    select_ai_book_display_memory_v3, select_working_context_v3, AiBookWorkingContextV3,
 };
 use crate::service::ai_book_service::AiBookService;
 use crate::service::book_service::BookService;
@@ -127,7 +127,7 @@ impl AiBookGenerationService {
     pub async fn generate_digest(
         &self,
         chapter_text: &str,
-        memory: &AiBookMemoryV3,
+        memory: &AiBookWorkingContextV3,
         chapter: &LoadedChapter,
         mode: AiBookGenerationMode,
     ) -> Result<AiBookChapterDigestCandidateV3, AppError> {
@@ -139,7 +139,7 @@ impl AiBookGenerationService {
     pub async fn generate_patch_for_catchup(
         &self,
         chapter_text: &str,
-        memory: &AiBookMemoryV3,
+        memory: &AiBookWorkingContextV3,
         chapter: &LoadedChapter,
         digest: &AiBookChapterDigestCandidateV3,
         mode: AiBookGenerationMode,
@@ -163,9 +163,24 @@ impl AiBookGenerationService {
         {
             return Ok(combined);
         }
-        let digest = self.generate_digest(chapter_text, memory, chapter, mode).await?;
+        let digest_context = select_working_context_v3(memory, None, chapter_text);
+        let digest = self
+            .generate_digest(chapter_text, &digest_context, chapter, mode)
+            .await?;
+        let patch_context = select_working_context_v3(memory, Some(&crate::model::ai_book::AiBookChapterDigestV3 {
+            chapter_index: digest.chapter_index,
+            chapter_title: digest.chapter_title.clone(),
+            summary: digest.summary.clone(),
+            key_points: digest.key_points.clone(),
+            characters: Vec::new(),
+            character_states: Vec::new(),
+            character_relations: Vec::new(),
+            knowledge_facts: Vec::new(),
+            locations: Vec::new(),
+            location_edges: Vec::new(),
+        }), chapter_text);
         let patch = self
-            .generate_patch_for_catchup(chapter_text, memory, chapter, &digest, mode)
+            .generate_patch_for_catchup(chapter_text, &patch_context, chapter, &digest, mode)
             .await?;
         Ok(AiBookCombinedChapterGenerationV3 {
             chapter_digest: digest,
@@ -393,7 +408,7 @@ pub trait ChapterGenerationModel: Send + Sync {
     fn generate_digest<'a>(
         &'a self,
         chapter_text: &'a str,
-        memory: &'a AiBookMemoryV3,
+        memory: &'a AiBookWorkingContextV3,
         chapter: &'a LoadedChapter,
         mode: AiBookGenerationMode,
     ) -> futures::future::BoxFuture<'a, Result<AiBookChapterDigestCandidateV3, AppError>>;
@@ -401,7 +416,7 @@ pub trait ChapterGenerationModel: Send + Sync {
     fn generate_patch_for_catchup<'a>(
         &'a self,
         chapter_text: &'a str,
-        memory: &'a AiBookMemoryV3,
+        memory: &'a AiBookWorkingContextV3,
         chapter: &'a LoadedChapter,
         digest: &'a AiBookChapterDigestCandidateV3,
         mode: AiBookGenerationMode,
@@ -424,7 +439,7 @@ impl ChapterGenerationModel for DisabledChapterGenerationModel {
     fn generate_digest<'a>(
         &'a self,
         _chapter_text: &'a str,
-        _memory: &'a AiBookMemoryV3,
+        _memory: &'a AiBookWorkingContextV3,
         _chapter: &'a LoadedChapter,
         _mode: AiBookGenerationMode,
     ) -> futures::future::BoxFuture<'a, Result<AiBookChapterDigestCandidateV3, AppError>> {
@@ -438,7 +453,7 @@ impl ChapterGenerationModel for DisabledChapterGenerationModel {
     fn generate_patch_for_catchup<'a>(
         &'a self,
         _chapter_text: &'a str,
-        _memory: &'a AiBookMemoryV3,
+        _memory: &'a AiBookWorkingContextV3,
         _chapter: &'a LoadedChapter,
         _digest: &'a AiBookChapterDigestCandidateV3,
         _mode: AiBookGenerationMode,
@@ -549,7 +564,7 @@ mod tests {
         fn generate_digest<'a>(
             &'a self,
             _chapter_text: &'a str,
-            _memory: &'a AiBookMemoryV3,
+            _memory: &'a AiBookWorkingContextV3,
             _chapter: &'a LoadedChapter,
             _mode: AiBookGenerationMode,
         ) -> BoxFuture<'a, Result<AiBookChapterDigestCandidateV3, AppError>> {
@@ -559,7 +574,7 @@ mod tests {
         fn generate_patch_for_catchup<'a>(
             &'a self,
             _chapter_text: &'a str,
-            _memory: &'a AiBookMemoryV3,
+            _memory: &'a AiBookWorkingContextV3,
             _chapter: &'a LoadedChapter,
             _digest: &'a AiBookChapterDigestCandidateV3,
             _mode: AiBookGenerationMode,
