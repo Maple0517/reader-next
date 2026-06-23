@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub type AiBookCatchupTaskStats = crate::model::ai_book::AiBookCatchupStatsV3;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AiBookCatchupTaskStatus {
@@ -80,18 +82,6 @@ pub struct AiBookCatchupTaskView {
     pub updated_at: i64,
     #[serde(default)]
     pub stats: Option<AiBookCatchupTaskStats>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(default, rename_all = "camelCase")]
-pub struct AiBookCatchupTaskStats {
-    pub total_chapters: i32,
-    pub processed_chapters: i32,
-    pub fetched_chapters: i32,
-    pub digested_chapters: i32,
-    pub patched_chapters: i32,
-    pub saved_chapters: i32,
-    pub dropped_facts: i32,
 }
 
 #[cfg(test)]
