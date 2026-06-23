@@ -1,23 +1,35 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use reqwest::Client;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::error::AppError;
 use crate::model::ai_book::{AiBookChapterMemoryViewResponse, AiBookMemoryV3};
+use crate::model::ai_model::{AiModelKind, ResolvedAiModelEndpoint};
 use crate::model::ai_book_generation::{
     AiBookChapterDigestCandidateV3, AiBookCombinedChapterGenerationV3, AiBookKnowledgePatchV3,
 };
+use crate::model::ai_proxy::{ai_proxy_timeout, build_ai_proxy_url, format_ai_proxy_upstream_error};
 use crate::model::book::Book;
 use crate::service::ai_book_memory_v3::{
     merge_ai_book_memory_v3, normalize_knowledge_patch_v3, select_ai_book_chapter_view_v3,
     select_ai_book_display_memory_v3, select_working_context_v3, AiBookWorkingContextV3,
 };
+use crate::service::ai_model_service::AiModelService;
 use crate::service::ai_book_service::AiBookService;
 use crate::service::book_service::BookService;
 use crate::service::book_source_service::BookSourceService;
 use crate::service::local_txt_book::{is_local_txt_origin, LocalTxtBookService};
 use crate::util::text::{normalize_source_url, repair_encoded_url};
+
+const DEFAULT_PROMPT: &str = r#"你是小说 AI资料生成 agent。只允许基于当前已读章节和本次章节正文更新资料，不预测未读内容，不剧透目标章节之后内容。
+输入会给你 currentMemory、chapter 和 generationMode。不要输出 Markdown，不要输出解释，只输出严格 JSON 对象。
+输出格式固定为 {"chapterDigest": {...}, "patch": {...}}。
+chapterDigest 必须包含 chapterIndex、chapterTitle、summary、keyPoints、hasImportantChanges。
+patch 必须只包含本章新增或更新的字段，结构使用 V3：summary、characters、characterStates、characterRelations、knowledgeFacts、locations、locationEdges。
+若没有可更新字段，patch 仍返回合法对象并保留 chapterIndex；不要回传未变化的大数组。"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiBookGenerationMode {
@@ -48,12 +60,42 @@ impl AiBookGenerationService {
         book_source_service: Arc<BookSourceService>,
         local_txt_book_service: Arc<LocalTxtBookService>,
     ) -> Self {
+        Self::new_disabled(
+            ai_book_service,
+            book_service,
+            book_source_service,
+            local_txt_book_service,
+        )
+    }
+
+    pub fn new_disabled(
+        ai_book_service: Arc<AiBookService>,
+        book_service: Arc<BookService>,
+        book_source_service: Arc<BookSourceService>,
+        local_txt_book_service: Arc<LocalTxtBookService>,
+    ) -> Self {
         Self::new_with_generator(
             ai_book_service,
             book_service,
             book_source_service,
             local_txt_book_service,
             Arc::new(DisabledChapterGenerationModel),
+        )
+    }
+
+    pub fn new_with_ai_model_service(
+        ai_book_service: Arc<AiBookService>,
+        book_service: Arc<BookService>,
+        book_source_service: Arc<BookSourceService>,
+        local_txt_book_service: Arc<LocalTxtBookService>,
+        ai_model_service: Arc<AiModelService>,
+    ) -> Self {
+        Self::new_with_generator(
+            ai_book_service,
+            book_service,
+            book_source_service,
+            local_txt_book_service,
+            Arc::new(ProxyChapterGenerationModel::new(ai_model_service)),
         )
     }
 
@@ -384,7 +426,7 @@ impl Drop for AiBookWriteGuard {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LoadedChapter {
     pub index: i32,
     pub title: String,
@@ -463,6 +505,314 @@ impl ChapterGenerationModel for DisabledChapterGenerationModel {
                 "AI资料生成功能尚未接入模型".to_string(),
             ))
         })
+    }
+}
+
+#[derive(Clone)]
+struct ProxyChapterGenerationModel {
+    ai_model_service: Arc<AiModelService>,
+}
+
+impl ProxyChapterGenerationModel {
+    fn new(ai_model_service: Arc<AiModelService>) -> Self {
+        Self { ai_model_service }
+    }
+}
+
+impl ChapterGenerationModel for ProxyChapterGenerationModel {
+    fn generate_combined<'a>(
+        &'a self,
+        chapter_text: &'a str,
+        memory: &'a AiBookMemoryV3,
+        chapter: &'a LoadedChapter,
+        mode: AiBookGenerationMode,
+    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>> {
+        Box::pin(async move {
+            let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
+            let prompt = build_combined_generation_prompt(chapter_text, memory, chapter, mode)?;
+            let value = call_generation_model(&endpoint, prompt).await?;
+            let parsed: AiBookCombinedChapterGenerationV3 =
+                serde_json::from_value(value).map_err(|e| AppError::BadRequest(e.to_string()))?;
+            Ok(Some(parsed))
+        })
+    }
+
+    fn generate_digest<'a>(
+        &'a self,
+        chapter_text: &'a str,
+        memory: &'a AiBookWorkingContextV3,
+        chapter: &'a LoadedChapter,
+        mode: AiBookGenerationMode,
+    ) -> futures::future::BoxFuture<'a, Result<AiBookChapterDigestCandidateV3, AppError>> {
+        Box::pin(async move {
+            let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
+            let prompt = build_digest_generation_prompt(chapter_text, memory, chapter, mode)?;
+            let value = call_generation_model(&endpoint, prompt).await?;
+            serde_json::from_value(value).map_err(|e| AppError::BadRequest(e.to_string()))
+        })
+    }
+
+    fn generate_patch_for_catchup<'a>(
+        &'a self,
+        chapter_text: &'a str,
+        memory: &'a AiBookWorkingContextV3,
+        chapter: &'a LoadedChapter,
+        digest: &'a AiBookChapterDigestCandidateV3,
+        mode: AiBookGenerationMode,
+    ) -> futures::future::BoxFuture<'a, Result<AiBookKnowledgePatchV3, AppError>> {
+        Box::pin(async move {
+            let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
+            let prompt =
+                build_patch_generation_prompt(chapter_text, memory, chapter, digest, mode)?;
+            let value = call_generation_model(&endpoint, prompt).await?;
+            serde_json::from_value(value).map_err(|e| AppError::BadRequest(e.to_string()))
+        })
+    }
+}
+
+async fn resolve_text_endpoint(
+    ai_model_service: &AiModelService,
+) -> Result<ResolvedAiModelEndpoint, AppError> {
+    let endpoint = ai_model_service.get().await?.resolve(AiModelKind::Text);
+    if !endpoint.enabled
+        || endpoint.base_url.trim().is_empty()
+        || endpoint.model.trim().is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "后端文本模型未启用或配置不完整".to_string(),
+        ));
+    }
+    Ok(endpoint)
+}
+
+async fn call_generation_model(
+    endpoint: &ResolvedAiModelEndpoint,
+    prompt: String,
+) -> Result<Value, AppError> {
+    let path = if endpoint.path.trim().is_empty() {
+        "/v1/chat/completions"
+    } else {
+        endpoint.path.trim()
+    };
+    let target = build_ai_proxy_url(&endpoint.base_url, path, endpoint.use_full_url)
+        .map_err(AppError::BadRequest)?;
+    let use_gemini_api_key_header =
+        is_gemini_generate_content_path(path) && target.host_str() == Some("generativelanguage.googleapis.com");
+    let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
+    let body = build_model_body(path, &endpoint.model, prompt);
+    let mut builder = client
+        .post(target)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&body);
+    if !endpoint.api_key.trim().is_empty() {
+        if use_gemini_api_key_header {
+            builder = builder.header("x-goog-api-key", endpoint.api_key.trim());
+        } else {
+            builder = builder.bearer_auth(endpoint.api_key.trim());
+        }
+    }
+    let response = builder.send().await.map_err(map_model_http_error)?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        return Err(AppError::BadRequest(format_ai_proxy_upstream_error(
+            status, &text,
+        )));
+    }
+    let value: Value = response.json().await?;
+    let content = extract_model_content(path, &value)?;
+    parse_model_json_value(&content)
+}
+
+fn map_model_http_error(error: reqwest::Error) -> AppError {
+    if error.is_timeout() {
+        return AppError::BadRequest("模型服务请求超时，请检查模型地址或稍后重试".to_string());
+    }
+    AppError::Http(error)
+}
+
+fn build_model_body(path: &str, model: &str, prompt: String) -> Value {
+    if is_gemini_generate_content_path(path) {
+        return serde_json::json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{ "text": prompt }]
+            }],
+            "systemInstruction": { "parts": [{ "text": DEFAULT_PROMPT }] },
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 8192,
+                "responseMimeType": "application/json"
+            }
+        });
+    }
+    if is_anthropic_messages_path(path) {
+        return serde_json::json!({
+            "model": model,
+            "max_tokens": 8192,
+            "temperature": 0.2,
+            "system": DEFAULT_PROMPT,
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+    }
+    if is_responses_path(path) {
+        return serde_json::json!({
+            "model": model,
+            "temperature": 0.2,
+            "max_output_tokens": 8192,
+            "stream": false,
+            "text": { "format": { "type": "json_object" } },
+            "input": [
+                { "role": "system", "content": DEFAULT_PROMPT },
+                { "role": "user", "content": prompt }
+            ]
+        });
+    }
+    serde_json::json!({
+        "model": model,
+        "temperature": 0.2,
+        "response_format": { "type": "json_object" },
+        "messages": [
+            { "role": "system", "content": DEFAULT_PROMPT },
+            { "role": "user", "content": prompt }
+        ]
+    })
+}
+
+fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> {
+    if is_gemini_generate_content_path(path) {
+        let text = value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| candidate.pointer("/content/parts").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    if is_anthropic_messages_path(path) {
+        let text = value
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    if is_responses_path(path) {
+        if let Some(text) = value.get("output_text").and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Ok(text.to_string());
+            }
+        }
+        let text = value
+            .get("output")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("content").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| AppError::BadRequest("AI资料生成返回内容为空".to_string()))
+}
+
+fn is_gemini_generate_content_path(path: &str) -> bool {
+    path.split('?').next().is_some_and(|path| {
+        path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent")
+    })
+}
+
+fn is_anthropic_messages_path(path: &str) -> bool {
+    path.split('?')
+        .next()
+        .is_some_and(|path| path.ends_with("/v1/messages") || path.ends_with("/messages"))
+}
+
+fn is_responses_path(path: &str) -> bool {
+    path.split('?')
+        .next()
+        .is_some_and(|path| path.ends_with("/v1/responses") || path.ends_with("/responses"))
+}
+
+fn build_combined_generation_prompt(
+    chapter_text: &str,
+    memory: &AiBookMemoryV3,
+    chapter: &LoadedChapter,
+    mode: AiBookGenerationMode,
+) -> Result<String, AppError> {
+    Ok(format!(
+        "generationMode: {}\nchapter: {}\ncurrentMemory: {}\nchapterText:\n{}",
+        generation_mode_label(mode),
+        serde_json::to_string_pretty(chapter).map_err(|e| AppError::BadRequest(e.to_string()))?,
+        serde_json::to_string_pretty(memory).map_err(|e| AppError::BadRequest(e.to_string()))?,
+        chapter_text
+    ))
+}
+
+fn build_digest_generation_prompt(
+    chapter_text: &str,
+    memory: &AiBookWorkingContextV3,
+    chapter: &LoadedChapter,
+    mode: AiBookGenerationMode,
+) -> Result<String, AppError> {
+    Ok(format!(
+        "generationMode: {}\n只输出 chapterDigest JSON。\nchapter: {}\ncurrentMemory: {}\nchapterText:\n{}",
+        generation_mode_label(mode),
+        serde_json::to_string_pretty(chapter).map_err(|e| AppError::BadRequest(e.to_string()))?,
+        serde_json::to_string_pretty(memory).map_err(|e| AppError::BadRequest(e.to_string()))?,
+        chapter_text
+    ))
+}
+
+fn build_patch_generation_prompt(
+    chapter_text: &str,
+    memory: &AiBookWorkingContextV3,
+    chapter: &LoadedChapter,
+    digest: &AiBookChapterDigestCandidateV3,
+    mode: AiBookGenerationMode,
+) -> Result<String, AppError> {
+    Ok(format!(
+        "generationMode: {}\n只输出 patch JSON。\nchapter: {}\nchapterDigest: {}\ncurrentMemory: {}\nchapterText:\n{}",
+        generation_mode_label(mode),
+        serde_json::to_string_pretty(chapter).map_err(|e| AppError::BadRequest(e.to_string()))?,
+        serde_json::to_string_pretty(digest).map_err(|e| AppError::BadRequest(e.to_string()))?,
+        serde_json::to_string_pretty(memory).map_err(|e| AppError::BadRequest(e.to_string()))?,
+        chapter_text
+    ))
+}
+
+fn generation_mode_label(mode: AiBookGenerationMode) -> &'static str {
+    match mode {
+        AiBookGenerationMode::Auto => "auto",
+        AiBookGenerationMode::Manual => "manual",
     }
 }
 
@@ -599,7 +949,7 @@ mod tests {
         let local_txt_book_service = Arc::new(LocalTxtBookService::new(&dir));
         let ai_book_service = Arc::new(AiBookService::new(pool, dir.to_str().unwrap()));
         (
-            AiBookGenerationService::new(
+            AiBookGenerationService::new_disabled(
                 ai_book_service,
                 book_service,
                 book_source_service,

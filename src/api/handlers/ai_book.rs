@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::api::{auth::AuthContext, AppState};
 
 use crate::error::error::{ApiResponse, AppError};
+use crate::model::ai_book::AiBookMemoryV3;
 use crate::model::ai_book::{AiBookChapterMemoryViewResponse, AiBookMemoryViewResponse};
 use crate::model::ai_book_catchup::{
     AiBookCatchupCancelRequest, AiBookCatchupStartRequest, AiBookCatchupStatusRequest,
@@ -297,6 +298,9 @@ pub async fn start_ai_book_catchup(
     let user_ns_for_task = user_ns.clone();
     let book_url_for_task = book_url.clone();
     let shelf_book_for_task = shelf_book.clone();
+    let write_guard = state
+        .ai_book_generation_service
+        .acquire_write_guard(&user_ns, &book_url)?;
     let task = state
         .ai_book_catchup_service
         .start_with(
@@ -304,6 +308,7 @@ pub async fn start_ai_book_catchup(
             book_url.clone(),
             target_chapter_index,
             move || async move {
+                let write_guard = write_guard;
                 let memory_v3 = state_for_task
                     .ai_book_service
                     .get_or_create_v3(
@@ -334,10 +339,7 @@ pub async fn start_ai_book_catchup(
                                 start_chapter_index,
                                 &error,
                             );
-                            let _ = state
-                                .ai_book_service
-                                .save_value_for_book(&user_ns, &book_url, memory)
-                                .await;
+                            let _ = save_catchup_memory_v3_value(&state, &user_ns, &book_url, memory).await;
                             AppError::BadRequest(error)
                         }
                     }
@@ -366,15 +368,13 @@ pub async fn start_ai_book_catchup(
                 Ok(CatchupBookContext {
                     chapters,
                     memory,
+                    write_guard: Some(write_guard),
                     save_memory: save_memory_fn(move |memory| {
                         let save_state = save_state.clone();
                         let save_user_ns = save_user_ns.clone();
                         let save_book_url = save_book_url.clone();
                         async move {
-                            save_state
-                                .ai_book_service
-                                .save_value_for_book(&save_user_ns, &save_book_url, memory)
-                                .await
+                            save_catchup_memory_v3_value(&save_state, &save_user_ns, &save_book_url, memory).await
                         }
                     }),
                     fetch_content: fetch_content_fn(move |chapter| {
@@ -617,6 +617,18 @@ async fn persist_catchup_status(
     };
     write_catchup_stats_to_memory_v3(&mut memory, task);
     let _ = state.ai_book_service.save_v3(user_ns, book_url, memory).await;
+}
+
+async fn save_catchup_memory_v3_value(
+    state: &AppState,
+    user_ns: &str,
+    book_url: &str,
+    memory: Value,
+) -> Result<Value, AppError> {
+    let memory = serde_json::from_value::<AiBookMemoryV3>(memory)
+        .map_err(|e| AppError::BadRequest(format!("AI资料补齐内存格式不正确: {e}")))?;
+    let saved = state.ai_book_service.save_v3(user_ns, book_url, memory).await?;
+    serde_json::to_value(saved).map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
 #[cfg(test)]
@@ -1089,36 +1101,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catchup_save_memory_persists_v3_via_typed_path() {
+        let (state, dir) = create_test_state().await;
+        let user_ns = "default";
+        let book_url = "book://catchup-save-v3";
+        let mut memory = create_empty_ai_book_memory_v3(
+            book_url,
+            Some("测试书".to_string()),
+            Some("测试作者".to_string()),
+        );
+        memory.summary.current = "旧摘要".to_string();
+
+        let saved = save_catchup_memory_v3_value(
+            &state,
+            user_ns,
+            book_url,
+            serde_json::to_value(memory).unwrap(),
+        )
+        .await
+        .unwrap();
+        let saved_memory: AiBookMemoryV3 = serde_json::from_value(saved).unwrap();
+        assert_eq!(saved_memory.schema_version, 3);
+        assert_eq!(saved_memory.summary.current, "旧摘要");
+
+        let loaded = state
+            .ai_book_service
+            .get_or_create_v3(user_ns, book_url, None, None)
+            .await
+            .unwrap();
+        assert_eq!(loaded.summary.current, "旧摘要");
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn catchup_start_rejects_when_same_book_generation_guard_is_held() {
+        let (state, dir) = create_test_state().await;
+        let user_ns = "default";
+        let book_url = "book://catchup-guard";
+        seed_shelf_book(&state, user_ns, book_url).await;
+        let _guard = state
+            .ai_book_generation_service
+            .acquire_write_guard(user_ns, book_url)
+            .unwrap();
+
+        let err = start_ai_book_catchup(
+            State(state),
+            AuthContext::default(),
+            Query(AiBookCatchupStartRequest {
+                book_url: Some(book_url.to_string()),
+                target_chapter_index: Some(0),
+            }),
+            Bytes::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("正在生成中"));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
     async fn idle_catchup_status_does_not_restore_persisted_public_task() {
         let (state, dir) = create_test_state().await;
         let user_ns = "default";
         let book_url = "book-a";
-        let mut memory = json!({
-            "schemaVersion": 2,
-            "bookUrl": book_url,
-            "enabled": true,
-            "summary": { "current": "已有摘要", "recentChanges": [], "openQuestions": [] },
-            "chapterDigests": [],
-            "arcs": [],
-            "worldFacts": [],
-            "characters": [],
-            "relationships": [],
-            "locations": [],
-            "mapState": { "dirty": false, "nodes": [], "edges": [] },
-            "renderArtifacts": {},
-        });
-        memory["processedChapterIndex"] = json!(4);
-        memory["processedChapterTitle"] = json!("第5章");
-        memory["updatedAt"] = json!(111);
-        memory["catchupTask"] = json!({
-            "bookUrl": book_url,
-            "status": "running",
-            "completedChapters": 99
-        });
-        memory["catchupStats"] = json!({
-            "skippedPatchChapters": 2
-        });
-        state.ai_book_service.save_value_for_book(user_ns, book_url, memory).await.unwrap();
+        let mut memory = create_empty_ai_book_memory_v3(
+            book_url,
+            Some("测试书".to_string()),
+            Some("测试作者".to_string()),
+        );
+        memory.enabled = true;
+        memory.summary.current = "已有摘要".to_string();
+        memory.processed_chapter_index = Some(4);
+        memory.processed_chapter_title = Some("第5章".to_string());
+        memory.updated_at = 111;
+        let mut stats = AiBookCatchupTaskStats::default();
+        stats.skipped_patch_chapters = 2;
+        memory.catchup_stats = Some(stats);
+        state.ai_book_service.save_v3(user_ns, book_url, memory).await.unwrap();
 
         let task = idle_catchup_status(&state, user_ns, book_url).await.unwrap();
 

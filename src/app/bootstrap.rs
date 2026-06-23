@@ -50,18 +50,19 @@ pub async fn run() -> anyhow::Result<()> {
     let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
     user_service.migrate_legacy_users_from_json().await?;
     let book_group_service = Arc::new(BookGroupService::new(json_document_service.clone()));
-    let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
-    let ai_book_generation_service = Arc::new(AiBookGenerationService::new(
-        ai_book_service.clone(),
-        book_service.clone(),
-        book_source_service.clone(),
-        local_txt_book_service.clone(),
-    ));
-    let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
     let ai_model_service = Arc::new(AiModelService::new(
         json_document_service.clone(),
         &cfg.storage_dir,
     ));
+    let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
+    let ai_book_generation_service = Arc::new(AiBookGenerationService::new_with_ai_model_service(
+        ai_book_service.clone(),
+        book_service.clone(),
+        book_source_service.clone(),
+        local_txt_book_service.clone(),
+        ai_model_service.clone(),
+    ));
+    let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
     let chapter_summary_service =
         Arc::new(ChapterSummaryService::new(json_document_service.clone()));
     let update_service = Arc::new(UpdateService::new(

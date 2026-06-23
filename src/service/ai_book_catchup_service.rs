@@ -10,6 +10,7 @@ use crate::service::ai_book_memory_v3::{
     merge_ai_book_memory_v3, normalize_knowledge_patch_v3, select_working_context_v3,
     AiBookWorkingContextV3,
 };
+use crate::service::ai_book_generation_service::AiBookWriteGuard;
 use crate::util::time::now_ts;
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -100,10 +101,10 @@ pub struct CatchupChapter {
     pub index: i32,
 }
 
-#[derive(Clone)]
 pub struct CatchupBookContext {
     pub chapters: Vec<CatchupChapter>,
     pub memory: Value,
+    pub write_guard: Option<AiBookWriteGuard>,
     pub save_memory: SaveMemoryFn,
     pub fetch_content: FetchContentFn,
     pub generate_digest: GenerateDigestFn,
@@ -250,6 +251,7 @@ impl AiBookCatchupService {
         mut context: CatchupBookContext,
         requested_target: Option<i32>,
     ) {
+        let _write_guard = context.write_guard.take();
         let key = task_key(&user_ns, &book_url);
         let start_index = read_i32(&context.memory, "processedChapterIndex")
             .map(|v| v + 1)
@@ -1259,6 +1261,18 @@ fn has_semantic_content(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crawler::http_client::HttpClient;
+    use crate::parser::rule_engine::RuleEngine;
+    use crate::service::ai_book_generation_service::AiBookGenerationService;
+    use crate::service::ai_book_memory_v3::create_empty_ai_book_memory_v3;
+    use crate::service::ai_book_service::AiBookService;
+    use crate::service::book_source_service::BookSourceService;
+    use crate::service::local_txt_book::LocalTxtBookService;
+    use crate::storage::cache::file_cache::FileCache;
+    use crate::storage::db;
+    use crate::storage::db::repo::BookSourceRepo;
+    use crate::util::crypto::random_string;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -1270,6 +1284,32 @@ mod tests {
         fn spawn_task(&self, fut: BoxFuture<'static, ()>) {
             self.tasks.lock().unwrap().push(fut);
         }
+    }
+
+    async fn create_generation_service_for_guard() -> (AiBookGenerationService, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("reader-ai-book-catchup-{}", random_string(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
+        let pool = db::init_pool(&database_url).await.unwrap();
+        let repo = BookSourceRepo::new(pool.clone());
+        let book_service = Arc::new(crate::service::book_service::BookService::new(
+            HttpClient::new(5, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(dir.join("cache")),
+            dir.to_str().unwrap(),
+        ));
+        let book_source_service = Arc::new(BookSourceService::new(repo, dir.to_str().unwrap()));
+        let local_txt_book_service = Arc::new(LocalTxtBookService::new(&dir));
+        let ai_book_service = Arc::new(AiBookService::new(pool, dir.to_str().unwrap()));
+        (
+            AiBookGenerationService::new_disabled(
+                ai_book_service,
+                book_service,
+                book_source_service,
+                local_txt_book_service,
+            ),
+            dir,
+        )
     }
 
     fn sample_context() -> CatchupBookContext {
@@ -1301,6 +1341,7 @@ mod tests {
                 "mapState": { "dirty": true, "reason": "旧地图", "nodes": [{ "id": "n1", "locationId": "l1", "label": "旧地点", "scale": "site" }], "edges": [] },
                 "renderArtifacts": { "mapImageUrl": "/old-map.png" },
             }),
+            write_guard: None,
             save_memory: save_memory_fn(|memory| async move { Ok(memory) }),
             fetch_content: fetch_content_fn(|chapter| async move {
                 Ok(format!("正文{}", chapter.index + 1))
@@ -1936,6 +1977,77 @@ mod tests {
         assert_eq!(stats.patch_calls, 1);
         assert!(stats.last_call_latency_ms.is_some());
         assert!(stats.average_call_latency_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn ai_book_v3_catchup_holds_write_guard_until_task_finishes() {
+        let runner = Arc::new(TestRunner::default());
+        let service = AiBookCatchupService::new_with_runner(runner.clone());
+        let (generation_service, dir) = create_generation_service_for_guard().await;
+        let guard = generation_service
+            .acquire_write_guard("u1", "book-a")
+            .unwrap();
+        let fetch_started = Arc::new(tokio::sync::Notify::new());
+        let fetch_release = Arc::new(tokio::sync::Notify::new());
+
+        service
+            .start_with("u1".to_string(), "book-a".to_string(), Some(0), {
+                let fetch_started = fetch_started.clone();
+                let fetch_release = fetch_release.clone();
+                move || {
+                    let fetch_started = fetch_started.clone();
+                    let fetch_release = fetch_release.clone();
+                    let guard = guard;
+                    async move {
+                        let mut context = sample_context();
+                        context.chapters.truncate(1);
+                        context.memory = serde_json::to_value(create_empty_ai_book_memory_v3(
+                            "book-a",
+                            Some("书A".to_string()),
+                            Some("作者A".to_string()),
+                        ))
+                        .unwrap();
+                        context.write_guard = Some(guard);
+                        context.fetch_content = fetch_content_fn(move |chapter| {
+                            let fetch_started = fetch_started.clone();
+                            let fetch_release = fetch_release.clone();
+                            async move {
+                                fetch_started.notify_one();
+                                fetch_release.notified().await;
+                                Ok(format!("正文{}", chapter.index + 1))
+                            }
+                        });
+                        context.generate_digest =
+                            generate_digest_fn(|_memory, chapter, _content| async move {
+                                Ok(AiBookChapterDigestCandidateV3 {
+                                    chapter_index: chapter.index,
+                                    chapter_title: chapter.title,
+                                    summary: "摘要".to_string(),
+                                    key_points: vec!["要点".to_string()],
+                                    has_important_changes: false,
+                                })
+                            });
+                        Ok(context)
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        let fut = runner.tasks.lock().unwrap().pop().unwrap();
+        let handle = tokio::spawn(fut);
+        fetch_started.notified().await;
+
+        let err = generation_service
+            .acquire_write_guard("u1", "book-a")
+            .unwrap_err();
+        assert!(err.to_string().contains("正在生成中"));
+
+        fetch_release.notify_one();
+        handle.await.unwrap();
+
+        assert!(generation_service.acquire_write_guard("u1", "book-a").is_ok());
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
     #[test]
