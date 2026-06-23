@@ -1677,6 +1677,9 @@ mod tests {
                             Ok(memory)
                         }
                     });
+                    context.generate_digest = generate_digest_fn(|_memory, _chapter, _content| async move {
+                        Err(AppError::BadRequest("后端文本模型返回错误".to_string()))
+                    });
                     Ok(context)
                 }
             })
