@@ -269,4 +269,39 @@ describe('reader ai book auto-update', () => {
     })
     expect(aiBookStoreMock.generateChapterMemory.mock.calls[0][0]).not.toHaveProperty('chapterContent')
   })
+
+
+  it('swallows background ai book generate failures after chapter switch', async () => {
+    aiBookStoreMock.load.mockResolvedValue({ enabled: true, bookUrl: 'book-1' })
+    aiBookStoreMock.generateChapterMemory.mockRejectedValue(new Error('AI失败'))
+    vi.mocked(getBookContent).mockResolvedValue('下一章正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-1',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-1', index: 0 },
+      { title: '第二章', url: 'chapter-2', index: 1 },
+    ]
+    readerStore.currentIndex = 0
+    readerStore.content = '第一章正文'
+
+    await expect(readerStore.nextChapter()).resolves.toBeUndefined()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(aiBookStoreMock.generateChapterMemory).toHaveBeenCalledWith({
+      bookUrl: 'book-1',
+      chapterIndex: 0,
+      mode: 'auto',
+    })
+  })
 })

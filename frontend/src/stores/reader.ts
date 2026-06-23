@@ -1536,7 +1536,7 @@ export const useReaderStore = defineStore('reader', () => {
             chapterIndex: completedChapter.index,
             mode: 'auto',
           })
-        })()
+        })().catch(() => null)
       }
     }
   }
