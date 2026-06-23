@@ -342,10 +342,6 @@ pub async fn start_ai_book_catchup(
                         }
                     }
                 };
-                let ai_config = match state_for_task.ai_model_service.get().await {
-                    Ok(config) => config,
-                    Err(err) => return Err(save_start_failure(err.to_string()).await),
-                };
                 let chapters = match load_catchup_chapters(
                     &state_for_task,
                     &user_ns_for_task,
@@ -368,11 +364,8 @@ pub async fn start_ai_book_catchup(
                 let digest_state = state_for_task.clone();
                 let patch_state = state_for_task.clone();
                 Ok(CatchupBookContext {
-                    book_name: shelf_book_for_task.name.clone(),
-                    author: shelf_book_for_task.author.clone(),
                     chapters,
                     memory,
-                    ai_config: ai_config.clone(),
                     save_memory: save_memory_fn(move |memory| {
                         let save_state = save_state.clone();
                         let save_user_ns = save_user_ns.clone();

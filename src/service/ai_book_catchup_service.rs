@@ -2,7 +2,9 @@ use crate::error::error::AppError;
 use crate::model::ai_book::{AiBookChapterDigestV3, AiBookMemoryV3};
 use crate::model::ai_book_catchup::{AiBookCatchupTaskStats, AiBookCatchupTaskStatus, AiBookCatchupTaskView};
 use crate::model::ai_book_generation::{AiBookChapterDigestCandidateV3, AiBookKnowledgePatchV3};
-use crate::model::ai_model::{AiModelConfig, ResolvedAiModelEndpoint};
+#[cfg(test)]
+use crate::model::ai_model::ResolvedAiModelEndpoint;
+#[cfg(test)]
 use crate::model::ai_proxy::build_ai_proxy_url;
 use crate::service::ai_book_memory_v3::{
     merge_ai_book_memory_v3, normalize_knowledge_patch_v3, select_working_context_v3,
@@ -10,13 +12,16 @@ use crate::service::ai_book_memory_v3::{
 };
 use crate::util::time::now_ts;
 use futures::future::BoxFuture;
-use serde_json::{json, Value};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
+#[cfg(test)]
 const DEFAULT_PROMPT: &str = r#"你是小说 AI资料后台补齐 agent。只允许基于当前已读章节和本次章节正文更新资料，不预测未读内容，不剧透目标章节之后内容。
 输入会给你 currentMemory 和 chapter。不要输出 Markdown，不要输出解释，只输出严格 JSON 对象。
 优先输出 {"memory": <只包含本章新增/更新字段的 AI memory 增量 JSON>}；不要回传未变化的大数组，后端会与 currentMemory 合并。
@@ -97,11 +102,8 @@ pub struct CatchupChapter {
 
 #[derive(Clone)]
 pub struct CatchupBookContext {
-    pub book_name: String,
-    pub author: String,
     pub chapters: Vec<CatchupChapter>,
     pub memory: Value,
-    pub ai_config: AiModelConfig,
     pub save_memory: SaveMemoryFn,
     pub fetch_content: FetchContentFn,
     pub generate_digest: GenerateDigestFn,
@@ -657,39 +659,13 @@ fn read_i32(value: &Value, key: &str) -> Option<i32> {
         .map(|value| value as i32)
 }
 
+#[cfg(test)]
 fn build_target_url(endpoint: &ResolvedAiModelEndpoint) -> Result<reqwest::Url, AppError> {
     build_ai_proxy_url(&endpoint.base_url, &endpoint.path, endpoint.use_full_url)
         .map_err(AppError::BadRequest)
 }
 
-fn build_user_prompt(
-    memory: &Value,
-    book_name: &str,
-    author: &str,
-    chapter: &CatchupChapter,
-    chapter_content: &str,
-) -> String {
-    json!({
-        "bookName": book_name,
-        "author": author,
-        "chapter": {
-            "index": chapter.index,
-            "title": chapter.title,
-            "content": trim_content(chapter_content),
-        },
-        "currentMemory": memory,
-    })
-    .to_string()
-}
-
-fn trim_content(content: &str) -> String {
-    const MAX: usize = 12000;
-    if content.chars().count() <= MAX {
-        return content.to_string();
-    }
-    content.chars().take(MAX).collect::<String>()
-}
-
+#[cfg(test)]
 fn build_model_body(path: &str, model: &str, prompt: String) -> Value {
     if is_gemini_path(path) {
         return json!({
@@ -737,40 +713,22 @@ fn build_model_body(path: &str, model: &str, prompt: String) -> Value {
     })
 }
 
-fn apply_auth_headers(
-    request: reqwest::RequestBuilder,
-    endpoint: &ResolvedAiModelEndpoint,
-    body: &Value,
-) -> reqwest::RequestBuilder {
-    if endpoint.api_key.trim().is_empty() {
-        return request.json(body);
-    }
-    if is_gemini_path(&endpoint.path) {
-        return request
-            .header("x-goog-api-key", endpoint.api_key.as_str())
-            .json(body);
-    }
-    if is_anthropic_path(&endpoint.path) {
-        return request
-            .header("x-api-key", endpoint.api_key.as_str())
-            .header("anthropic-version", "2023-06-01")
-            .json(body);
-    }
-    request.bearer_auth(endpoint.api_key.as_str()).json(body)
-}
-
+#[cfg(test)]
 fn is_gemini_path(path: &str) -> bool {
     path.contains("generateContent")
 }
 
+#[cfg(test)]
 fn is_anthropic_path(path: &str) -> bool {
     path.contains("/v1/messages") || path.ends_with("/messages")
 }
 
+#[cfg(test)]
 fn is_responses_path(path: &str) -> bool {
     path.contains("/v1/responses") || path.ends_with("/responses")
 }
 
+#[cfg(test)]
 fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> {
     if is_gemini_path(path) {
         let text = value
@@ -840,6 +798,7 @@ fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> 
         .ok_or_else(|| AppError::BadRequest("AI资料补齐返回内容为空".to_string()))
 }
 
+#[cfg(test)]
 fn parse_memory_update(
     text: &str,
     current: &Value,
@@ -858,6 +817,7 @@ fn parse_memory_update(
     Ok(next)
 }
 
+#[cfg(test)]
 fn parse_json_content(text: &str) -> Result<Value, AppError> {
     let trimmed = text.trim();
     let json_text = if trimmed.starts_with("```") {
@@ -878,6 +838,7 @@ fn parse_json_content(text: &str) -> Result<Value, AppError> {
         .map_err(|_| AppError::BadRequest("AI资料补齐返回 JSON 格式不正确".to_string()))
 }
 
+#[cfg(test)]
 fn extract_first_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let mut stack = Vec::new();
@@ -913,6 +874,7 @@ fn extract_first_json_object(text: &str) -> Option<&str> {
     None
 }
 
+#[cfg(test)]
 fn merge_patch(mut current: Value, patch: Value, chapter: &CatchupChapter) -> Value {
     let Some(object) = current.as_object_mut() else {
         return patch;
@@ -926,6 +888,7 @@ fn merge_patch(mut current: Value, patch: Value, chapter: &CatchupChapter) -> Va
     current
 }
 
+#[cfg(test)]
 fn merge_v2_patch(
     object: &mut serde_json::Map<String, Value>,
     patch: Value,
@@ -985,6 +948,7 @@ fn merge_v2_patch(
     }
 }
 
+#[cfg(test)]
 fn merge_summary_object(object: &mut serde_json::Map<String, Value>, summary: &Value) {
     let target = object
         .entry("summary")
@@ -1007,6 +971,7 @@ fn merge_summary_object(object: &mut serde_json::Map<String, Value>, summary: &V
     }
 }
 
+#[cfg(test)]
 fn merge_non_empty_array_by_identity(
     object: &mut serde_json::Map<String, Value>,
     patch: &Value,
@@ -1040,6 +1005,7 @@ fn merge_non_empty_array_by_identity(
     }
 }
 
+#[cfg(test)]
 fn item_identity(kind: &str, item: &Value) -> Option<String> {
     if kind == "relationships" {
         return relationship_identity(item);
@@ -1051,6 +1017,7 @@ fn item_identity(kind: &str, item: &Value) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn relationship_identity(item: &Value) -> Option<String> {
     let source = item
         .get("sourceCharacterId")
@@ -1077,6 +1044,7 @@ fn relationship_identity(item: &Value) -> Option<String> {
     Some(format!("{}::{}::{}", pair[0], pair[1], relation))
 }
 
+#[cfg(test)]
 fn merge_value_fields(target: &mut Value, patch: &Value) {
     let (Some(target_map), Some(patch_map)) = (target.as_object_mut(), patch.as_object()) else {
         *target = patch.clone();
@@ -1109,6 +1077,7 @@ fn merge_value_fields(target: &mut Value, patch: &Value) {
     }
 }
 
+#[cfg(test)]
 fn merge_object_fields(object: &mut serde_json::Map<String, Value>, key: &str, patch: &Value) {
     let target = object.entry(key.to_string()).or_insert_with(|| json!({}));
     let Some(target_map) = target.as_object_mut() else {
@@ -1128,6 +1097,7 @@ fn merge_object_fields(object: &mut serde_json::Map<String, Value>, key: &str, p
     }
 }
 
+#[cfg(test)]
 fn merge_legacy_patch(object: &mut serde_json::Map<String, Value>, patch: Value) {
     for key in [
         "summary",
@@ -1142,6 +1112,7 @@ fn merge_legacy_patch(object: &mut serde_json::Map<String, Value>, patch: Value)
     }
 }
 
+#[cfg(test)]
 fn normalize_memory(
     value: &mut Value,
     book_url: &str,
@@ -1197,6 +1168,7 @@ fn mark_memory_failed(value: &mut Value, chapter: &CatchupChapter, error: &str) 
     );
 }
 
+#[cfg(test)]
 fn set_string_if_empty(object: &mut serde_json::Map<String, Value>, key: &str, fallback: &str) {
     if object
         .get(key)
@@ -1209,6 +1181,7 @@ fn set_string_if_empty(object: &mut serde_json::Map<String, Value>, key: &str, f
     }
 }
 
+#[cfg(test)]
 fn ensure_v2_defaults(object: &mut serde_json::Map<String, Value>) {
     object
         .entry("summary")
@@ -1233,6 +1206,7 @@ fn ensure_v2_defaults(object: &mut serde_json::Map<String, Value>) {
         .or_insert_with(|| json!({}));
 }
 
+#[cfg(test)]
 fn has_semantic_content(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
@@ -1300,8 +1274,6 @@ mod tests {
 
     fn sample_context() -> CatchupBookContext {
         CatchupBookContext {
-            book_name: "书A".to_string(),
-            author: "作者A".to_string(),
             chapters: vec![
                 CatchupChapter {
                     title: "第1章".to_string(),
@@ -1329,7 +1301,6 @@ mod tests {
                 "mapState": { "dirty": true, "reason": "旧地图", "nodes": [{ "id": "n1", "locationId": "l1", "label": "旧地点", "scale": "site" }], "edges": [] },
                 "renderArtifacts": { "mapImageUrl": "/old-map.png" },
             }),
-            ai_config: AiModelConfig::default(),
             save_memory: save_memory_fn(|memory| async move { Ok(memory) }),
             fetch_content: fetch_content_fn(|chapter| async move {
                 Ok(format!("正文{}", chapter.index + 1))
