@@ -248,18 +248,13 @@
                 <span></span>
                 <span></span>
               </div>
-              <div v-else-if="chapterSummaryContext.focusRows.length" class="summary-list style-card summary-context-list">
-                <strong>当前最该记住</strong>
-                <ul>
-                  <li v-for="row in chapterSummaryContext.focusRows" :key="`${row.kind}-${row.title}-${row.detail}`" class="summary-context-row">
-                    <span class="summary-context-kind">{{ row.label }}</span>
-                    <span class="summary-context-text">
-                      <strong class="summary-context-title">{{ row.title }}</strong>
-                      <span>{{ row.detail }}</span>
-                      <small>{{ row.meta }}</small>
-                    </span>
-                  </li>
-                </ul>
+              <div v-else-if="chapterSummaryContext.focusCards.length" class="summary-focus-cards">
+                <div v-for="card in chapterSummaryContext.focusCards" :key="card.key" class="summary-list style-card summary-context-list">
+                  <strong>{{ card.title }}</strong>
+                  <ul>
+                    <li v-for="row in card.rows" :key="row">{{ row }}</li>
+                  </ul>
+                </div>
               </div>
               <p v-else-if="aiBookContextStatus === 'error'" class="summary-main summary-muted">AI资料暂时加载失败。</p>
               <p v-else class="summary-main summary-muted">暂无重点资料。可先生成 AI资料或补齐到当前章节。</p>
@@ -523,18 +518,13 @@
                 <span></span>
                 <span></span>
               </div>
-              <div v-else-if="chapterSummaryContext.focusRows.length" class="summary-list style-card summary-context-list">
-                <strong>当前最该记住</strong>
-                <ul>
-                  <li v-for="row in chapterSummaryContext.focusRows" :key="`${row.kind}-${row.title}-${row.detail}`" class="summary-context-row">
-                    <span class="summary-context-kind">{{ row.label }}</span>
-                    <span class="summary-context-text">
-                      <strong class="summary-context-title">{{ row.title }}</strong>
-                      <span>{{ row.detail }}</span>
-                      <small>{{ row.meta }}</small>
-                    </span>
-                  </li>
-                </ul>
+              <div v-else-if="chapterSummaryContext.focusCards.length" class="summary-focus-cards">
+                <div v-for="card in chapterSummaryContext.focusCards" :key="card.key" class="summary-list style-card summary-context-list">
+                  <strong>{{ card.title }}</strong>
+                  <ul>
+                    <li v-for="row in card.rows" :key="row">{{ row }}</li>
+                  </ul>
+                </div>
               </div>
               <p v-else-if="aiBookContextStatus === 'error'" class="summary-main summary-muted">AI资料暂时加载失败。</p>
               <p v-else class="summary-main summary-muted">暂无重点资料。可先生成 AI资料或补齐到当前章节。</p>
@@ -772,18 +762,13 @@
             <span></span>
             <span></span>
           </div>
-          <div v-else-if="chapterSummaryContext.focusRows.length" class="summary-list style-card summary-context-list">
-            <strong>当前最该记住</strong>
-            <ul>
-              <li v-for="row in chapterSummaryContext.focusRows" :key="`${row.kind}-${row.title}-${row.detail}`" class="summary-context-row">
-                <span class="summary-context-kind">{{ row.label }}</span>
-                <span class="summary-context-text">
-                  <strong class="summary-context-title">{{ row.title }}</strong>
-                  <span>{{ row.detail }}</span>
-                  <small>{{ row.meta }}</small>
-                </span>
-              </li>
-            </ul>
+          <div v-else-if="chapterSummaryContext.focusCards.length" class="summary-focus-cards">
+            <div v-for="card in chapterSummaryContext.focusCards" :key="card.key" class="summary-list style-card summary-context-list">
+              <strong>{{ card.title }}</strong>
+              <ul>
+                <li v-for="row in card.rows" :key="row">{{ row }}</li>
+              </ul>
+            </div>
           </div>
           <p v-else-if="aiBookContextStatus === 'error'" class="summary-main summary-muted">AI资料暂时加载失败。</p>
           <p v-else class="summary-main summary-muted">暂无重点资料。可先生成 AI资料或补齐到当前章节。</p>
@@ -3153,6 +3138,7 @@ watch(
 }
 
 
+.summary-focus-cards,
 .summary-context-sections {
   display: grid;
   gap: 12px;

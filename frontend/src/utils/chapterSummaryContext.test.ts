@@ -119,6 +119,9 @@ describe('buildChapterSummaryContext', () => {
     expect(view.focusRows.find((row) => row.kind === 'relation')?.title).toBe('张羽 · 张羽母亲')
     expect(view.focusRows.find((row) => row.kind === 'character')?.title).toBe('张羽')
     expect(view.focusRows.some((row) => row.kind === 'character' && row.title === '张羽母亲')).toBe(false)
+    expect(view.focusCards.map((card) => card.key)).toEqual(['protagonist', 'relations', 'changes'])
+    expect(view.focusCards[0].title).toBe('张羽现在怎样')
+    expect(view.focusCards[1].rows[0]).toContain('张羽母亲')
   })
 
 })
