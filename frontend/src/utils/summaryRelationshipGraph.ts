@@ -41,7 +41,10 @@ export function buildSummaryRelationshipGraph(input: {
   limit?: number
 }): SummaryRelationshipGraphView {
   const memory = input.memory
-  if (!memory || memory.relationships.length === 0 || memory.characters.length === 0) {
+  if (!memory) {
+    return empty('暂无人物关系资料，可先生成 AI资料。')
+  }
+  if (memory.relationships.length === 0 || memory.characters.length === 0) {
     return empty('人物关系不足，继续阅读后会补全。')
   }
 
@@ -139,6 +142,7 @@ function findProtagonistId(
     scores.set(character.id, (character.importance === 'high' ? 4 : 0) + recencyScore(character.lastSeenChapterIndex, currentChapterIndex))
   }
   for (const relation of memory.relationships) {
+    if (relation.sourceCharacterId === relation.targetCharacterId) continue
     if (!characterById.has(relation.sourceCharacterId) || !characterById.has(relation.targetCharacterId)) continue
     scores.set(relation.sourceCharacterId, (scores.get(relation.sourceCharacterId) || 0) + 10)
     scores.set(relation.targetCharacterId, (scores.get(relation.targetCharacterId) || 0) + 10)

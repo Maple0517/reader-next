@@ -184,6 +184,63 @@ describe('buildSummaryRelationshipGraph', () => {
     expect(graph.protagonist).toBeNull()
   })
 
+  it('does not let self relations inflate protagonist scoring', () => {
+    const graph = buildSummaryRelationshipGraph({
+      memory: {
+        ...memory,
+        relationships: [
+          {
+            id: 'r-valid',
+            sourceCharacterId: 'hero',
+            targetCharacterId: 'ally',
+            kind: 'alliance',
+            label: '盟友',
+            polarity: 'positive',
+            strength: 'strong',
+            status: 'active',
+            direction: 'grouped',
+            summary: '有效关系',
+            currentDynamics: [],
+            facets: [],
+            lastUpdatedChapterIndex: 10,
+            evidence: [],
+            history: [],
+          },
+          {
+            id: 'r-self-1',
+            sourceCharacterId: 'stranger',
+            targetCharacterId: 'stranger',
+            kind: 'unknown',
+            label: '自我强化',
+            polarity: 'neutral',
+            strength: 'critical',
+            status: 'active',
+            direction: 'grouped',
+            summary: '不该加分',
+            currentDynamics: [],
+            facets: [],
+            lastUpdatedChapterIndex: 10,
+            evidence: [],
+            history: [],
+          },
+        ],
+      },
+      currentChapterIndex: 10,
+    })
+
+    expect(graph.protagonist?.id).toBe('hero')
+  })
+
+  it('uses ai data empty reason when memory is null', () => {
+    const graph = buildSummaryRelationshipGraph({
+      memory: null,
+      currentChapterIndex: 10,
+    })
+
+    expect(graph.protagonist).toBeNull()
+    expect(graph.emptyReason).toBe('暂无人物关系资料，可先生成 AI资料。')
+  })
+
   it('returns an empty reason when memory has no usable relationships', () => {
     const graph = buildSummaryRelationshipGraph({
       memory: { ...memory, relationships: [] },
