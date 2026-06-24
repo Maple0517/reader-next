@@ -83,4 +83,42 @@ describe('buildChapterSummaryContext', () => {
       'locations',
     ])
   })
+
+  it('uses character names in relationship rows and keeps the protagonist before minor characters', () => {
+    const view = buildChapterSummaryContext({
+      memory: {
+        ...memory,
+        characters: [
+          { id: 'hero', name: '张羽', aliases: [], importance: 'high', description: '主角', lastSeenChapterIndex: 8, evidence: [] },
+          { id: 'mother', name: '张羽母亲', aliases: [], importance: 'low', description: '只短暂出现', lastSeenChapterIndex: 1, evidence: [] },
+        ],
+        relationships: [
+          {
+            id: 'r2',
+            sourceCharacterId: 'hero',
+            targetCharacterId: 'mother',
+            kind: 'family',
+            label: '母子',
+            polarity: 'positive',
+            strength: 'moderate',
+            status: 'active',
+            direction: 'grouped',
+            summary: '家人关系',
+            currentDynamics: [],
+            facets: [],
+            evidence: [],
+            history: [],
+          },
+        ],
+      },
+      chapter: { ...chapter, digest: null },
+      currentChapterIndex: 8,
+      limit: 3,
+    })
+
+    expect(view.focusRows.find((row) => row.kind === 'relation')?.title).toBe('张羽 · 张羽母亲')
+    expect(view.focusRows.find((row) => row.kind === 'character')?.title).toBe('张羽')
+    expect(view.focusRows.some((row) => row.kind === 'character' && row.title === '张羽母亲')).toBe(false)
+  })
+
 })

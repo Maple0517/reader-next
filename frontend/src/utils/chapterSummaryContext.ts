@@ -26,6 +26,8 @@ export function buildChapterSummaryContext(input: {
   const limit = input.limit ?? 5
   const memory = input.memory
   const digest = input.chapter?.digest
+  const characterById = new Map((memory?.characters || []).map((item) => [item.id, item]))
+  const characterByName = new Map((memory?.characters || []).flatMap((item) => [item.name, ...item.aliases].map((name) => [name, item])))
 
   const characterRows: ChapterSummaryContextRow[] = compactRows([
     ...(digest?.characterStates || []).map((item) => ({
@@ -34,9 +36,11 @@ export function buildChapterSummaryContext(input: {
       detail: item.status || item.description || '本章出现',
       meta: chapterMeta(item.lastSeenChapterIndex ?? input.currentChapterIndex),
       label: kindLabel('character'),
-      importance: 'medium' as const,
+      importance: importance(characterByName.get(item.name)?.importance),
     })),
-    ...(digest?.characterStates?.length ? [] : (memory?.characters || []).slice(0, 3).map((item) => ({
+    ...(digest?.characterStates?.length ? [] : [...(memory?.characters || [])]
+      .sort((a, b) => rank(importance(b.importance)) - rank(importance(a.importance)) || (b.lastSeenChapterIndex ?? -1) - (a.lastSeenChapterIndex ?? -1))
+      .map((item) => ({
       kind: 'character' as const,
       title: item.name,
       detail: item.description || '人物',
@@ -57,8 +61,8 @@ export function buildChapterSummaryContext(input: {
     })),
     ...(digest?.characterRelations?.length ? [] : (memory?.relationships || []).slice(0, 3).map((item) => ({
       kind: 'relation' as const,
-      title: item.label || `${item.sourceCharacterId} · ${item.targetCharacterId}`,
-      detail: item.currentDynamics[0] || item.summary,
+      title: `${characterById.get(item.sourceCharacterId)?.name || item.sourceCharacterId} · ${characterById.get(item.targetCharacterId)?.name || item.targetCharacterId}`,
+      detail: [item.label, item.currentDynamics[0] || item.summary].filter(Boolean).join('：'),
       meta: item.kind,
       label: kindLabel('relation'),
       importance: item.status === 'developing' || item.strength === 'critical' ? 'high' as const : 'medium' as const,
@@ -120,7 +124,9 @@ export function buildChapterSummaryContext(input: {
     { key: 'locations', title: '地点', rows: locationRows },
   ]
 
-  const focusRows = [relationRows, clueRows, characterRows, factRows, locationRows]
+  const focusCharacterRows = characterRows.filter((row) => row.importance === 'high').slice(0, 2)
+
+  const focusRows = [relationRows, clueRows, focusCharacterRows, factRows, locationRows]
     .flatMap((rows) => rows)
     .slice(0, limit)
 
@@ -140,6 +146,10 @@ function kindLabel(kind: ChapterSummaryContextKind) {
 
 function compactRows(rows: ChapterSummaryContextRow[]) {
   return rows.filter((row) => row.title.trim() && row.detail.trim())
+}
+
+function rank(value: 'high' | 'medium' | 'low') {
+  return value === 'high' ? 3 : value === 'medium' ? 2 : 1
 }
 
 function uniqueRows(rows: ChapterSummaryContextRow[]) {
