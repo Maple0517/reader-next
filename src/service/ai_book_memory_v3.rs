@@ -5,18 +5,16 @@ use serde::{Deserialize, Serialize};
 use crate::error::error::AppError;
 use crate::model::ai_book::{
     AiBookChapterDigestV3, AiBookChapterMemoryViewModel, AiBookCharacterRelationV3,
-    AiBookCharacterStateV3, AiBookCharacterView, AiBookCharacterV3, AiBookDroppedFactV3,
+    AiBookCharacterStateV3, AiBookCharacterV3, AiBookCharacterView, AiBookDroppedFactV3,
     AiBookDroppedFactsSummary, AiBookEvidenceV3, AiBookFactCategory, AiBookFactConfidence,
-    AiBookFactImportance, AiBookKnowledgeFactView, AiBookKnowledgeFactV3, AiBookLocationEdgeKind,
+    AiBookFactImportance, AiBookKnowledgeFactV3, AiBookKnowledgeFactView, AiBookLocationEdgeKind,
     AiBookLocationEdgeV3, AiBookLocationV3, AiBookLocationView, AiBookMapView, AiBookMemoryV3,
-    AiBookMemoryViewModel, AiBookRelationChangeView, AiBookRelationFacetView,
-    AiBookRelationKind, AiBookRelationPolarity, AiBookRelationStatus, AiBookRelationStrength,
-    AiBookRelationView,
+    AiBookMemoryViewModel, AiBookRelationChangeView, AiBookRelationFacetView, AiBookRelationKind,
+    AiBookRelationPolarity, AiBookRelationStatus, AiBookRelationStrength, AiBookRelationView,
 };
 use crate::model::ai_book_generation::{
     AiBookCharacterPatchV3, AiBookCharacterRelationPatchV3, AiBookCharacterStatePatchV3,
-    AiBookKnowledgeFactPatchV3, AiBookLocationEdgePatchV3, AiBookLocationPatchV3,
-    KnowledgePatchV3,
+    AiBookKnowledgeFactPatchV3, AiBookLocationEdgePatchV3, AiBookLocationPatchV3, KnowledgePatchV3,
 };
 use crate::util::{hash::md5_hex, time::now_ts};
 
@@ -305,13 +303,39 @@ pub fn normalize_knowledge_patch_v3(
 
     let extended_context = extend_context(context, &normalized_characters, &normalized_locations);
 
-    normalized.characters = dedupe_by_id(normalized_characters, |item| item.id.clone(), merge_character_patch);
-    normalized.locations = dedupe_by_id(normalized_locations, |item| item.id.clone(), merge_location_patch);
+    normalized.characters = dedupe_by_id(
+        normalized_characters,
+        |item| item.id.clone(),
+        merge_character_patch,
+    );
+    normalized.locations = dedupe_by_id(
+        normalized_locations,
+        |item| item.id.clone(),
+        merge_location_patch,
+    );
     normalized.character_states = patch
         .character_states
         .iter()
         .filter_map(|state| normalize_character_state_patch(state, &extended_context, &evidence))
         .collect();
+    for character in &normalized.characters {
+        if character.status.is_some()
+            && !normalized
+                .character_states
+                .iter()
+                .any(|state| state.character_id == character.id)
+        {
+            normalized
+                .character_states
+                .push(NormalizedCharacterStateV3 {
+                    character_id: character.id.clone(),
+                    canonical_name: character.canonical_name.clone(),
+                    current_status: character.status.clone(),
+                    evidence: character.evidence.clone(),
+                    ..NormalizedCharacterStateV3::default()
+                });
+        }
+    }
     normalized.knowledge_facts = patch
         .knowledge_facts
         .iter()
@@ -415,11 +439,7 @@ pub fn classify_relation_candidate_v3(
                 ));
             }
             let edge = NormalizedLocationEdgeV3 {
-                id: stable_location_edge_id(
-                    &source_location.id,
-                    &target_location.id,
-                    &edge_kind,
-                ),
+                id: stable_location_edge_id(&source_location.id, &target_location.id, &edge_kind),
                 source_location_id: source_location.id,
                 source_name: source_location.name,
                 target_location_id: target_location.id,
@@ -432,7 +452,11 @@ pub fn classify_relation_candidate_v3(
         }
     }
 
-    if is_person_ability_relation(&kind_key, &candidate.target_name, source_character.is_some()) {
+    if is_person_ability_relation(
+        &kind_key,
+        &candidate.target_name,
+        source_character.is_some(),
+    ) {
         if let Some(source_character) = source_character {
             let ability = clean_required(&candidate.target_name);
             let current_status = clean_optional(candidate.description.clone());
@@ -440,7 +464,11 @@ pub fn classify_relation_candidate_v3(
                 character_id: source_character.id,
                 canonical_name: source_character.name,
                 current_status,
-                abilities: if ability.is_empty() { Vec::new() } else { vec![ability] },
+                abilities: if ability.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ability]
+                },
                 evidence: dedupe_evidence(candidate.evidence),
                 ..NormalizedCharacterStateV3::default()
             };
@@ -504,7 +532,8 @@ pub fn classify_relation_candidate_v3(
     let polarity = normalize_relation_polarity(&candidate.polarity_raw);
     let strength = normalize_relation_strength(&candidate.strength_raw);
     let status = normalize_relation_status(&candidate.status_raw);
-    let summary = clean_optional(candidate.description.clone()).unwrap_or_else(|| kind_label(&kind).to_string());
+    let summary = clean_optional(candidate.description.clone())
+        .unwrap_or_else(|| kind_label(&kind).to_string());
     let label = kind_label(&kind).to_string();
     let id = stable_relation_id(
         &source_character.id,
@@ -726,9 +755,41 @@ pub fn merge_ai_book_memory_v3(
         memory.dropped_facts = memory.dropped_facts.split_off(keep_from);
     }
     memory.updated_at = now_ts();
-    memory.processed_chapter_index = Some(patch.chapter_index);
+    sync_processed_chapter_from_digests(&mut memory);
     let _ = validate_ai_book_memory_v3(&memory);
     memory
+}
+
+pub fn next_missing_chapter_digest_index(digests: &[AiBookChapterDigestV3]) -> i32 {
+    let present = digests
+        .iter()
+        .filter(|digest| digest_has_content(digest))
+        .map(|digest| digest.chapter_index)
+        .collect::<HashSet<_>>();
+    let mut index = 0;
+    while present.contains(&index) {
+        index += 1;
+    }
+    index
+}
+
+fn digest_has_content(digest: &AiBookChapterDigestV3) -> bool {
+    !digest.summary.trim().is_empty() || !digest.key_points.is_empty()
+}
+
+pub fn sync_processed_chapter_from_digests(memory: &mut AiBookMemoryV3) {
+    let processed_index = next_missing_chapter_digest_index(&memory.chapter_digests) - 1;
+    if processed_index < 0 {
+        memory.processed_chapter_index = None;
+        memory.processed_chapter_title = None;
+        return;
+    }
+    memory.processed_chapter_index = Some(processed_index);
+    memory.processed_chapter_title = memory
+        .chapter_digests
+        .iter()
+        .find(|digest| digest.chapter_index == processed_index)
+        .map(|digest| digest.chapter_title.clone());
 }
 
 pub fn select_ai_book_display_memory_v3(memory: &AiBookMemoryV3) -> AiBookMemoryViewModel {
@@ -866,7 +927,11 @@ pub fn select_working_context_v3(
     let relevant_characters = memory
         .characters
         .iter()
-        .filter(|character| mentioned_names.characters.contains(&stable_character_id(&character.name, &character.aliases)))
+        .filter(|character| {
+            mentioned_names
+                .characters
+                .contains(&stable_character_id(&character.name, &character.aliases))
+        })
         .take(MAX_RELEVANT_CHARACTERS)
         .map(|character| {
             let id = stable_character_id(&character.name, &character.aliases);
@@ -875,9 +940,8 @@ pub fn select_working_context_v3(
                 id,
                 name: character.name.clone(),
                 aliases: dedupe_strings(character.aliases.clone()),
-                status: clean_optional(Some(character.status.clone())).or_else(|| {
-                    state.and_then(|item| clean_optional(Some(item.status.clone())))
-                }),
+                status: clean_optional(Some(character.status.clone()))
+                    .or_else(|| state.and_then(|item| clean_optional(Some(item.status.clone())))),
                 affiliations: Vec::new(),
                 abilities: state
                     .and_then(|item| item.description.as_deref())
@@ -887,41 +951,47 @@ pub fn select_working_context_v3(
         })
         .collect::<Vec<_>>();
 
-    let allowed_character_ids: HashSet<_> = relevant_characters.iter().map(|item| item.id.clone()).collect();
+    let allowed_character_ids: HashSet<_> = relevant_characters
+        .iter()
+        .map(|item| item.id.clone())
+        .collect();
     let relevant_character_name_map: HashMap<_, _> = relevant_characters
         .iter()
         .map(|item| (item.id.clone(), item.name.clone()))
         .collect();
-    let relevant_relations = select_relationship_views(&memory.characters, &memory.character_relations)
-        .into_iter()
-        .filter(|relation| {
-            allowed_character_ids.contains(&relation.source_character_id)
-                && allowed_character_ids.contains(&relation.target_character_id)
-        })
-        .take(MAX_RELEVANT_RELATIONS)
-        .map(|relation| WorkingContextRelationV3 {
-            source_name: relevant_character_name_map
-                .get(&relation.source_character_id)
-                .cloned()
-                .unwrap_or_else(|| relation.source_character_id.clone()),
-            target_name: relevant_character_name_map
-                .get(&relation.target_character_id)
-                .cloned()
-                .unwrap_or_else(|| relation.target_character_id.clone()),
-            source_character_id: relation.source_character_id,
-            target_character_id: relation.target_character_id,
-            kind: format!("{:?}", relation.kind),
-            subtype: relation.subtype,
-            label: relation.label,
-            polarity: format!("{:?}", relation.polarity),
-            status: format!("{:?}", relation.status),
-        })
-        .collect();
+    let relevant_relations =
+        select_relationship_views(&memory.characters, &memory.character_relations)
+            .into_iter()
+            .filter(|relation| {
+                allowed_character_ids.contains(&relation.source_character_id)
+                    && allowed_character_ids.contains(&relation.target_character_id)
+            })
+            .take(MAX_RELEVANT_RELATIONS)
+            .map(|relation| WorkingContextRelationV3 {
+                source_name: relevant_character_name_map
+                    .get(&relation.source_character_id)
+                    .cloned()
+                    .unwrap_or_else(|| relation.source_character_id.clone()),
+                target_name: relevant_character_name_map
+                    .get(&relation.target_character_id)
+                    .cloned()
+                    .unwrap_or_else(|| relation.target_character_id.clone()),
+                source_character_id: relation.source_character_id,
+                target_character_id: relation.target_character_id,
+                kind: format!("{:?}", relation.kind),
+                subtype: relation.subtype,
+                label: relation.label,
+                polarity: format!("{:?}", relation.polarity),
+                status: format!("{:?}", relation.status),
+            })
+            .collect();
 
     let relevant_knowledge_facts = memory
         .knowledge_facts
         .iter()
-        .filter(|fact| chapter_text.contains(&fact.title) || mentioned_names.fact_titles.contains(&fact.title))
+        .filter(|fact| {
+            chapter_text.contains(&fact.title) || mentioned_names.fact_titles.contains(&fact.title)
+        })
         .chain(
             memory
                 .knowledge_facts
@@ -940,14 +1010,21 @@ pub fn select_working_context_v3(
     let relevant_locations = memory
         .locations
         .iter()
-        .filter(|location| mentioned_names.locations.contains(&stable_location_id(&location.name)))
+        .filter(|location| {
+            mentioned_names
+                .locations
+                .contains(&stable_location_id(&location.name))
+        })
         .take(MAX_RELEVANT_LOCATIONS)
         .map(|location| WorkingContextLocationV3 {
             id: stable_location_id(&location.name),
             name: location.name.clone(),
             aliases: Vec::new(),
             parent_name: parent_location_name(location, &memory.location_edges),
-            kind: location.kind.clone().unwrap_or_else(|| "unknown".to_string()),
+            kind: location
+                .kind
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             scale: "unknown".to_string(),
         })
         .collect();
@@ -993,7 +1070,10 @@ fn select_location_views(
             id: stable_location_id(&location.name),
             name: location.name.clone(),
             aliases: Vec::new(),
-            kind: location.kind.clone().unwrap_or_else(|| "unknown".to_string()),
+            kind: location
+                .kind
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             scale: "unknown".to_string(),
             parent_location_id: location_edges.iter().find_map(|edge| {
                 (edge.kind == AiBookLocationEdgeKind::Contains && edge.target == location.name)
@@ -1056,7 +1136,10 @@ fn select_relationship_views(
                 })
                 .collect();
             AiBookRelationView {
-                id: format!("pair:{}", canonical_pair_key(&primary.source_character_id, &primary.target_character_id)),
+                id: format!(
+                    "pair:{}",
+                    canonical_pair_key(&primary.source_character_id, &primary.target_character_id)
+                ),
                 source_character_id: primary.source_character_id.clone(),
                 target_character_id: primary.target_character_id.clone(),
                 kind: primary.kind.clone(),
@@ -1115,19 +1198,22 @@ fn relation_to_view(
         .map(|item| item.summary.clone())
         .unwrap_or_else(|| relation.description.clone().unwrap_or_default());
     AiBookRelationView {
-        id: meta.as_ref().map(|item| item.id.clone()).unwrap_or_else(|| {
-            stable_relation_id(
-                &source_id,
-                &target_id,
-                &relation.kind,
-                None,
-                &if is_directed_relation_kind(&relation.kind) {
-                    RelationDirectionV3::Directed
-                } else {
-                    RelationDirectionV3::Undirected
-                },
-            )
-        }),
+        id: meta
+            .as_ref()
+            .map(|item| item.id.clone())
+            .unwrap_or_else(|| {
+                stable_relation_id(
+                    &source_id,
+                    &target_id,
+                    &relation.kind,
+                    None,
+                    &if is_directed_relation_kind(&relation.kind) {
+                        RelationDirectionV3::Directed
+                    } else {
+                        RelationDirectionV3::Undirected
+                    },
+                )
+            }),
         source_character_id: source_id,
         target_character_id: target_id,
         kind: relation.kind.clone(),
@@ -1162,7 +1248,10 @@ fn relation_to_view(
             .as_ref()
             .map(|item| item.evidence.clone())
             .unwrap_or_default(),
-        history: meta.as_ref().map(|item| item.history.clone()).unwrap_or_default(),
+        history: meta
+            .as_ref()
+            .map(|item| item.history.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -1190,7 +1279,9 @@ fn normalize_character_patch(
     if names.is_empty() {
         return None;
     }
-    let resolved = names.iter().find_map(|name| find_character_ref(context, name));
+    let resolved = names
+        .iter()
+        .find_map(|name| find_character_ref(context, name));
     let (id, canonical_name) = if let Some(resolved) = resolved {
         let canonical_name = if resolved.name.is_empty() {
             names[0].clone()
@@ -1200,10 +1291,7 @@ fn normalize_character_patch(
         (resolved.id, canonical_name)
     } else {
         let canonical_name = names[0].clone();
-        (
-            stable_character_id(&canonical_name, &[]),
-            canonical_name,
-        )
+        (stable_character_id(&canonical_name, &[]), canonical_name)
     };
     let aliases = merge_name_candidates(std::slice::from_ref(&canonical_name), &names);
     Some(NormalizedCharacterV3 {
@@ -1286,11 +1374,82 @@ fn normalize_location_patch(
     Some(NormalizedLocationV3 {
         id: resolved.id,
         canonical_name: resolved.name,
-        kind: clean_optional(patch.kind.clone()),
+        kind: normalize_location_kind(clean_optional(patch.kind.clone()), &name),
         description: clean_optional(Some(patch.description.clone())),
         status: clean_optional(patch.status.clone()),
         evidence: dedupe_evidence(evidence.to_vec()),
     })
+}
+
+fn normalize_location_kind(kind: Option<String>, name: &str) -> Option<String> {
+    let raw = kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
+    if let Some(raw) = raw {
+        let lower = raw.to_ascii_lowercase().replace(['_', '-'], " ");
+        let mapped = match lower.as_str() {
+            "world" | "region" | "area" | "zone" | "realm" | "secret realm" => Some("区域"),
+            "school" | "academy" | "college" | "university" => Some("学校"),
+            "sect" => Some("宗门"),
+            "organization" | "institution" | "company" => Some("机构"),
+            "building" => Some("建筑"),
+            "room" => Some("房间"),
+            "facility" | "site" | "indoor training ground" | "training ground" => Some("设施"),
+            "road" | "street" => Some("道路"),
+            "outdoor space" | "garden" | "square" | "playground" => Some("室外地点"),
+            "layer" | "floor" | "level" => Some("层级"),
+            "entrance" => Some("入口"),
+            _ => None,
+        };
+        if let Some(mapped) = mapped {
+            return Some(mapped.to_string());
+        }
+        if raw
+            .chars()
+            .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+        {
+            return Some(raw.to_string());
+        }
+    }
+    Some(infer_location_kind_from_name(name).to_string())
+}
+
+fn infer_location_kind_from_name(name: &str) -> &'static str {
+    if name.contains('层') {
+        return "层级";
+    }
+    if ["学校", "高中", "学院", "大学"]
+        .iter()
+        .any(|token| name.contains(token))
+    {
+        return "学校";
+    }
+    if name.contains("宗门") {
+        return "宗门";
+    }
+    if ["帮派", "协会", "公司", "机构"]
+        .iter()
+        .any(|token| name.contains(token))
+    {
+        return "机构";
+    }
+    if ["教室", "食堂", "宿舍", "公寓", "出租房", "练功场", "办公室"]
+        .iter()
+        .any(|token| name.contains(token))
+    {
+        return "设施";
+    }
+    if ["街道", "道路"].iter().any(|token| name.contains(token)) {
+        return "道路";
+    }
+    if ["广场", "花园", "操场"]
+        .iter()
+        .any(|token| name.contains(token))
+    {
+        return "室外地点";
+    }
+    "其他地点"
 }
 
 fn normalize_location_edge_patch(
@@ -1325,7 +1484,9 @@ fn relation_candidate_from_patch(
     evidence: &[AiBookEvidenceV3],
 ) -> RelationCandidateV3 {
     let description = clean_optional(patch.description.clone());
-    let fallback_note = description.clone().unwrap_or_else(|| format!("{} {} {}", patch.source, patch.kind, patch.target));
+    let fallback_note = description
+        .clone()
+        .unwrap_or_else(|| format!("{} {} {}", patch.source, patch.kind, patch.target));
     RelationCandidateV3 {
         source_name: patch.source.clone(),
         target_name: patch.target.clone(),
@@ -1340,7 +1501,11 @@ fn relation_candidate_from_patch(
             evidence
                 .iter()
                 .map(|item| AiBookEvidenceV3 {
-                    note: if item.note.is_empty() { fallback_note.clone() } else { item.note.clone() },
+                    note: if item.note.is_empty() {
+                        fallback_note.clone()
+                    } else {
+                        item.note.clone()
+                    },
                     ..item.clone()
                 })
                 .collect()
@@ -1355,7 +1520,11 @@ fn extend_context(
 ) -> AiBookWorkingContextV3 {
     let mut next = context.clone();
     for character in characters {
-        if !next.relevant_characters.iter().any(|item| item.id == character.id) {
+        if !next
+            .relevant_characters
+            .iter()
+            .any(|item| item.id == character.id)
+        {
             next.relevant_characters.push(WorkingContextCharacterV3 {
                 id: character.id.clone(),
                 name: character.canonical_name.clone(),
@@ -1367,13 +1536,20 @@ fn extend_context(
         }
     }
     for location in locations {
-        if !next.relevant_locations.iter().any(|item| item.id == location.id) {
+        if !next
+            .relevant_locations
+            .iter()
+            .any(|item| item.id == location.id)
+        {
             next.relevant_locations.push(WorkingContextLocationV3 {
                 id: location.id.clone(),
                 name: location.canonical_name.clone(),
                 aliases: Vec::new(),
                 parent_name: None,
-                kind: location.kind.clone().unwrap_or_else(|| "unknown".to_string()),
+                kind: location
+                    .kind
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
                 scale: "unknown".to_string(),
             });
         }
@@ -1382,13 +1558,18 @@ fn extend_context(
 }
 
 fn patch_evidence(context: &AiBookWorkingContextV3, chapter_index: i32) -> Vec<AiBookEvidenceV3> {
-    match (context.current_chapter_title.clone(), context.current_chapter_index.or(Some(chapter_index))) {
-        (Some(chapter_title), Some(chapter_index)) if !chapter_title.is_empty() => vec![AiBookEvidenceV3 {
-            chapter_index,
-            chapter_title,
-            quote: None,
-            note: context.summary_current.clone(),
-        }],
+    match (
+        context.current_chapter_title.clone(),
+        context.current_chapter_index.or(Some(chapter_index)),
+    ) {
+        (Some(chapter_title), Some(chapter_index)) if !chapter_title.is_empty() => {
+            vec![AiBookEvidenceV3 {
+                chapter_index,
+                chapter_title,
+                quote: None,
+                note: context.summary_current.clone(),
+            }]
+        }
         _ => Vec::new(),
     }
 }
@@ -1398,14 +1579,26 @@ fn merge_character_into_memory(existing: &mut AiBookCharacterV3, patch: &Normali
         std::slice::from_ref(&existing.name),
         &merge_name_candidates(std::slice::from_ref(&patch.canonical_name), &patch.aliases),
     );
-    existing.status = patch.status.clone().unwrap_or_else(|| existing.status.clone());
+    existing.status = patch
+        .status
+        .clone()
+        .unwrap_or_else(|| existing.status.clone());
     existing.faction = patch.faction.clone().or_else(|| existing.faction.clone());
     existing.location = patch.location.clone().or_else(|| existing.location.clone());
-    existing.description = patch.description.clone().or_else(|| existing.description.clone());
+    existing.description = patch
+        .description
+        .clone()
+        .or_else(|| existing.description.clone());
 }
 
-fn merge_state_into_memory(existing: &mut AiBookCharacterStateV3, patch: &NormalizedCharacterStateV3) {
-    existing.status = patch.current_status.clone().unwrap_or_else(|| existing.status.clone());
+fn merge_state_into_memory(
+    existing: &mut AiBookCharacterStateV3,
+    patch: &NormalizedCharacterStateV3,
+) {
+    existing.status = patch
+        .current_status
+        .clone()
+        .unwrap_or_else(|| existing.status.clone());
     if let Some(description) = clean_optional(Some(render_state_description(patch))) {
         existing.description = Some(description);
     }
@@ -1452,7 +1645,10 @@ fn encode_relation_meta(relation: &NormalizedCharacterRelationV3) -> String {
         evidence: relation.evidence.clone(),
         history: relation.history.clone(),
     };
-    format!("{V3_RELATION_META_PREFIX}{}", serde_json::to_string(&meta).unwrap_or_default())
+    format!(
+        "{V3_RELATION_META_PREFIX}{}",
+        serde_json::to_string(&meta).unwrap_or_default()
+    )
 }
 
 fn decode_relation_meta(relation: &AiBookCharacterRelationV3) -> Option<RelationStorageMetaV3> {
@@ -1495,19 +1691,37 @@ fn is_directed_relation_kind(kind: &AiBookRelationKind) -> bool {
 fn normalize_relation_kind(raw: &str) -> Option<(AiBookRelationKind, RelationDirectionV3)> {
     let value = raw.replace('_', "-");
     match value.as_str() {
-        "family" | "亲属" | "家人" => Some((AiBookRelationKind::Family, RelationDirectionV3::Undirected)),
-        "romantic" | "romance" | "恋爱" | "感情" => Some((AiBookRelationKind::Romance, RelationDirectionV3::Undirected)),
-        "friend" | "friendship" | "ally" | "peer" | "朋友" | "互助" | "借贷互助" => {
-            Some((AiBookRelationKind::Friendship, RelationDirectionV3::Undirected))
+        "family" | "亲属" | "家人" => {
+            Some((AiBookRelationKind::Family, RelationDirectionV3::Undirected))
         }
-        "alliance" | "盟友" => Some((AiBookRelationKind::Alliance, RelationDirectionV3::Undirected)),
-        "enemy" | "conflict" | "hostile" | "敌对" => {
-            Some((AiBookRelationKind::Conflict, RelationDirectionV3::Undirected))
+        "romantic" | "romance" | "恋爱" | "感情" => {
+            Some((AiBookRelationKind::Romance, RelationDirectionV3::Undirected))
         }
-        "rival" | "rivalry" | "竞争" => Some((AiBookRelationKind::Rivalry, RelationDirectionV3::Undirected)),
-        "mentor-student" | "mentorstudent" | "superior-subordinate" | "teacher" | "supervision" | "师生" | "诱导" => {
-            Some((AiBookRelationKind::Supervision, RelationDirectionV3::Directed))
+        "friend" | "friendship" | "ally" | "peer" | "朋友" | "互助" | "借贷互助" => Some((
+            AiBookRelationKind::Friendship,
+            RelationDirectionV3::Undirected,
+        )),
+        "alliance" | "盟友" => Some((
+            AiBookRelationKind::Alliance,
+            RelationDirectionV3::Undirected,
+        )),
+        "enemy" | "conflict" | "hostile" | "敌对" => Some((
+            AiBookRelationKind::Conflict,
+            RelationDirectionV3::Undirected,
+        )),
+        "rival" | "rivalry" | "竞争" => {
+            Some((AiBookRelationKind::Rivalry, RelationDirectionV3::Undirected))
         }
+        "mentor-student"
+        | "mentorstudent"
+        | "superior-subordinate"
+        | "teacher"
+        | "supervision"
+        | "师生"
+        | "诱导" => Some((
+            AiBookRelationKind::Supervision,
+            RelationDirectionV3::Directed,
+        )),
         _ => None,
     }
 }
@@ -1676,7 +1890,10 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
-fn merge_name_candidates<'a>(primary: impl IntoIterator<Item = &'a String>, aliases: &[String]) -> Vec<String> {
+fn merge_name_candidates<'a>(
+    primary: impl IntoIterator<Item = &'a String>,
+    aliases: &[String],
+) -> Vec<String> {
     let mut values = Vec::new();
     for value in primary {
         values.push(value.clone());
@@ -1707,20 +1924,39 @@ fn stable_relation_id(
     let subtype = subtype.map(canonical_key).unwrap_or_default();
     let direction_key = direction.as_str();
     let (left, right) = match direction {
-        RelationDirectionV3::Directed => (source_character_id.to_string(), target_character_id.to_string()),
+        RelationDirectionV3::Directed => (
+            source_character_id.to_string(),
+            target_character_id.to_string(),
+        ),
         RelationDirectionV3::Undirected => {
             if source_character_id <= target_character_id {
-                (source_character_id.to_string(), target_character_id.to_string())
+                (
+                    source_character_id.to_string(),
+                    target_character_id.to_string(),
+                )
             } else {
-                (target_character_id.to_string(), source_character_id.to_string())
+                (
+                    target_character_id.to_string(),
+                    source_character_id.to_string(),
+                )
             }
         }
     };
-    format!("relation:{left}:{right}:{:?}:{subtype}:{direction_key}", kind)
+    format!(
+        "relation:{left}:{right}:{:?}:{subtype}:{direction_key}",
+        kind
+    )
 }
 
-fn stable_location_edge_id(source_location_id: &str, target_location_id: &str, kind: &AiBookLocationEdgeKind) -> String {
-    format!("location-edge:{source_location_id}:{target_location_id}:{:?}", kind)
+fn stable_location_edge_id(
+    source_location_id: &str,
+    target_location_id: &str,
+    kind: &AiBookLocationEdgeKind,
+) -> String {
+    format!(
+        "location-edge:{source_location_id}:{target_location_id}:{:?}",
+        kind
+    )
 }
 
 fn canonical_pair_key(left: &str, right: &str) -> String {
@@ -1732,10 +1968,17 @@ fn canonical_pair_key(left: &str, right: &str) -> String {
 }
 
 fn matches_location_relation(kind_key: &str) -> bool {
-    matches!(kind_key, "located-in" | "in" | "at" | "位于" | "在" | "就读")
+    matches!(
+        kind_key,
+        "located-in" | "in" | "at" | "位于" | "在" | "就读"
+    )
 }
 
-fn is_person_ability_relation(kind_key: &str, target_name: &str, source_is_character: bool) -> bool {
+fn is_person_ability_relation(
+    kind_key: &str,
+    target_name: &str,
+    source_is_character: bool,
+) -> bool {
     source_is_character
         && (matches!(
             kind_key,
@@ -1752,27 +1995,31 @@ fn is_person_item_relation(kind_key: &str) -> bool {
 fn is_transient_relation(kind_key: &str, description: Option<&str>) -> bool {
     matches!(kind_key, "see" | "hear" | "pass-by" | "说话" | "出现")
         || description
-            .map(|text| text.contains("路过") || text.contains("看到") || text.contains("出现在大屏幕"))
+            .map(|text| {
+                text.contains("路过") || text.contains("看到") || text.contains("出现在大屏幕")
+            })
             .unwrap_or(false)
 }
 
 fn is_low_value_relation(kind_key: &str, description: Option<&str>) -> bool {
-    matches!(kind_key, "know" | "acquaintance" | "schoolmate" | "classmate" | "认识")
-        || description
-            .map(|text| {
-                [
-                    "同校",
-                    "认识",
-                    "同屏出现",
-                    "同班",
-                    "只是认识",
-                    "仅仅认识",
-                    "路人互动",
-                ]
-                .iter()
-                .any(|needle| text.contains(needle))
-            })
-            .unwrap_or(false)
+    matches!(
+        kind_key,
+        "know" | "acquaintance" | "schoolmate" | "classmate" | "认识"
+    ) || description
+        .map(|text| {
+            [
+                "同校",
+                "认识",
+                "同屏出现",
+                "同班",
+                "只是认识",
+                "仅仅认识",
+                "路人互动",
+            ]
+            .iter()
+            .any(|needle| text.contains(needle))
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -1792,10 +2039,13 @@ fn find_character_ref(context: &AiBookWorkingContextV3, value: &str) -> Option<C
     context.relevant_characters.iter().find_map(|character| {
         let mut names = vec![character.name.clone()];
         names.extend(character.aliases.clone());
-        names.into_iter().any(|name| canonical_key(&name) == candidate).then(|| CharacterRef {
-            id: character.id.clone(),
-            name: character.name.clone(),
-        })
+        names
+            .into_iter()
+            .any(|name| canonical_key(&name) == candidate)
+            .then(|| CharacterRef {
+                id: character.id.clone(),
+                name: character.name.clone(),
+            })
     })
 }
 
@@ -1804,10 +2054,13 @@ fn find_location_ref(context: &AiBookWorkingContextV3, value: &str) -> Option<Lo
     context.relevant_locations.iter().find_map(|location| {
         let mut names = vec![location.name.clone()];
         names.extend(location.aliases.clone());
-        names.into_iter().any(|name| canonical_key(&name) == candidate).then(|| LocationRef {
-            id: location.id.clone(),
-            name: location.name.clone(),
-        })
+        names
+            .into_iter()
+            .any(|name| canonical_key(&name) == candidate)
+            .then(|| LocationRef {
+                id: location.id.clone(),
+                name: location.name.clone(),
+            })
     })
 }
 
@@ -1835,7 +2088,10 @@ fn collect_mentions(
     for character in &memory.characters {
         let mut candidates = vec![character.name.clone()];
         candidates.extend(character.aliases.clone());
-        if candidates.iter().any(|name| !name.is_empty() && chapter_text.contains(name)) {
+        if candidates
+            .iter()
+            .any(|name| !name.is_empty() && chapter_text.contains(name))
+        {
             characters.insert(stable_character_id(&character.name, &character.aliases));
         }
     }
@@ -1882,7 +2138,10 @@ fn state_map(states: &[AiBookCharacterStateV3]) -> HashMap<String, AiBookCharact
         .collect()
 }
 
-fn parent_location_name(location: &AiBookLocationV3, location_edges: &[AiBookLocationEdgeV3]) -> Option<String> {
+fn parent_location_name(
+    location: &AiBookLocationV3,
+    location_edges: &[AiBookLocationEdgeV3],
+) -> Option<String> {
     location_edges.iter().find_map(|edge| {
         (edge.kind == AiBookLocationEdgeKind::Contains && edge.target == location.name)
             .then(|| edge.source.clone())
@@ -1923,42 +2182,47 @@ where
 fn merge_character_patch(existing: &mut NormalizedCharacterV3, incoming: NormalizedCharacterV3) {
     existing.aliases = merge_name_candidates(
         std::slice::from_ref(&existing.canonical_name),
-        &merge_name_candidates(std::slice::from_ref(&incoming.canonical_name), &incoming.aliases),
+        &merge_name_candidates(
+            std::slice::from_ref(&incoming.canonical_name),
+            &incoming.aliases,
+        ),
     );
     existing.status = incoming.status.or_else(|| existing.status.clone());
     existing.faction = incoming.faction.or_else(|| existing.faction.clone());
     existing.location = incoming.location.or_else(|| existing.location.clone());
-    existing.description = incoming.description.or_else(|| existing.description.clone());
-    existing.evidence = dedupe_evidence([
-        existing.evidence.clone(),
-        incoming.evidence,
-    ]
-    .concat());
-}
-
-fn merge_character_state_patch(existing: &mut NormalizedCharacterStateV3, incoming: NormalizedCharacterStateV3) {
-    existing.current_status = incoming.current_status.or_else(|| existing.current_status.clone());
-    existing.affiliations = dedupe_strings([
-        existing.affiliations.clone(),
-        incoming.affiliations,
-    ]
-    .concat());
-    existing.abilities = dedupe_strings([existing.abilities.clone(), incoming.abilities].concat());
-    existing.resources = dedupe_strings([existing.resources.clone(), incoming.resources].concat());
-    existing.current_location_id = incoming.current_location_id.or_else(|| existing.current_location_id.clone());
+    existing.description = incoming
+        .description
+        .or_else(|| existing.description.clone());
     existing.evidence = dedupe_evidence([existing.evidence.clone(), incoming.evidence].concat());
 }
 
-fn merge_relation_patch(existing: &mut NormalizedCharacterRelationV3, incoming: NormalizedCharacterRelationV3) {
+fn merge_character_state_patch(
+    existing: &mut NormalizedCharacterStateV3,
+    incoming: NormalizedCharacterStateV3,
+) {
+    existing.current_status = incoming
+        .current_status
+        .or_else(|| existing.current_status.clone());
+    existing.affiliations =
+        dedupe_strings([existing.affiliations.clone(), incoming.affiliations].concat());
+    existing.abilities = dedupe_strings([existing.abilities.clone(), incoming.abilities].concat());
+    existing.resources = dedupe_strings([existing.resources.clone(), incoming.resources].concat());
+    existing.current_location_id = incoming
+        .current_location_id
+        .or_else(|| existing.current_location_id.clone());
+    existing.evidence = dedupe_evidence([existing.evidence.clone(), incoming.evidence].concat());
+}
+
+fn merge_relation_patch(
+    existing: &mut NormalizedCharacterRelationV3,
+    incoming: NormalizedCharacterRelationV3,
+) {
     existing.polarity = incoming.polarity;
     existing.strength = incoming.strength;
     existing.status = incoming.status;
     existing.summary = incoming.summary.clone();
-    existing.current_dynamics = dedupe_strings([
-        existing.current_dynamics.clone(),
-        incoming.current_dynamics,
-    ]
-    .concat());
+    existing.current_dynamics =
+        dedupe_strings([existing.current_dynamics.clone(), incoming.current_dynamics].concat());
     existing.evidence = dedupe_evidence([existing.evidence.clone(), incoming.evidence].concat());
     existing.history.extend(incoming.history);
 }
@@ -1972,12 +2236,17 @@ fn merge_fact_patch(existing: &mut NormalizedKnowledgeFactV3, incoming: Normaliz
 
 fn merge_location_patch(existing: &mut NormalizedLocationV3, incoming: NormalizedLocationV3) {
     existing.kind = incoming.kind.or_else(|| existing.kind.clone());
-    existing.description = incoming.description.or_else(|| existing.description.clone());
+    existing.description = incoming
+        .description
+        .or_else(|| existing.description.clone());
     existing.status = incoming.status.or_else(|| existing.status.clone());
     existing.evidence = dedupe_evidence([existing.evidence.clone(), incoming.evidence].concat());
 }
 
-fn merge_location_edge_patch(existing: &mut NormalizedLocationEdgeV3, incoming: NormalizedLocationEdgeV3) {
+fn merge_location_edge_patch(
+    existing: &mut NormalizedLocationEdgeV3,
+    incoming: NormalizedLocationEdgeV3,
+) {
     existing.label = incoming.label.or_else(|| existing.label.clone());
     existing.evidence = dedupe_evidence([existing.evidence.clone(), incoming.evidence].concat());
 }
@@ -1985,7 +2254,7 @@ fn merge_location_edge_patch(existing: &mut NormalizedLocationEdgeV3, incoming: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ai_book::{AiBookSummaryV3, AiBookCharacterRelationV3};
+    use crate::model::ai_book::{AiBookCharacterRelationV3, AiBookSummaryV3};
     use crate::model::ai_book_generation::{
         AiBookCharacterPatchV3, AiBookCharacterRelationPatchV3, AiBookKnowledgeFactPatchV3,
         AiBookKnowledgePatchV3, AiBookLocationPatchV3,
@@ -2022,16 +2291,77 @@ mod tests {
 
         assert_eq!(merged.characters.len(), 1);
         assert_eq!(merged.characters[0].name, "张羽");
-        assert!(merged.characters[0].aliases.iter().any(|item| item == "羽哥"));
-        assert!(merged.characters[0].aliases.iter().any(|item| item == "张羽"));
+        assert!(merged.characters[0]
+            .aliases
+            .iter()
+            .any(|item| item == "羽哥"));
+        assert!(merged.characters[0]
+            .aliases
+            .iter()
+            .any(|item| item == "张羽"));
+    }
+
+    #[test]
+    fn ai_book_v3_character_status_patch_creates_state_fallback() {
+        let context = working_context_with_entities(vec![], vec![]);
+        let patch = AiBookKnowledgePatchV3 {
+            chapter_index: 1,
+            characters: vec![AiBookCharacterPatchV3 {
+                name: "王海".to_string(),
+                status: Some("体育老师，推销增强剂并压迫学生。".to_string()),
+                ..AiBookCharacterPatchV3::default()
+            }],
+            ..AiBookKnowledgePatchV3::default()
+        };
+
+        let normalized = normalize_knowledge_patch_v3(patch, &context);
+        let memory = merge_ai_book_memory_v3(
+            create_empty_ai_book_memory_v3("book://test", None, None),
+            normalized,
+        );
+
+        assert_eq!(memory.character_states.len(), 1);
+        assert_eq!(memory.character_states[0].name, "王海");
+        assert_eq!(
+            memory.character_states[0].status,
+            "体育老师，推销增强剂并压迫学生。"
+        );
+    }
+
+    #[test]
+    fn ai_book_v3_location_kind_normalizes_or_infers_chinese_kind() {
+        let context = working_context_with_entities(vec![], vec![]);
+        let patch = AiBookKnowledgePatchV3 {
+            chapter_index: 1,
+            locations: vec![
+                AiBookLocationPatchV3 {
+                    name: "嵩阳高中".to_string(),
+                    kind: Some("school".to_string()),
+                    description: "学校场景".to_string(),
+                    ..AiBookLocationPatchV3::default()
+                },
+                AiBookLocationPatchV3 {
+                    name: "昆墟第一层".to_string(),
+                    description: "昆墟的第一层空间".to_string(),
+                    ..AiBookLocationPatchV3::default()
+                },
+            ],
+            ..AiBookKnowledgePatchV3::default()
+        };
+
+        let normalized = normalize_knowledge_patch_v3(patch, &context);
+        let memory = merge_ai_book_memory_v3(
+            create_empty_ai_book_memory_v3("book://test", None, None),
+            normalized,
+        );
+
+        assert_eq!(memory.locations[0].kind.as_deref(), Some("学校"));
+        assert_eq!(memory.locations[1].kind.as_deref(), Some("层级"));
     }
 
     #[test]
     fn ai_book_v3_drops_person_location_relation() {
-        let context = working_context_with_entities(
-            vec![("张羽", vec![])],
-            vec!["嵩阳高中"],
-        );
+        let context = working_context_with_entities(vec![("张羽", vec![])], vec!["嵩阳高中"]);
         let result = classify_relation_candidate_v3(
             RelationCandidateV3 {
                 source_name: "张羽".to_string(),
@@ -2125,7 +2455,10 @@ mod tests {
         match result {
             RelationClassificationV3::Redirect(RelationRedirectV3::LocationEdge(edge)) => {
                 assert_eq!(edge.kind, AiBookLocationEdgeKind::Adjacent);
-                assert_eq!(edge.id, "location-edge:location:嵩阳高中:location:训练馆:Adjacent");
+                assert_eq!(
+                    edge.id,
+                    "location-edge:location:嵩阳高中:location:训练馆:Adjacent"
+                );
             }
             other => panic!("expected adjacent redirect, got {other:?}"),
         }
@@ -2228,7 +2561,10 @@ mod tests {
         let next_context = select_working_context_v3(&merged, Some(&digest), "Alex 出场");
 
         assert_eq!(display.characters[0].id, "character:alexandra");
-        assert_eq!(next_context.relevant_characters[0].id, "character:alexandra");
+        assert_eq!(
+            next_context.relevant_characters[0].id,
+            "character:alexandra"
+        );
     }
 
     #[test]
@@ -2257,7 +2593,8 @@ mod tests {
 
         let normalized = normalize_knowledge_patch_v3(patch, &context);
         memory = merge_ai_book_memory_v3(memory, normalized);
-        let next_context = select_working_context_v3(&memory, Some(&digest), "张羽与白真真继续合作");
+        let next_context =
+            select_working_context_v3(&memory, Some(&digest), "张羽与白真真继续合作");
 
         assert_eq!(next_context.relevant_relations.len(), 1);
         assert_eq!(next_context.relevant_relations[0].label, "friend");
@@ -2274,7 +2611,8 @@ mod tests {
             summary: "师生博弈".to_string(),
             ..AiBookChapterDigestV3::default()
         };
-        let context = select_working_context_v3(&memory, Some(&digest), "苏海峰诱导张羽，张羽反制苏海峰");
+        let context =
+            select_working_context_v3(&memory, Some(&digest), "苏海峰诱导张羽，张羽反制苏海峰");
 
         let forward = normalize_knowledge_patch_v3(
             AiBookKnowledgePatchV3 {
@@ -2313,11 +2651,15 @@ mod tests {
         memory = merge_ai_book_memory_v3(memory, reverse);
 
         assert_eq!(memory.character_relations.len(), 2);
-        assert_ne!(memory.character_relations[0].source, memory.character_relations[1].source);
+        assert_ne!(
+            memory.character_relations[0].source,
+            memory.character_relations[1].source
+        );
     }
 
     #[test]
-    fn ai_book_v3_status_only_state_patch_preserves_existing_description_and_new_empty_state_is_none() {
+    fn ai_book_v3_status_only_state_patch_preserves_existing_description_and_new_empty_state_is_none(
+    ) {
         let mut existing_state = AiBookCharacterStateV3 {
             name: "张羽".to_string(),
             status: "旧状态".to_string(),
@@ -2365,7 +2707,10 @@ mod tests {
         assert_eq!(memory.character_states.len(), 1);
         assert_eq!(memory.character_states[0].status, "警觉");
         assert_eq!(memory.character_states[0].description, None);
-        assert_eq!(context_after.relevant_characters[0].abilities, Vec::<String>::new());
+        assert_eq!(
+            context_after.relevant_characters[0].abilities,
+            Vec::<String>::new()
+        );
         drop(context);
     }
 
@@ -2374,12 +2719,30 @@ mod tests {
         let memory = AiBookMemoryV3 {
             book_url: "book://test".to_string(),
             characters: vec![
-                AiBookCharacterV3 { name: "白真真".to_string(), ..AiBookCharacterV3::default() },
-                AiBookCharacterV3 { name: "张羽".to_string(), ..AiBookCharacterV3::default() },
+                AiBookCharacterV3 {
+                    name: "白真真".to_string(),
+                    ..AiBookCharacterV3::default()
+                },
+                AiBookCharacterV3 {
+                    name: "张羽".to_string(),
+                    ..AiBookCharacterV3::default()
+                },
             ],
             character_relations: vec![
-                stored_relation("白真真", "张羽", AiBookRelationKind::Friendship, AiBookRelationStatus::Active, "借贷互助"),
-                stored_relation("张羽", "白真真", AiBookRelationKind::Conflict, AiBookRelationStatus::Active, "彼此试探"),
+                stored_relation(
+                    "白真真",
+                    "张羽",
+                    AiBookRelationKind::Friendship,
+                    AiBookRelationStatus::Active,
+                    "借贷互助",
+                ),
+                stored_relation(
+                    "张羽",
+                    "白真真",
+                    AiBookRelationKind::Conflict,
+                    AiBookRelationStatus::Active,
+                    "彼此试探",
+                ),
             ],
             ..AiBookMemoryV3::default()
         };
@@ -2395,8 +2758,14 @@ mod tests {
         let memory = AiBookMemoryV3 {
             book_url: "book://test".to_string(),
             characters: vec![
-                AiBookCharacterV3 { name: "白真真".to_string(), ..AiBookCharacterV3::default() },
-                AiBookCharacterV3 { name: "张羽".to_string(), ..AiBookCharacterV3::default() },
+                AiBookCharacterV3 {
+                    name: "白真真".to_string(),
+                    ..AiBookCharacterV3::default()
+                },
+                AiBookCharacterV3 {
+                    name: "张羽".to_string(),
+                    ..AiBookCharacterV3::default()
+                },
             ],
             character_relations: vec![stored_relation(
                 "白真真",
@@ -2413,9 +2782,40 @@ mod tests {
     }
 
     #[test]
+    fn ai_book_v3_processed_chapter_ignores_empty_digest_placeholders() {
+        let mut memory = AiBookMemoryV3 {
+            chapter_digests: vec![
+                AiBookChapterDigestV3 {
+                    chapter_index: 0,
+                    chapter_title: "第1章".to_string(),
+                    ..AiBookChapterDigestV3::default()
+                },
+                AiBookChapterDigestV3 {
+                    chapter_index: 1,
+                    chapter_title: "第2章".to_string(),
+                    summary: "第2章摘要".to_string(),
+                    ..AiBookChapterDigestV3::default()
+                },
+            ],
+            processed_chapter_index: Some(8),
+            processed_chapter_title: Some("第9章".to_string()),
+            ..AiBookMemoryV3::default()
+        };
+
+        sync_processed_chapter_from_digests(&mut memory);
+
+        assert_eq!(memory.processed_chapter_index, None);
+        assert_eq!(memory.processed_chapter_title, None);
+    }
+
+    #[test]
     fn ai_book_v3_working_context_has_hard_caps() {
-        let mut memory = create_empty_ai_book_memory_v3("book://big", Some("大书".to_string()), None);
-        memory.summary = AiBookSummaryV3 { current: "总览".to_string(), ..AiBookSummaryV3::default() };
+        let mut memory =
+            create_empty_ai_book_memory_v3("book://big", Some("大书".to_string()), None);
+        memory.summary = AiBookSummaryV3 {
+            current: "总览".to_string(),
+            ..AiBookSummaryV3::default()
+        };
         memory.chapter_digests = (0..10)
             .map(|index| AiBookChapterDigestV3 {
                 chapter_index: index,
@@ -2432,7 +2832,15 @@ mod tests {
             })
             .collect();
         memory.character_relations = (0..20)
-            .map(|index| stored_relation(&format!("角色{}", index), &format!("角色{}", index + 1), AiBookRelationKind::Friendship, AiBookRelationStatus::Active, "关系"))
+            .map(|index| {
+                stored_relation(
+                    &format!("角色{}", index),
+                    &format!("角色{}", index + 1),
+                    AiBookRelationKind::Friendship,
+                    AiBookRelationStatus::Active,
+                    "关系",
+                )
+            })
             .collect();
         memory.knowledge_facts = (0..20)
             .map(|index| AiBookKnowledgeFactV3 {
@@ -2462,7 +2870,13 @@ mod tests {
         };
 
         let chapter_text = (0..30)
-            .map(|index| format!("角色{index} 在 地点{} 讨论 设定{}", index.min(19), index.min(19)))
+            .map(|index| {
+                format!(
+                    "角色{index} 在 地点{} 讨论 设定{}",
+                    index.min(19),
+                    index.min(19)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let context = select_working_context_v3(&memory, Some(&digest), &chapter_text);
@@ -2595,7 +3009,13 @@ mod tests {
             relevant_characters: characters
                 .into_iter()
                 .map(|(name, aliases)| WorkingContextCharacterV3 {
-                    id: stable_character_id(name, &aliases.iter().map(|item| item.to_string()).collect::<Vec<_>>()),
+                    id: stable_character_id(
+                        name,
+                        &aliases
+                            .iter()
+                            .map(|item| item.to_string())
+                            .collect::<Vec<_>>(),
+                    ),
                     name: name.to_string(),
                     aliases: aliases.into_iter().map(|item| item.to_string()).collect(),
                     status: None,

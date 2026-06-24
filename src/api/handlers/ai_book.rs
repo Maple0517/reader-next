@@ -16,8 +16,8 @@ use crate::model::ai_book_catchup::{
     AiBookCatchupTaskView,
 };
 use crate::service::ai_book_catchup_service::{
-    fetch_content_fn, generate_digest_fn, generate_patch_fn, save_memory_fn, CatchupBookContext,
-    CatchupChapter,
+    fetch_content_fn, generate_digest_fn, generate_patch_fn, next_catchup_start_index,
+    save_memory_fn, CatchupBookContext, CatchupChapter,
 };
 use crate::service::ai_book_generation_service::{AiBookGenerationMode, LoadedChapter};
 use crate::service::ai_book_memory_v3::{
@@ -25,7 +25,6 @@ use crate::service::ai_book_memory_v3::{
 };
 use crate::service::local_txt_book::is_local_txt_origin;
 use crate::util::text::repair_encoded_url;
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -318,9 +317,9 @@ pub async fn start_ai_book_catchup(
                         Some(shelf_book_for_task.author.clone()),
                     )
                     .await?;
-                let memory =
-                    serde_json::to_value(&memory_v3).map_err(|e| AppError::BadRequest(e.to_string()))?;
-                let start_chapter_index = memory_v3.processed_chapter_index.map(|index| index + 1).unwrap_or(0);
+                let memory = serde_json::to_value(&memory_v3)
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                let start_chapter_index = next_catchup_start_index(&memory);
                 let save_start_failure = {
                     let state = state_for_task.clone();
                     let user_ns = user_ns_for_task.clone();
@@ -332,14 +331,21 @@ pub async fn start_ai_book_catchup(
                         let book_url = book_url.clone();
                         let fallback_memory = fallback_memory.clone();
                         async move {
-                            let latest = state.ai_book_service.get_value(&user_ns, &book_url).await.ok().flatten();
+                            let latest = state
+                                .ai_book_service
+                                .get_value(&user_ns, &book_url)
+                                .await
+                                .ok()
+                                .flatten();
                             let memory = build_catchup_start_failure_memory(
                                 latest,
                                 serde_json::to_value(fallback_memory).unwrap_or_default(),
                                 start_chapter_index,
                                 &error,
                             );
-                            let _ = save_catchup_memory_v3_value(&state, &user_ns, &book_url, memory).await;
+                            let _ =
+                                save_catchup_memory_v3_value(&state, &user_ns, &book_url, memory)
+                                    .await;
                             AppError::BadRequest(error)
                         }
                     }
@@ -374,7 +380,13 @@ pub async fn start_ai_book_catchup(
                         let save_user_ns = save_user_ns.clone();
                         let save_book_url = save_book_url.clone();
                         async move {
-                            save_catchup_memory_v3_value(&save_state, &save_user_ns, &save_book_url, memory).await
+                            save_catchup_memory_v3_value(
+                                &save_state,
+                                &save_user_ns,
+                                &save_book_url,
+                                memory,
+                            )
+                            .await
                         }
                     }),
                     fetch_content: fetch_content_fn(move |chapter| {
@@ -420,7 +432,12 @@ pub async fn start_ai_book_catchup(
                             };
                             digest_state
                                 .ai_book_generation_service
-                                .generate_digest(&content, &memory, &loaded, AiBookGenerationMode::Auto)
+                                .generate_digest(
+                                    &content,
+                                    &memory,
+                                    &loaded,
+                                    AiBookGenerationMode::Auto,
+                                )
                                 .await
                         }
                     }),
@@ -582,7 +599,10 @@ async fn idle_catchup_status(
         user_ns: user_ns.to_string(),
         book_url: book_url.to_string(),
         status: if error.is_some() { "failed" } else { "idle" }.to_string(),
-        start_chapter_index: processed_chapter_index.map(|index| index + 1),
+        start_chapter_index: memory
+            .as_ref()
+            .map(next_catchup_start_index)
+            .or_else(|| processed_chapter_index.map(|index| index + 1)),
         target_chapter_index: None,
         total_chapters: 0,
         completed_chapters: 0,
@@ -611,12 +631,19 @@ async fn persist_catchup_status(
     book_url: &str,
     task: &AiBookCatchupTaskView,
 ) {
-    let mut memory = match state.ai_book_service.get_or_create_v3(user_ns, book_url, None, None).await {
+    let mut memory = match state
+        .ai_book_service
+        .get_or_create_v3(user_ns, book_url, None, None)
+        .await
+    {
         Ok(memory) => memory,
         Err(_) => return,
     };
     write_catchup_stats_to_memory_v3(&mut memory, task);
-    let _ = state.ai_book_service.save_v3(user_ns, book_url, memory).await;
+    let _ = state
+        .ai_book_service
+        .save_v3(user_ns, book_url, memory)
+        .await;
 }
 
 async fn save_catchup_memory_v3_value(
@@ -627,7 +654,10 @@ async fn save_catchup_memory_v3_value(
 ) -> Result<Value, AppError> {
     let memory = serde_json::from_value::<AiBookMemoryV3>(memory)
         .map_err(|e| AppError::BadRequest(format!("AI资料补齐内存格式不正确: {e}")))?;
-    let saved = state.ai_book_service.save_v3(user_ns, book_url, memory).await?;
+    let saved = state
+        .ai_book_service
+        .save_v3(user_ns, book_url, memory)
+        .await?;
     serde_json::to_value(saved).map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
@@ -636,7 +666,11 @@ fn write_catchup_stats_to_memory(memory: &mut Value, task: &AiBookCatchupTaskVie
     let Some(object) = memory.as_object_mut() else {
         return;
     };
-    if let Some(stats) = task.stats.as_ref().and_then(|stats| serde_json::to_value(stats).ok()) {
+    if let Some(stats) = task
+        .stats
+        .as_ref()
+        .and_then(|stats| serde_json::to_value(stats).ok())
+    {
         object.insert("catchupStats".to_string(), stats);
         object.remove("catchupTask");
     } else {
@@ -755,7 +789,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-
     async fn create_test_state() -> (AppState, PathBuf) {
         let dir = std::env::temp_dir().join(format!("reader-ai-book-handler-{}", random_string(8)));
         std::fs::create_dir_all(&dir).unwrap();
@@ -768,7 +801,8 @@ mod tests {
             database_url,
             ..AppConfig::default()
         };
-        let http = crate::crawler::http_client::HttpClient::new(cfg.request_timeout_secs, None).unwrap();
+        let http =
+            crate::crawler::http_client::HttpClient::new(cfg.request_timeout_secs, None).unwrap();
         let parser = crate::parser::rule_engine::RuleEngine::new().unwrap();
         let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
         let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
@@ -777,7 +811,8 @@ mod tests {
             &cfg.storage_dir,
         ));
         let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
-        let json_document_service = Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
+        let json_document_service =
+            Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
         let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
         user_service.migrate_legacy_users_from_json().await.unwrap();
         let book_group_service = Arc::new(BookGroupService::new(json_document_service.clone()));
@@ -788,12 +823,14 @@ mod tests {
             book_source_service.clone(),
             local_txt_book_service.clone(),
         ));
-        let ai_book_catchup_service = Arc::new(crate::service::ai_book_catchup_service::AiBookCatchupService::new());
+        let ai_book_catchup_service =
+            Arc::new(crate::service::ai_book_catchup_service::AiBookCatchupService::new());
         let ai_model_service = Arc::new(AiModelService::new(
             json_document_service.clone(),
             &cfg.storage_dir,
         ));
-        let chapter_summary_service = Arc::new(ChapterSummaryService::new(json_document_service.clone()));
+        let chapter_summary_service =
+            Arc::new(ChapterSummaryService::new(json_document_service.clone()));
         let update_service = Arc::new(
             UpdateService::new(
                 json_document_service.clone(),
@@ -897,10 +934,19 @@ mod tests {
         .unwrap();
         let enabled_payload = serde_json::to_value(enabled.0).unwrap();
         assert_eq!(enabled_payload["isSuccess"], json!(true));
-        assert_eq!(enabled_payload["data"]["memory"]["bookUrl"], json!(book_url));
+        assert_eq!(
+            enabled_payload["data"]["memory"]["bookUrl"],
+            json!(book_url)
+        );
         assert_eq!(enabled_payload["data"]["memory"]["enabled"], json!(true));
-        assert_eq!(enabled_payload["data"]["memory"]["bookName"], json!("测试书"));
-        assert_eq!(enabled_payload["data"]["memory"]["author"], json!("测试作者"));
+        assert_eq!(
+            enabled_payload["data"]["memory"]["bookName"],
+            json!("测试书")
+        );
+        assert_eq!(
+            enabled_payload["data"]["memory"]["author"],
+            json!("测试作者")
+        );
 
         let reset = reset_ai_book_memory(
             State(state),
@@ -915,7 +961,10 @@ mod tests {
         assert_eq!(reset_payload["isSuccess"], json!(true));
         assert_eq!(reset_payload["data"]["memory"]["bookUrl"], json!(book_url));
         assert_eq!(reset_payload["data"]["memory"]["enabled"], json!(false));
-        assert_eq!(reset_payload["data"]["memory"]["summary"]["current"], json!(""));
+        assert_eq!(
+            reset_payload["data"]["memory"]["summary"]["current"],
+            json!("")
+        );
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
@@ -1044,9 +1093,13 @@ mod tests {
         write_catchup_stats_to_memory(&mut memory, &task);
 
         assert!(memory.get("catchupTask").is_none());
-        assert_eq!(memory.get("processedChapterIndex").and_then(Value::as_i64), Some(4));
+        assert_eq!(
+            memory.get("processedChapterIndex").and_then(Value::as_i64),
+            Some(4)
+        );
         assert_eq!(memory.get("updatedAt").and_then(Value::as_i64), Some(222));
-        let saved_stats: AiBookCatchupTaskStats = serde_json::from_value(memory.get("catchupStats").cloned().unwrap()).unwrap();
+        let saved_stats: AiBookCatchupTaskStats =
+            serde_json::from_value(memory.get("catchupStats").cloned().unwrap()).unwrap();
         assert_eq!(saved_stats, stats);
     }
 
@@ -1093,7 +1146,11 @@ mod tests {
 
         persist_catchup_status(&state, user_ns, book_url, &task).await;
 
-        let saved = state.ai_book_service.get_or_create_v3(user_ns, book_url, None, None).await.unwrap();
+        let saved = state
+            .ai_book_service
+            .get_or_create_v3(user_ns, book_url, None, None)
+            .await
+            .unwrap();
         assert_eq!(saved.catchup_stats, Some(stats));
         assert!(saved.updated_at > 0);
 
@@ -1176,18 +1233,35 @@ mod tests {
         memory.summary.current = "已有摘要".to_string();
         memory.processed_chapter_index = Some(4);
         memory.processed_chapter_title = Some("第5章".to_string());
+        memory.chapter_digests = (0..=4)
+            .map(|index| crate::model::ai_book::AiBookChapterDigestV3 {
+                chapter_index: index,
+                chapter_title: format!("第{}章", index + 1),
+                summary: format!("摘要{}", index + 1),
+                ..Default::default()
+            })
+            .collect();
         memory.updated_at = 111;
         let mut stats = AiBookCatchupTaskStats::default();
         stats.skipped_patch_chapters = 2;
         memory.catchup_stats = Some(stats);
-        state.ai_book_service.save_v3(user_ns, book_url, memory).await.unwrap();
+        state
+            .ai_book_service
+            .save_v3(user_ns, book_url, memory)
+            .await
+            .unwrap();
 
-        let task = idle_catchup_status(&state, user_ns, book_url).await.unwrap();
+        let task = idle_catchup_status(&state, user_ns, book_url)
+            .await
+            .unwrap();
 
         assert_eq!(task.status, "idle");
         assert_eq!(task.processed_chapter_index, Some(4));
         assert_eq!(task.processed_chapter_title.as_deref(), Some("第5章"));
-        assert_eq!(task.stats.as_ref().map(|s| s.skipped_patch_chapters), Some(2));
+        assert_eq!(
+            task.stats.as_ref().map(|s| s.skipped_patch_chapters),
+            Some(2)
+        );
         assert_eq!(task.completed_chapters, 0);
         assert_eq!(task.current_chapter_index, None);
 

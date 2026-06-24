@@ -228,10 +228,7 @@ pub fn build_router(state: AppState) -> Router {
             AI_BOOK_MEMORY_RESET_ROUTE,
             post(handlers::reset_ai_book_memory),
         )
-        .route(
-            AI_BOOK_ENABLED_ROUTE,
-            post(handlers::set_ai_book_enabled),
-        )
+        .route(AI_BOOK_ENABLED_ROUTE, post(handlers::set_ai_book_enabled))
         .route(
             AI_BOOK_CHAPTER_GENERATE_ROUTE,
             post(handlers::generate_ai_book_chapter_memory),
@@ -354,7 +351,6 @@ pub fn build_router(state: AppState) -> Router {
         .layer(CorsLayer::very_permissive())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,32 +387,45 @@ mod tests {
             database_url,
             ..AppConfig::default()
         };
-        let http = crate::crawler::http_client::HttpClient::new(cfg.request_timeout_secs, None).unwrap();
+        let http =
+            crate::crawler::http_client::HttpClient::new(cfg.request_timeout_secs, None).unwrap();
         let parser = crate::parser::rule_engine::RuleEngine::new().unwrap();
         let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
         let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
-        let book_source_service = Arc::new(BookSourceService::new(BookSourceRepo::new(pool.clone()), &cfg.storage_dir));
+        let book_source_service = Arc::new(BookSourceService::new(
+            BookSourceRepo::new(pool.clone()),
+            &cfg.storage_dir,
+        ));
         let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
-        let json_document_service = Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
+        let json_document_service =
+            Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
         let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
         user_service.migrate_legacy_users_from_json().await.unwrap();
         let book_group_service = Arc::new(BookGroupService::new(json_document_service.clone()));
-        let ai_model_service = Arc::new(AiModelService::new(json_document_service.clone(), &cfg.storage_dir));
-        let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
-        let ai_book_generation_service = Arc::new(AiBookGenerationService::new_with_ai_model_service(
-            ai_book_service.clone(),
-            book_service.clone(),
-            book_source_service.clone(),
-            local_txt_book_service.clone(),
-            ai_model_service.clone(),
-        ));
-        let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
-        let chapter_summary_service = Arc::new(ChapterSummaryService::new(json_document_service.clone()));
-        let update_service = Arc::new(UpdateService::new(
+        let ai_model_service = Arc::new(AiModelService::new(
             json_document_service.clone(),
-            cfg.request_timeout_secs,
-            format!("v{}", env!("CARGO_PKG_VERSION")),
-        ).unwrap());
+            &cfg.storage_dir,
+        ));
+        let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
+        let ai_book_generation_service =
+            Arc::new(AiBookGenerationService::new_with_ai_model_service(
+                ai_book_service.clone(),
+                book_service.clone(),
+                book_source_service.clone(),
+                local_txt_book_service.clone(),
+                ai_model_service.clone(),
+            ));
+        let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
+        let chapter_summary_service =
+            Arc::new(ChapterSummaryService::new(json_document_service.clone()));
+        let update_service = Arc::new(
+            UpdateService::new(
+                json_document_service.clone(),
+                cfg.request_timeout_secs,
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+            )
+            .unwrap(),
+        );
         let state = AppState {
             config: cfg,
             book_service,
@@ -498,7 +507,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(wrong_method_enabled.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            wrong_method_enabled.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
 
         server.abort();
         let _ = tokio::fs::remove_dir_all(dir).await;

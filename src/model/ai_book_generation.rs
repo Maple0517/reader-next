@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::ai_book::{
-    AiBookCharacterRelationV3, AiBookCharacterStateV3, AiBookChapterDigestV3,
-    AiBookLocationEdgeV3, AiBookLocationV3,
+    AiBookChapterDigestV3, AiBookCharacterRelationV3, AiBookCharacterStateV3, AiBookLocationEdgeV3,
+    AiBookLocationV3,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

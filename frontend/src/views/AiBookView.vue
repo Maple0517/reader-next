@@ -304,6 +304,7 @@ import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
 import { useReaderStore } from '../stores/reader'
 import type { AiBookCatchupStatus, AiBookCatchupTaskStatus, AiBookEvidence, Book } from '../types'
+import { describeCatchupDetail, describeCatchupProgress } from '../utils/aiBookCatchupStatus'
 import { collapseWhitespace, summarizeDisplayError } from '../utils/httpError'
 
 type AiTab = 'overview' | 'characters' | 'relationships' | 'map'
@@ -484,23 +485,11 @@ const catchupProgressPercent = computed(() => {
 })
 const catchupProgressSummary = computed(() => {
   if (!catchupStatus.value) return ''
-  const total = Math.max(catchupStatus.value.totalChapters || 0, 0)
-  const completed = Math.max(catchupStatus.value.completedChapters || 0, 0)
-  const target = typeof catchupStatus.value.targetChapterIndex === 'number'
-    ? formatChapter(catchupStatus.value.targetChapterIndex)
-    : '当前阅读章节'
-  return total ? `${Math.min(completed, total)}/${total} · 目标 ${target}` : `目标 ${target}`
+  return describeCatchupProgress(catchupStatus.value)
 })
 const catchupDetailText = computed(() => {
   if (!catchupStatus.value) return ''
-  if (catchupStatus.value.status === 'failed') return catchupStatus.value.error || '补齐任务失败'
-  if (catchupStatus.value.currentChapterIndex != null) {
-    return `当前处理 ${formatChapter(catchupStatus.value.currentChapterIndex)}${catchupStatus.value.currentChapterTitle ? ` · ${catchupStatus.value.currentChapterTitle}` : ''}`
-  }
-  if (catchupStatus.value.processedChapterIndex != null) {
-    return `最近完成 ${formatChapter(catchupStatus.value.processedChapterIndex)}${catchupStatus.value.processedChapterTitle ? ` · ${catchupStatus.value.processedChapterTitle}` : ''}`
-  }
-  return '等待任务开始'
+  return describeCatchupDetail(catchupStatus.value)
 })
 const catchupUpdatedAtText = computed(() => catchupStatus.value?.updatedAt ? `更新于 ${formatTime(catchupStatus.value.updatedAt)}` : '')
 const chapterGenerationStatusLabel = computed(() => chapterMemory.value?.generationStatus || 'idle')

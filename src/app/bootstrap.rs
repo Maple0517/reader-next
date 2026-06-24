@@ -9,12 +9,11 @@ use crate::crawler::http_client::HttpClient;
 use crate::parser::rule_engine::RuleEngine;
 use crate::service::{
     ai_book_catchup_service::AiBookCatchupService,
-    ai_book_generation_service::AiBookGenerationService,
-    ai_book_service::AiBookService, ai_model_service::AiModelService,
-    book_group_service::BookGroupService, book_service::BookService,
-    book_source_service::BookSourceService, chapter_summary_service::ChapterSummaryService,
-    json_document_service::JsonDocumentService, local_txt_book::LocalTxtBookService,
-    update_service::UpdateService, user_service::UserService,
+    ai_book_generation_service::AiBookGenerationService, ai_book_service::AiBookService,
+    ai_model_service::AiModelService, book_group_service::BookGroupService,
+    book_service::BookService, book_source_service::BookSourceService,
+    chapter_summary_service::ChapterSummaryService, json_document_service::JsonDocumentService,
+    local_txt_book::LocalTxtBookService, update_service::UpdateService, user_service::UserService,
 };
 use crate::storage::{cache::file_cache::FileCache, db, fs::storage_fs::StorageFs};
 

@@ -7,7 +7,7 @@ use tokio::fs;
 use crate::error::error::AppError;
 use crate::model::ai_book::AiBookMemoryV3;
 use crate::service::ai_book_memory_v3::{
-    create_empty_ai_book_memory_v3, validate_ai_book_memory_v3,
+    create_empty_ai_book_memory_v3, sync_processed_chapter_from_digests, validate_ai_book_memory_v3,
 };
 use crate::util::hash::md5_hex;
 use crate::util::time::now_ts;
@@ -91,13 +91,7 @@ impl AiBookService {
             Ok(value) => value,
             Err(_) => {
                 return self
-                    .reset_v3_internal(
-                        user_ns,
-                        book_url,
-                        book_name,
-                        author,
-                        legacy_path.as_ref(),
-                    )
+                    .reset_v3_internal(user_ns, book_url, book_name, author, legacy_path.as_ref())
                     .await
             }
         };
@@ -111,13 +105,7 @@ impl AiBookService {
             Ok(memory) => memory,
             Err(_) => {
                 return self
-                    .reset_v3_internal(
-                        user_ns,
-                        book_url,
-                        book_name,
-                        author,
-                        legacy_path.as_ref(),
-                    )
+                    .reset_v3_internal(user_ns, book_url, book_name, author, legacy_path.as_ref())
                     .await
             }
         };
@@ -131,7 +119,8 @@ impl AiBookService {
         should_persist |= apply_missing_metadata(&mut memory, book_name.clone(), author.clone());
         if should_persist {
             let saved = self.save_v3(user_ns, book_url, memory).await?;
-            self.remove_legacy_file_if_exists(legacy_path.as_ref()).await?;
+            self.remove_legacy_file_if_exists(legacy_path.as_ref())
+                .await?;
             return Ok(saved);
         }
 
@@ -312,6 +301,7 @@ impl AiBookService {
         }
         memory.book_name = normalize_optional_string(memory.book_name.take());
         memory.author = normalize_optional_string(memory.author.take());
+        sync_processed_chapter_from_digests(memory);
         Ok(())
     }
 }
@@ -369,13 +359,12 @@ mod tests {
         book_url: &str,
     ) -> serde_json::Value {
         let key = md5_hex(book_url);
-        let row =
-            sqlx::query("SELECT json FROM ai_book_memories WHERE user_ns=?1 AND book_key=?2")
-                .bind(user_ns)
-                .bind(&key)
-                .fetch_one(&service.pool)
-                .await
-                .unwrap();
+        let row = sqlx::query("SELECT json FROM ai_book_memories WHERE user_ns=?1 AND book_key=?2")
+            .bind(user_ns)
+            .bind(&key)
+            .fetch_one(&service.pool)
+            .await
+            .unwrap();
         let json: String = row.get("json");
         serde_json::from_str(&json).unwrap()
     }
@@ -520,7 +509,8 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            err.to_string().contains("unsupported ai book schema version")
+            err.to_string()
+                .contains("unsupported ai book schema version")
                 || err.to_string().contains("invalid type")
         );
 
@@ -547,7 +537,11 @@ mod tests {
         memory.summary.current = "已保存".to_string();
 
         let saved = service
-            .save_value_as_v3(user_ns, book_url, serde_json::to_value(memory.clone()).unwrap())
+            .save_value_as_v3(
+                user_ns,
+                book_url,
+                serde_json::to_value(memory.clone()).unwrap(),
+            )
             .await
             .unwrap();
         let saved_memory: AiBookMemoryV3 = serde_json::from_value(saved).unwrap();
@@ -561,7 +555,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("unsupported ai book schema version")
+            err.to_string()
+                .contains("unsupported ai book schema version")
                 || err.to_string().contains("invalid type")
         );
 
@@ -624,12 +619,17 @@ mod tests {
             Some("作者".to_string()),
         );
         memory.summary.current = "已有摘要".to_string();
-        memory.characters.push(crate::model::ai_book::AiBookCharacterV3 {
-            name: "张羽".to_string(),
-            ..Default::default()
-        });
+        memory
+            .characters
+            .push(crate::model::ai_book::AiBookCharacterV3 {
+                name: "张羽".to_string(),
+                ..Default::default()
+            });
 
-        service.save_v3(user_ns, "book://toggle", memory).await.unwrap();
+        service
+            .save_v3(user_ns, "book://toggle", memory)
+            .await
+            .unwrap();
 
         let enabled = service
             .set_enabled(user_ns, "book://toggle", true)

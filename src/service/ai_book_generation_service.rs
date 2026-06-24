@@ -2,23 +2,26 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use reqwest::Client;
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 use crate::error::error::AppError;
 use crate::model::ai_book::{AiBookChapterMemoryViewResponse, AiBookMemoryV3};
-use crate::model::ai_model::{AiModelKind, ResolvedAiModelEndpoint};
 use crate::model::ai_book_generation::{
     AiBookChapterDigestCandidateV3, AiBookCombinedChapterGenerationV3, AiBookKnowledgePatchV3,
 };
-use crate::model::ai_proxy::{ai_proxy_timeout, build_ai_proxy_url, format_ai_proxy_upstream_error};
+use crate::model::ai_model::{AiModelKind, ResolvedAiModelEndpoint};
+use crate::model::ai_proxy::{
+    ai_proxy_timeout, build_ai_proxy_url, format_ai_proxy_upstream_error,
+};
 use crate::model::book::Book;
 use crate::service::ai_book_memory_v3::{
     merge_ai_book_memory_v3, normalize_knowledge_patch_v3, select_ai_book_chapter_view_v3,
-    select_ai_book_display_memory_v3, select_working_context_v3, AiBookWorkingContextV3,
+    select_ai_book_display_memory_v3, select_working_context_v3,
+    sync_processed_chapter_from_digests, AiBookWorkingContextV3,
 };
-use crate::service::ai_model_service::AiModelService;
 use crate::service::ai_book_service::AiBookService;
+use crate::service::ai_model_service::AiModelService;
 use crate::service::book_service::BookService;
 use crate::service::book_source_service::BookSourceService;
 use crate::service::local_txt_book::{is_local_txt_origin, LocalTxtBookService};
@@ -26,7 +29,7 @@ use crate::util::text::{normalize_source_url, repair_encoded_url};
 
 const DEFAULT_PROMPT: &str = r#"你是小说 AI资料生成 agent。只允许基于当前已读章节和本次章节正文更新资料，不预测未读内容，不剧透目标章节之后内容。
 输入会给你 currentMemory、chapter 和 generationMode。不要输出 Markdown，不要输出解释，只输出严格 JSON 对象。
-输出格式固定为 {"chapterDigest": {...}, "patch": {...}}。
+整章生成输出格式固定为 {"chapterDigest": {...}, "patch": {...}}；若用户要求只输出 chapterDigest 或 patch，则只输出对应裸 JSON 对象，不要再包外层字段。
 chapterDigest 必须包含 chapterIndex、chapterTitle、summary、keyPoints、hasImportantChanges。
 patch 必须只包含本章新增或更新的字段，结构使用 V3：summary、characters、characterStates、characterRelations、knowledgeFacts、locations、locationEdges。
 若没有可更新字段，patch 仍返回合法对象并保留 chapterIndex；不要回传未变化的大数组。"#;
@@ -124,7 +127,9 @@ impl AiBookGenerationService {
         let key = guard_key(user_ns, book_url);
         let mut guards = self.write_guards.lock().unwrap();
         if !guards.insert(key.clone()) {
-            return Err(AppError::BadRequest(format!("当前书籍正在生成中: {book_url}")));
+            return Err(AppError::BadRequest(format!(
+                "当前书籍正在生成中: {book_url}"
+            )));
         }
         Ok(AiBookWriteGuard {
             key,
@@ -154,7 +159,12 @@ impl AiBookGenerationService {
             )
             .await?;
         let generation = self
-            .generate_combined_for_current_chapter(&loaded.chapter_text, &memory, &loaded.chapter, mode)
+            .generate_combined_for_current_chapter(
+                &loaded.chapter_text,
+                &memory,
+                &loaded.chapter,
+                mode,
+            )
             .await?;
         apply_generation_result(
             &mut memory,
@@ -162,7 +172,10 @@ impl AiBookGenerationService {
             loaded.chapter_text.as_str(),
             generation,
         )?;
-        let saved = self.ai_book_service.save_v3(user_ns, &book_url, memory).await?;
+        let saved = self
+            .ai_book_service
+            .save_v3(user_ns, &book_url, memory)
+            .await?;
         Ok(project_chapter_response(&saved, chapter_index))
     }
 
@@ -209,18 +222,22 @@ impl AiBookGenerationService {
         let digest = self
             .generate_digest(chapter_text, &digest_context, chapter, mode)
             .await?;
-        let patch_context = select_working_context_v3(memory, Some(&crate::model::ai_book::AiBookChapterDigestV3 {
-            chapter_index: digest.chapter_index,
-            chapter_title: digest.chapter_title.clone(),
-            summary: digest.summary.clone(),
-            key_points: digest.key_points.clone(),
-            characters: Vec::new(),
-            character_states: Vec::new(),
-            character_relations: Vec::new(),
-            knowledge_facts: Vec::new(),
-            locations: Vec::new(),
-            location_edges: Vec::new(),
-        }), chapter_text);
+        let patch_context = select_working_context_v3(
+            memory,
+            Some(&crate::model::ai_book::AiBookChapterDigestV3 {
+                chapter_index: digest.chapter_index,
+                chapter_title: digest.chapter_title.clone(),
+                summary: digest.summary.clone(),
+                key_points: digest.key_points.clone(),
+                characters: Vec::new(),
+                character_states: Vec::new(),
+                character_relations: Vec::new(),
+                knowledge_facts: Vec::new(),
+                locations: Vec::new(),
+                location_edges: Vec::new(),
+            }),
+            chapter_text,
+        );
         let patch = self
             .generate_patch_for_catchup(chapter_text, &patch_context, chapter, &digest, mode)
             .await?;
@@ -239,11 +256,16 @@ impl AiBookGenerationService {
         let chapter = self
             .load_chapter_identity(user_ns, shelf_book, chapter_index)
             .await?;
-        let chapter_text = self.load_chapter_text(user_ns, shelf_book, &chapter).await?;
+        let chapter_text = self
+            .load_chapter_text(user_ns, shelf_book, &chapter)
+            .await?;
         if chapter_text.trim().is_empty() {
             return Err(AppError::BadRequest("章节内容为空".to_string()));
         }
-        Ok(LoadedGenerationContext { chapter, chapter_text })
+        Ok(LoadedGenerationContext {
+            chapter,
+            chapter_text,
+        })
     }
 
     async fn load_chapter_identity(
@@ -342,7 +364,9 @@ fn apply_generation_result(
     generation.chapter_digest.chapter_index = chapter.index;
     generation.chapter_digest.chapter_title = chapter.title.clone();
     if generation.chapter_digest.chapter_title.trim().is_empty() {
-        return Err(AppError::BadRequest("chapter digest title required".to_string()));
+        return Err(AppError::BadRequest(
+            "chapter digest title required".to_string(),
+        ));
     }
     let digest_for_context = crate::model::ai_book::AiBookChapterDigestV3 {
         chapter_index: generation.chapter_digest.chapter_index,
@@ -358,21 +382,29 @@ fn apply_generation_result(
     };
     let mut patch = generation.patch;
     patch.chapter_index = chapter.index;
-    if patch.summary.as_deref().is_none_or(|summary| summary.trim().is_empty()) {
+    if patch
+        .summary
+        .as_deref()
+        .is_none_or(|summary| summary.trim().is_empty())
+    {
         patch.summary = Some(generation.chapter_digest.summary.clone());
     }
-    let working_context = select_working_context_v3(memory, Some(&digest_for_context), chapter_text);
+    let working_context =
+        select_working_context_v3(memory, Some(&digest_for_context), chapter_text);
     let normalized_patch = normalize_knowledge_patch_v3(patch, &working_context);
     let next = merge_ai_book_memory_v3(memory.clone(), normalized_patch);
     *memory = upsert_digest(next, generation.chapter_digest);
-    memory.processed_chapter_title = Some(chapter.title.clone());
+    sync_processed_chapter_from_digests(memory);
     memory.last_error = None;
     memory.last_error_chapter_index = None;
     memory.last_error_chapter_title = None;
     Ok(())
 }
 
-fn upsert_digest(mut memory: AiBookMemoryV3, digest: AiBookChapterDigestCandidateV3) -> AiBookMemoryV3 {
+fn upsert_digest(
+    mut memory: AiBookMemoryV3,
+    digest: AiBookChapterDigestCandidateV3,
+) -> AiBookMemoryV3 {
     let digest_v3 = crate::model::ai_book::AiBookChapterDigestV3 {
         chapter_index: digest.chapter_index,
         chapter_title: digest.chapter_title,
@@ -395,7 +427,9 @@ fn upsert_digest(mut memory: AiBookMemoryV3, digest: AiBookChapterDigestCandidat
     }
     if !replaced {
         memory.chapter_digests.push(digest_v3);
-        memory.chapter_digests.sort_by_key(|item| item.chapter_index);
+        memory
+            .chapter_digests
+            .sort_by_key(|item| item.chapter_index);
     }
     memory
 }
@@ -474,7 +508,8 @@ impl ChapterGenerationModel for DisabledChapterGenerationModel {
         _memory: &'a AiBookMemoryV3,
         _chapter: &'a LoadedChapter,
         _mode: AiBookGenerationMode,
-    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>> {
+    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>>
+    {
         Box::pin(async { Ok(None) })
     }
 
@@ -526,14 +561,13 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
         memory: &'a AiBookMemoryV3,
         chapter: &'a LoadedChapter,
         mode: AiBookGenerationMode,
-    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>> {
+    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>>
+    {
         Box::pin(async move {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt = build_combined_generation_prompt(chapter_text, memory, chapter, mode)?;
             let value = call_generation_model(&endpoint, prompt).await?;
-            let parsed: AiBookCombinedChapterGenerationV3 =
-                serde_json::from_value(value).map_err(|e| AppError::BadRequest(e.to_string()))?;
-            Ok(Some(parsed))
+            Ok(Some(deserialize_generation_value(value)?))
         })
     }
 
@@ -548,7 +582,7 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt = build_digest_generation_prompt(chapter_text, memory, chapter, mode)?;
             let value = call_generation_model(&endpoint, prompt).await?;
-            serde_json::from_value(value).map_err(|e| AppError::BadRequest(e.to_string()))
+            deserialize_digest_generation_value(value)
         })
     }
 
@@ -565,18 +599,192 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
             let prompt =
                 build_patch_generation_prompt(chapter_text, memory, chapter, digest, mode)?;
             let value = call_generation_model(&endpoint, prompt).await?;
-            serde_json::from_value(value).map_err(|e| AppError::BadRequest(e.to_string()))
+            deserialize_patch_generation_value(value)
         })
     }
+}
+
+fn deserialize_generation_value<T: DeserializeOwned>(mut value: Value) -> Result<T, AppError> {
+    coerce_model_strings(&mut value, None);
+    serde_json::from_value(value).map_err(|e| AppError::BadRequest(e.to_string()))
+}
+
+fn deserialize_digest_generation_value(
+    value: Value,
+) -> Result<AiBookChapterDigestCandidateV3, AppError> {
+    let digest: AiBookChapterDigestCandidateV3 =
+        deserialize_generation_value(unwrap_generation_field(value, "chapterDigest"))?;
+    if digest.summary.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "chapter digest summary required".to_string(),
+        ));
+    }
+    Ok(digest)
+}
+
+fn deserialize_patch_generation_value(
+    mut value: Value,
+) -> Result<AiBookKnowledgePatchV3, AppError> {
+    value = unwrap_generation_field(value, "patch");
+    coerce_patch_array_items(&mut value);
+    deserialize_generation_value(value)
+}
+
+fn unwrap_generation_field(value: Value, field: &str) -> Value {
+    match value {
+        Value::Object(mut object) if object.contains_key(field) => object.remove(field).unwrap(),
+        value => value,
+    }
+}
+
+fn coerce_patch_array_items(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    coerce_string_items(
+        object,
+        "characters",
+        |text| serde_json::json!({ "name": text }),
+    );
+    coerce_string_items(object, "knowledgeFacts", |text| {
+        serde_json::json!({
+            "title": short_fact_title(text),
+            "content": text,
+            "category": "其他",
+            "confidence": "medium",
+            "importance": "medium"
+        })
+    });
+    coerce_string_items(
+        object,
+        "locations",
+        |text| serde_json::json!({ "name": text, "description": text }),
+    );
+    drop_string_items(object, "characterStates");
+    drop_string_items(object, "characterRelations");
+    drop_string_items(object, "locationEdges");
+}
+
+fn coerce_string_items(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+    build: impl Fn(&str) -> Value,
+) {
+    let Some(Value::Array(items)) = object.get_mut(field) else {
+        return;
+    };
+    for item in items {
+        if let Some(text) = item.as_str().map(str::trim).filter(|text| !text.is_empty()) {
+            *item = build(text);
+        }
+    }
+}
+
+fn drop_string_items(object: &mut serde_json::Map<String, Value>, field: &str) {
+    let Some(Value::Array(items)) = object.get_mut(field) else {
+        return;
+    };
+    items.retain(|item| !item.is_string());
+}
+
+fn short_fact_title(text: &str) -> String {
+    text.chars().take(18).collect()
+}
+
+fn coerce_model_strings(value: &mut Value, field: Option<&str>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                coerce_model_strings(item, field);
+            }
+        }
+        Value::Object(object) => {
+            if field.is_some_and(is_model_string_field) {
+                if let Some(text) = string_from_model_object(value) {
+                    *value = Value::String(text);
+                }
+                return;
+            }
+
+            for (key, child) in object.iter_mut() {
+                coerce_model_strings(child, Some(key));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_model_string_field(field: &str) -> bool {
+    matches!(
+        field,
+        "chapterTitle"
+            | "summary"
+            | "keyPoints"
+            | "name"
+            | "aliases"
+            | "status"
+            | "faction"
+            | "location"
+            | "description"
+            | "lastSeenChapter"
+            | "lastSeenChapterTitle"
+            | "source"
+            | "target"
+            | "kind"
+            | "polarity"
+            | "strength"
+            | "title"
+            | "content"
+            | "category"
+            | "confidence"
+            | "importance"
+            | "firstSeenChapter"
+            | "relatedCharacters"
+    )
+}
+
+fn string_from_model_object(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    for key in [
+        "value",
+        "text",
+        "name",
+        "label",
+        "title",
+        "current",
+        "summary",
+        "content",
+        "status",
+        "description",
+        "kind",
+        "type",
+        "display",
+    ] {
+        if let Some(text) = object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text.to_string());
+        }
+    }
+    object
+        .values()
+        .find_map(|item| {
+            item.as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| Some(value.to_string()))
 }
 
 async fn resolve_text_endpoint(
     ai_model_service: &AiModelService,
 ) -> Result<ResolvedAiModelEndpoint, AppError> {
     let endpoint = ai_model_service.get().await?.resolve(AiModelKind::Text);
-    if !endpoint.enabled
-        || endpoint.base_url.trim().is_empty()
-        || endpoint.model.trim().is_empty()
+    if !endpoint.enabled || endpoint.base_url.trim().is_empty() || endpoint.model.trim().is_empty()
     {
         return Err(AppError::BadRequest(
             "后端文本模型未启用或配置不完整".to_string(),
@@ -596,8 +804,8 @@ async fn call_generation_model(
     };
     let target = build_ai_proxy_url(&endpoint.base_url, path, endpoint.use_full_url)
         .map_err(AppError::BadRequest)?;
-    let use_gemini_api_key_header =
-        is_gemini_generate_content_path(path) && target.host_str() == Some("generativelanguage.googleapis.com");
+    let use_gemini_api_key_header = is_gemini_generate_content_path(path)
+        && target.host_str() == Some("generativelanguage.googleapis.com");
     let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
     let body = build_model_body(path, &endpoint.model, prompt);
     let mut builder = client
@@ -686,7 +894,11 @@ fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> 
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|candidate| candidate.pointer("/content/parts").and_then(Value::as_array))
+            .filter_map(|candidate| {
+                candidate
+                    .pointer("/content/parts")
+                    .and_then(Value::as_array)
+            })
             .flatten()
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .map(str::trim)
@@ -784,7 +996,7 @@ fn build_digest_generation_prompt(
     mode: AiBookGenerationMode,
 ) -> Result<String, AppError> {
     Ok(format!(
-        "generationMode: {}\n只输出 chapterDigest JSON。\nchapter: {}\ncurrentMemory: {}\nchapterText:\n{}",
+        "generationMode: {}\n只输出裸 chapterDigest JSON，根字段必须是 chapterIndex、chapterTitle、summary、keyPoints、hasImportantChanges，不要包 chapterDigest/patch 外层。\nchapter: {}\ncurrentMemory: {}\nchapterText:\n{}",
         generation_mode_label(mode),
         serde_json::to_string_pretty(chapter).map_err(|e| AppError::BadRequest(e.to_string()))?,
         serde_json::to_string_pretty(memory).map_err(|e| AppError::BadRequest(e.to_string()))?,
@@ -800,7 +1012,7 @@ fn build_patch_generation_prompt(
     mode: AiBookGenerationMode,
 ) -> Result<String, AppError> {
     Ok(format!(
-        "generationMode: {}\n只输出 patch JSON。\nchapter: {}\nchapterDigest: {}\ncurrentMemory: {}\nchapterText:\n{}",
+        "generationMode: {}\n只输出裸 patch JSON，不要包 patch/chapterDigest 外层。\n根字段固定为 chapterIndex、summary、characters、characterStates、characterRelations、knowledgeFacts、locations、locationEdges。\n所有数组元素必须是对象，严禁字符串数组；字段缺失用空数组，不要用 null。\ncharacters 每项：{{\"name\":\"人物名\",\"aliases\":[],\"status\":\"状态或null\",\"faction\":\"所属或null\",\"location\":\"地点或null\",\"description\":\"身份说明或null\",\"lastSeenChapter\":\"章节标题或null\"}}\ncharacterStates 每项：{{\"name\":\"人物名\",\"status\":\"简短状态\",\"description\":\"本章证据细节\",\"lastSeenChapterIndex\":数字,\"lastSeenChapterTitle\":\"章节标题\"}}\ncharacterRelations 每项：{{\"source\":\"主动方\",\"target\":\"承受方\",\"kind\":\"亲属|师生|同学|朋友|借贷|压迫|冲突|帮助|竞争|同伴|敌对|上下级|交易|其他\",\"polarity\":\"positive|negative|neutral|mixed\",\"strength\":\"weak|moderate|strong|critical\",\"status\":\"active|developing|distant|broken\",\"description\":\"本章证据\"}}\nknowledgeFacts 每项：{{\"title\":\"事实标题\",\"content\":\"事实内容\",\"category\":\"世界观|制度|修炼|科技|经济|组织|历史|规则|其他\",\"confidence\":\"low|medium|high\",\"importance\":\"low|medium|high\"}}，严禁直接写字符串。\nlocations 每项：{{\"name\":\"地点名\",\"kind\":\"中文地点类型\",\"description\":\"地点说明\",\"status\":\"当前状态或null\",\"relatedCharacters\":[],\"firstSeenChapter\":\"章节标题\"}}\nlocationEdges 每项：{{\"source\":\"上级/起点地点\",\"target\":\"下级/终点地点\",\"kind\":\"contains|partOf|adjacent|leadsTo|near\",\"description\":\"本章证据\"}}\n通用约束：只基于本章证据更新；不要回传未变化的大数组；能直接归纳的信息必须结构化，不要写 Markdown/解释。\n人物：本章重要人物写 characters；若人物有身份、处境、身体、能力、成绩、排名、债务、心理、立场、目标、压力变化，必须同时写 characterStates，不能只写 characters.status。\n关系：本章有亲属、师生、同学、朋友、借贷、压迫、冲突、帮助、竞争、同伴、敌对、上下级、交易等明确文本证据时，必须写 characterRelations；不要只因同章出现而写关系。\n地点：本章重要地点写 locations；kind 必须是中文稳定类型，不能空、unknown 或英文。建议类型：区域、学校、宗门、机构、建筑、房间、设施、道路、室外地点、层级、入口、其他地点。名称含第一层/第二层/内层/外层/上层/下层/楼层用 层级；含学校/高中/学院/大学用 学校；含教室/食堂/宿舍/公寓/出租房/练功场/办公室用 设施；实在只能确定是地点用 其他地点。\n地点关系：能判断包含、层级、相邻、通往关系时必须写 locationEdges；例如“某地第一层”属于“某地”、“学校食堂”属于“学校”。\n输出前自检：重要人物是否都有 characters；明确状态是否有 characterStates；明确互动关系是否有 characterRelations；所有地点 kind 是否非空非 unknown 非英文；明显地点层级是否有 locationEdges；所有数组元素是否都是对象。\nchapter: {}\nchapterDigest: {}\ncurrentMemory: {}\nchapterText:\n{}",
         generation_mode_label(mode),
         serde_json::to_string_pretty(chapter).map_err(|e| AppError::BadRequest(e.to_string()))?,
         serde_json::to_string_pretty(digest).map_err(|e| AppError::BadRequest(e.to_string()))?,
@@ -833,7 +1045,21 @@ pub fn parse_model_json_value(text: &str) -> Result<Value, AppError> {
                 .ok_or(())
                 .and_then(|json| serde_json::from_str::<Value>(json).map_err(|_| ()))
         })
-        .map_err(|_| AppError::BadRequest("AI资料生成返回 JSON 格式不正确".to_string()))
+        .map_err(|_| {
+            AppError::BadRequest(format!(
+                "AI资料生成返回 JSON 格式不正确；模型输出预览: {}",
+                preview_model_output(json_text)
+            ))
+        })
+}
+
+fn preview_model_output(text: &str) -> String {
+    text.chars()
+        .take(240)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn extract_first_json_object(text: &str) -> Option<&str> {
@@ -933,8 +1159,162 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ai_book_generation_accepts_single_key_string_objects_from_model() {
+        let value = serde_json::json!({
+            "chapterDigest": {
+                "chapterIndex": 0,
+                "chapterTitle": { "value": "第一章", "reason": "模型包了一层对象" },
+                "summary": { "current": "主角醒来。", "reason": "模型包了一层对象" },
+                "keyPoints": [{ "value": "醒来", "reason": "模型包了一层对象" }],
+                "hasImportantChanges": true
+            },
+            "patch": {
+                "chapterIndex": 0,
+                "summary": { "current": "主角醒来。", "reason": "模型包了一层对象" },
+                "characters": [{
+                    "name": { "display": "林舟", "id": "char-linzhou" },
+                    "aliases": [{ "name": "小舟", "type": "nickname" }],
+                    "status": { "value": "醒来", "reason": "本章事件" },
+                    "description": { "value": "刚恢复意识", "source": "chapter" }
+                }],
+                "characterStates": [],
+                "characterRelations": [],
+                "knowledgeFacts": [],
+                "locations": [{
+                    "name": "荒屋",
+                    "description": "林舟醒来的地方",
+                    "relatedCharacters": [{ "name": "林舟", "role": "醒来者" }]
+                }],
+                "locationEdges": []
+            }
+        });
+
+        let parsed: AiBookCombinedChapterGenerationV3 =
+            deserialize_generation_value(value).unwrap();
+
+        assert_eq!(parsed.chapter_digest.chapter_title, "第一章");
+        assert_eq!(parsed.chapter_digest.key_points, vec!["醒来"]);
+        assert_eq!(parsed.patch.summary.as_deref(), Some("主角醒来。"));
+        assert_eq!(parsed.patch.characters[0].name, "林舟");
+        assert_eq!(parsed.patch.characters[0].aliases, vec!["小舟"]);
+        assert_eq!(parsed.patch.locations[0].related_characters, vec!["林舟"]);
+    }
+
+    #[test]
+    fn ai_book_generation_unwraps_digest_and_patch_only_model_outputs() {
+        let digest: AiBookChapterDigestCandidateV3 =
+            deserialize_digest_generation_value(serde_json::json!({
+                "chapterDigest": {
+                    "chapterIndex": 1,
+                    "chapterTitle": "第2章 学校",
+                    "summary": "林舟来到学校。",
+                    "keyPoints": ["来到学校"],
+                    "hasImportantChanges": true
+                }
+            }))
+            .unwrap();
+        assert_eq!(digest.chapter_index, 1);
+        assert_eq!(digest.summary, "林舟来到学校。");
+
+        let patch: AiBookKnowledgePatchV3 = deserialize_patch_generation_value(serde_json::json!({
+            "patch": {
+                "chapterIndex": 1,
+                "summary": "学校线展开。",
+                "knowledgeFacts": [{
+                    "title": "学校线",
+                    "content": "林舟来到学校。",
+                    "category": "plot",
+                    "confidence": "high",
+                    "importance": "medium"
+                }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(patch.chapter_index, 1);
+        assert_eq!(patch.summary.as_deref(), Some("学校线展开。"));
+        assert_eq!(patch.knowledge_facts[0].title, "学校线");
+    }
+
+    #[test]
+    fn ai_book_generation_rejects_empty_digest_from_wrong_shape() {
+        let err = deserialize_digest_generation_value(serde_json::json!({
+            "chapterDigest": {}
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("chapter digest summary required"));
+    }
+
+    #[test]
+    fn ai_book_generation_tolerates_string_items_in_patch_arrays() {
+        let patch = deserialize_patch_generation_value(serde_json::json!({
+            "patch": {
+                "chapterIndex": 5,
+                "characters": ["张羽"],
+                "characterStates": ["缺少人物名的状态应丢弃"],
+                "characterRelations": ["张羽和王海冲突"],
+                "knowledgeFacts": ["仪式力量类似人工智能，无真正智慧，按规则运行，监控与努力相关的念头"],
+                "locations": ["昆墟第一层"],
+                "locationEdges": ["昆墟包含第一层"]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(patch.characters[0].name, "张羽");
+        assert!(patch.character_states.is_empty());
+        assert!(patch.character_relations.is_empty());
+        assert_eq!(
+            patch.knowledge_facts[0].content,
+            "仪式力量类似人工智能，无真正智慧，按规则运行，监控与努力相关的念头"
+        );
+        assert_eq!(patch.locations[0].name, "昆墟第一层");
+        assert!(patch.location_edges.is_empty());
+    }
+
+    #[test]
+    fn ai_book_generation_json_parse_error_includes_preview() {
+        let err = parse_model_json_value("这不是 JSON，而是模型解释文字。后面还有很多内容。")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("AI资料生成返回 JSON 格式不正确"));
+        assert!(err.contains("模型解释文字"));
+    }
+
+    #[test]
+    fn manual_generation_out_of_order_does_not_advance_catchup_marker() {
+        let mut memory = AiBookMemoryV3::default();
+        let chapter = LoadedChapter {
+            index: 6,
+            title: "第七章".to_string(),
+            chapter_url: "c7".to_string(),
+        };
+        let generation = AiBookCombinedChapterGenerationV3 {
+            chapter_digest: AiBookChapterDigestCandidateV3 {
+                chapter_index: 6,
+                chapter_title: "第七章".to_string(),
+                summary: "先手动生成第七章".to_string(),
+                key_points: Vec::new(),
+                has_important_changes: false,
+            },
+            patch: AiBookKnowledgePatchV3 {
+                chapter_index: 6,
+                summary: Some("先手动生成第七章".to_string()),
+                ..Default::default()
+            },
+        };
+
+        apply_generation_result(&mut memory, &chapter, "正文", generation).unwrap();
+
+        assert_eq!(memory.chapter_digests.len(), 1);
+        assert_eq!(memory.chapter_digests[0].chapter_index, 6);
+        assert_eq!(memory.processed_chapter_index, None);
+    }
+
     async fn create_services() -> (AiBookGenerationService, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("reader-ai-book-generation-{}", random_string(8)));
+        let dir =
+            std::env::temp_dir().join(format!("reader-ai-book-generation-{}", random_string(8)));
         std::fs::create_dir_all(&dir).unwrap();
         let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
         let pool = db::init_pool(&database_url).await.unwrap();
@@ -1030,7 +1410,10 @@ mod tests {
             .generate_current_chapter("reader-a", &book, 0, AiBookGenerationMode::Manual)
             .await
             .unwrap();
-        assert_eq!(response.chapter.chapter_title.as_deref(), Some("第一章 开场"));
+        assert_eq!(
+            response.chapter.chapter_title.as_deref(),
+            Some("第一章 开场")
+        );
         assert_eq!(response.memory.summary.current, "甲用户章节摘要");
 
         let result = service
@@ -1053,12 +1436,20 @@ mod tests {
     fn ai_book_v3_per_book_write_guard_rejects_concurrent_generation() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (service, dir) = runtime.block_on(create_services());
-        let guard = service.acquire_write_guard("reader-a", "book://same").unwrap();
-        let err = service.acquire_write_guard("reader-a", "book://same").unwrap_err();
+        let guard = service
+            .acquire_write_guard("reader-a", "book://same")
+            .unwrap();
+        let err = service
+            .acquire_write_guard("reader-a", "book://same")
+            .unwrap_err();
         assert!(err.to_string().contains("正在生成中"));
         drop(guard);
-        assert!(service.acquire_write_guard("reader-a", "book://same").is_ok());
-        runtime.block_on(async { let _ = fs::remove_dir_all(dir).await; });
+        assert!(service
+            .acquire_write_guard("reader-a", "book://same")
+            .is_ok());
+        runtime.block_on(async {
+            let _ = fs::remove_dir_all(dir).await;
+        });
     }
 
     #[tokio::test]
@@ -1076,13 +1467,15 @@ mod tests {
                 patch: AiBookKnowledgePatchV3 {
                     chapter_index: 77,
                     summary: Some("错误索引也要落到当前章".to_string()),
-                    knowledge_facts: vec![crate::model::ai_book_generation::AiBookKnowledgeFactPatchV3 {
-                        title: "当前章事实".to_string(),
-                        content: "必须写到第0章".to_string(),
-                        category: "geography".to_string(),
-                        confidence: "high".to_string(),
-                        importance: "high".to_string(),
-                    }],
+                    knowledge_facts: vec![
+                        crate::model::ai_book_generation::AiBookKnowledgeFactPatchV3 {
+                            title: "当前章事实".to_string(),
+                            content: "必须写到第0章".to_string(),
+                            category: "geography".to_string(),
+                            confidence: "high".to_string(),
+                            importance: "high".to_string(),
+                        },
+                    ],
                     ..Default::default()
                 },
             },
@@ -1103,9 +1496,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.chapter.chapter_index, 0);
-        assert_eq!(response.chapter.chapter_title.as_deref(), Some("第一章 开场"));
-        assert_eq!(response.chapter.digest.as_ref().map(|d| d.chapter_index), Some(0));
-        assert_eq!(response.chapter.digest.as_ref().map(|d| d.chapter_title.as_str()), Some("第一章 开场"));
+        assert_eq!(
+            response.chapter.chapter_title.as_deref(),
+            Some("第一章 开场")
+        );
+        assert_eq!(
+            response.chapter.digest.as_ref().map(|d| d.chapter_index),
+            Some(0)
+        );
+        assert_eq!(
+            response
+                .chapter
+                .digest
+                .as_ref()
+                .map(|d| d.chapter_title.as_str()),
+            Some("第一章 开场")
+        );
 
         let saved = service
             .ai_book_service
@@ -1113,11 +1519,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saved.processed_chapter_index, Some(0));
-        assert_eq!(saved.processed_chapter_title.as_deref(), Some("第一章 开场"));
+        assert_eq!(
+            saved.processed_chapter_title.as_deref(),
+            Some("第一章 开场")
+        );
         assert_eq!(saved.chapter_digests.len(), 1);
         assert_eq!(saved.chapter_digests[0].chapter_index, 0);
         assert_eq!(saved.chapter_digests[0].chapter_title, "第一章 开场");
-        assert!(saved.knowledge_facts.iter().any(|fact| fact.title == "当前章事实"));
+        assert!(saved
+            .knowledge_facts
+            .iter()
+            .any(|fact| fact.title == "当前章事实"));
 
         let _ = fs::remove_dir_all(dir).await;
     }
@@ -1137,13 +1549,15 @@ mod tests {
                 patch: AiBookKnowledgePatchV3 {
                     chapter_index: 0,
                     summary: Some("局势变化".to_string()),
-                    knowledge_facts: vec![crate::model::ai_book_generation::AiBookKnowledgeFactPatchV3 {
-                        title: "城门已封锁".to_string(),
-                        content: "全城戒严".to_string(),
-                        category: "geography".to_string(),
-                        confidence: "high".to_string(),
-                        importance: "high".to_string(),
-                    }],
+                    knowledge_facts: vec![
+                        crate::model::ai_book_generation::AiBookKnowledgeFactPatchV3 {
+                            title: "城门已封锁".to_string(),
+                            content: "全城戒严".to_string(),
+                            category: "geography".to_string(),
+                            confidence: "high".to_string(),
+                            importance: "high".to_string(),
+                        },
+                    ],
                     characters: vec![crate::model::ai_book_generation::AiBookCharacterPatchV3 {
                         name: "张羽".to_string(),
                         aliases: vec![],
@@ -1173,9 +1587,19 @@ mod tests {
 
         assert_eq!(response.memory.summary.current, "局势变化");
         assert_eq!(response.chapter.generation_status, "cached");
-        assert_eq!(response.chapter.digest.as_ref().map(|d| d.summary.as_str()), Some("局势变化"));
-        assert_eq!(response.chapter.chapter_title.as_deref(), Some("第一章 开场"));
-        assert!(response.memory.knowledge_facts.iter().any(|fact| fact.title == "城门已封锁"));
+        assert_eq!(
+            response.chapter.digest.as_ref().map(|d| d.summary.as_str()),
+            Some("局势变化")
+        );
+        assert_eq!(
+            response.chapter.chapter_title.as_deref(),
+            Some("第一章 开场")
+        );
+        assert!(response
+            .memory
+            .knowledge_facts
+            .iter()
+            .any(|fact| fact.title == "城门已封锁"));
 
         let saved = service
             .ai_book_service
@@ -1183,11 +1607,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saved.processed_chapter_index, Some(0));
-        assert_eq!(saved.processed_chapter_title.as_deref(), Some("第一章 开场"));
+        assert_eq!(
+            saved.processed_chapter_title.as_deref(),
+            Some("第一章 开场")
+        );
         assert_eq!(saved.chapter_digests.len(), 1);
         assert_eq!(saved.chapter_digests[0].summary, "局势变化");
-        assert!(saved.characters.iter().any(|character| character.name == "张羽"));
-        assert!(saved.knowledge_facts.iter().any(|fact| fact.title == "城门已封锁"));
+        assert!(saved
+            .characters
+            .iter()
+            .any(|character| character.name == "张羽"));
+        assert!(saved
+            .knowledge_facts
+            .iter()
+            .any(|fact| fact.title == "城门已封锁"));
 
         let _ = fs::remove_dir_all(dir).await;
     }
