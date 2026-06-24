@@ -46,8 +46,10 @@ export function buildSummaryRelationshipGraph(input: {
   }
 
   const characterById = new Map(memory.characters.map((item) => [item.id, item]))
-  const protagonistId = findProtagonistId(memory, input.currentChapterIndex)
+  const protagonistId = findProtagonistId(memory, input.currentChapterIndex, characterById)
   if (!protagonistId) return empty('人物关系不足，继续阅读后会补全。')
+  const protagonist = characterById.get(protagonistId)
+  if (!protagonist) return empty('人物关系不足，继续阅读后会补全。')
 
   const grouped = new Map<string, AiBookRelationView[]>()
   for (const relation of memory.relationships) {
@@ -67,7 +69,6 @@ export function buildSummaryRelationshipGraph(input: {
 
   if (related.length === 0) return empty('人物关系不足，继续阅读后会补全。')
 
-  const protagonist = characterById.get(protagonistId)!
   const center: SummaryRelationshipGraphNode = {
     id: protagonist.id,
     name: protagonist.name,
@@ -128,14 +129,22 @@ function empty(emptyReason: string): SummaryRelationshipGraphView {
   return { protagonist: null, nodes: [], links: [], rows: [], emptyReason }
 }
 
-function findProtagonistId(memory: AiBookMemoryViewModel, currentChapterIndex: number) {
+function findProtagonistId(
+  memory: AiBookMemoryViewModel,
+  currentChapterIndex: number,
+  characterById: Map<string, AiBookMemoryViewModel['characters'][number]>,
+) {
   const scores = new Map<string, number>()
   for (const character of memory.characters) {
     scores.set(character.id, (character.importance === 'high' ? 4 : 0) + recencyScore(character.lastSeenChapterIndex, currentChapterIndex))
   }
   for (const relation of memory.relationships) {
-    scores.set(relation.sourceCharacterId, (scores.get(relation.sourceCharacterId) || 0) + 10)
-    scores.set(relation.targetCharacterId, (scores.get(relation.targetCharacterId) || 0) + 10)
+    if (characterById.has(relation.sourceCharacterId)) {
+      scores.set(relation.sourceCharacterId, (scores.get(relation.sourceCharacterId) || 0) + 10)
+    }
+    if (characterById.has(relation.targetCharacterId)) {
+      scores.set(relation.targetCharacterId, (scores.get(relation.targetCharacterId) || 0) + 10)
+    }
   }
   return [...scores.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || ''
 }

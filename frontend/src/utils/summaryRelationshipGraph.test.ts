@@ -48,6 +48,46 @@ describe('buildSummaryRelationshipGraph', () => {
     expect(graph.links.find((link) => link.targetId === 'mother')?.tone).toBe('family')
   })
 
+  it('applies the limit to related nodes and links', () => {
+    const graph = buildSummaryRelationshipGraph({ memory, currentChapterIndex: 10, limit: 2 })
+
+    expect(graph.links).toHaveLength(2)
+    expect(graph.nodes).toHaveLength(3)
+    expect(graph.nodes.map((node) => node.id)).not.toContain('mother')
+  })
+
+  it('ignores unknown relationship endpoints when choosing protagonist', () => {
+    const graph = buildSummaryRelationshipGraph({
+      memory: {
+        ...memory,
+        relationships: [
+          ...memory.relationships,
+          {
+            id: 'r6',
+            sourceCharacterId: 'ghost',
+            targetCharacterId: 'hero',
+            kind: 'conflict',
+            label: '幽灵关系',
+            polarity: 'negative',
+            strength: 'critical',
+            status: 'active',
+            direction: 'grouped',
+            summary: '不在角色列表',
+            currentDynamics: [],
+            facets: [],
+            lastUpdatedChapterIndex: 10,
+            evidence: [],
+            history: [],
+          },
+        ],
+      },
+      currentChapterIndex: 10,
+    })
+
+    expect(graph.protagonist?.id).toBe('hero')
+    expect(graph.links.map((link) => link.targetId)).not.toContain('ghost')
+  })
+
   it('returns an empty reason when memory has no usable relationships', () => {
     const graph = buildSummaryRelationshipGraph({
       memory: { ...memory, relationships: [] },
