@@ -11,12 +11,6 @@ export interface ChapterSummaryContextRow {
   importance: 'high' | 'medium' | 'low'
 }
 
-export interface ChapterSummaryFocusCard {
-  key: 'protagonist' | 'relations' | 'changes'
-  title: string
-  rows: string[]
-}
-
 export interface ChapterSummaryContextSection {
   key: 'characters' | 'relationships' | 'clues' | 'facts' | 'locations'
   title: string
@@ -122,32 +116,6 @@ export function buildChapterSummaryContext(input: {
     })),
   ]))
 
-  const protagonist = characterRows.find((row) => row.importance === 'high') || characterRows[0]
-  const protagonistRelations = protagonist ? relationRows.filter((row) => row.title.includes(protagonist.title)) : relationRows
-  const changeRows = [
-    ...(digest?.keyPoints || []),
-    ...(memory?.summary.recentChanges || []),
-    ...(memory?.summary.openQuestions || []).map((item) => `伏笔：${item}`),
-  ].slice(0, 4)
-
-  const focusCards: ChapterSummaryFocusCard[] = [
-    protagonist && {
-      key: 'protagonist' as const,
-      title: `${protagonist.title}现在怎样`,
-      rows: [protagonist.detail, protagonist.meta].filter(Boolean),
-    },
-    protagonistRelations.length && {
-      key: 'relations' as const,
-      title: protagonist ? `${protagonist.title}关系局势` : '关系局势',
-      rows: protagonistRelations.slice(0, 5).map((row) => relationshipLine(row, protagonist?.title)),
-    },
-    changeRows.length && {
-      key: 'changes' as const,
-      title: '本章变化与伏笔',
-      rows: changeRows,
-    },
-  ].filter(Boolean) as ChapterSummaryFocusCard[]
-
   const moreSections: ChapterSummaryContextSection[] = [
     { key: 'characters', title: '人物', rows: characterRows },
     { key: 'relationships', title: '关系', rows: relationRows },
@@ -162,15 +130,9 @@ export function buildChapterSummaryContext(input: {
     .flatMap((rows) => rows)
     .slice(0, limit)
 
-  return { focusRows, focusCards, moreSections }
+  return { focusRows, moreSections }
 }
 
-
-function relationshipLine(row: ChapterSummaryContextRow, protagonist?: string) {
-  if (!protagonist) return `${row.title}：${row.detail}`
-  const other = row.title.split(' · ').filter((name) => name !== protagonist).join('、') || row.title
-  return `${row.meta}：${other}（${row.detail}）`
-}
 
 function kindLabel(kind: ChapterSummaryContextKind) {
   return {
