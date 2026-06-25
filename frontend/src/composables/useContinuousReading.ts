@@ -88,10 +88,13 @@ export function useContinuousReading(
     if (!current) return
 
     continuousChapters.value = [current]
-    setContinuousActiveChapter(targetIndex, current.content, 0)
+    const initialProgress = targetIndex === store.currentIndex ? store.chapterScrollProgress : 0
+    setContinuousActiveChapter(targetIndex, current.content, initialProgress)
 
     await nextTick()
-    scrollToContinuousChapter(targetIndex, smooth)
+    if (initialProgress <= 0) {
+      scrollToContinuousChapter(targetIndex, smooth)
+    }
 
     const nextIndex = hideReadChaptersMode.value
       ? findNextVisibleIndex(targetIndex + 1, targetIndex)

@@ -45,10 +45,11 @@ Explicit decisions:
 - Backend owns generation, normalization, merge, lifecycle, validation, persistence, and view-model projection.
 - Frontend only triggers actions and renders backend view models.
 
-Safety decision:
+Cutover decision:
 
-- Before overwriting a non-V3 AI Book memory row, backend writes the old JSON to a best-effort backup under `storage/backups/ai-book-v3-reset/<user_ns>/<book_key>-<timestamp>.json`.
-- Backup is not runtime compatibility and is not loaded by the app; it only provides manual recovery if needed.
+- The local database and current book library are intentionally cleared for this rewrite.
+- Do not build V1/V2 backup, migration, adapter, or recovery paths.
+- If a non-V3 AI Book row is encountered after cutover, treat it as invalid generated cache and reset/delete it without preserving runtime data.
 
 ---
 
@@ -58,11 +59,11 @@ Safety decision:
 2. Character status, abilities, affiliations, locations, and world settings are not stored as relationships.
 3. Frontend AI Book code becomes API/view-model presentation code only.
 4. Raw JSON memory save APIs are removed from the default route set.
-5. Model output is patch-only.
+5. Model output never returns full memory; semantic changes are patch-only.
 6. Invalid model candidates cannot persist as relationship cards.
 7. Catch-up cost does not grow with full memory size.
 8. Catch-up exposes observability: call counts, skipped patch count, latency, input/output sizes, and current stage.
-9. Existing V1/V2 rows reset to empty V3 after one-time backup.
+9. Fresh or reset local data starts directly as V3.
 
 ## 3. Non-goals
 
@@ -71,7 +72,8 @@ Safety decision:
 - No compatibility adapter for old AI Book memory.
 - No browser-side AI Book model generation in the default UI.
 - No frontend semantic validation beyond display sorting/search/collapse.
-- No multi-writer concurrency for the same book in the first version.
+- No multi-writer merge semantics for the same book in the first version.
+- Do not allow concurrent writes for the same `user_ns + bookUrl`; reject or serialize them with a per-book guard.
 - No server-side model registry in the first version; use the existing backend text/image model config.
 
 ---
@@ -510,7 +512,7 @@ Do not include `character-movement` as a map edge. Character movement belongs to
 
 `droppedFacts` only records rejected or redirected V3 model candidates.
 
-It does not record V1/V2 reset data; old schema backup files handle manual recovery.
+It does not record V1/V2 reset data.
 
 ```ts
 interface AiBookDroppedFactV3 {
@@ -607,7 +609,7 @@ interface AiBookMemoryViewResponse {
 }
 ```
 
-If old schema exists in DB, backend backs it up and resets it to empty V3.
+If a row exists but is not valid V3, backend resets/deletes it without migration or backup.
 
 ### Get chapter memory view
 
@@ -746,11 +748,12 @@ pub async fn set_enabled(
 Behavior:
 
 - If no row exists, create empty V3.
-- If row exists and `schemaVersion != 3`, back it up once, then overwrite with empty V3.
-- If row exists and V3 parse/validation fails, back it up once, then overwrite with empty V3.
+- If row exists and `schemaVersion != 3`, overwrite/delete it and return empty V3.
+- If row exists and V3 parse/validation fails, overwrite/delete it and return empty V3.
 - Always validate before saving.
 - Never expose raw JSON save in the default API path.
 - `get_or_create_v3` always returns a renderable V3 object for normal page loads.
+- Do not write backup files for old AI Book memory.
 
 ### `src/service/ai_book_memory_v3.rs`
 
@@ -1365,22 +1368,21 @@ MAX_DROPPED_FACTS = 200
 
 ## 20. Data Reset Strategy
 
-Because compatibility is intentionally removed:
+Because the local DB and book library are cleared for this rewrite:
 
-- If stored memory has no `schemaVersion`, backup once, then reset to empty V3.
-- If stored memory has `schemaVersion` 1 or 2, backup once, then reset to empty V3.
-- If stored memory has `schemaVersion` 3 but parse or validate fails, backup once, then reset to empty V3.
 - Do not run semantic migration.
 - Do not preserve old relationships in runtime memory.
 - Do not attempt to clean old schema.
 - Do not show old schema in UI.
+- Do not write old-schema backup files.
+- If invalid/non-V3 memory is found after cutover, treat it as corrupt generated cache and reset/delete it.
 
 Implementation:
 
 ```rust
 match read_schema_version(&value) {
-    Some(3) => parse_v3(value).unwrap_or_else(|_| backup_and_reset_v3(...)),
-    _ => backup_and_reset_v3(...),
+    Some(3) => parse_v3(value).unwrap_or_else(|_| reset_v3(...)),
+    _ => reset_v3(...),
 }
 ```
 
@@ -1480,7 +1482,7 @@ Use a staged cutover, not a one-shot delete.
 
 1. Add V3 model/view types in `src/model/ai_book.rs`.
 2. Add pure V3 helper module and tests in `src/service/ai_book_memory_v3.rs`.
-3. Replace `AiBookService` with typed V3 get/save/reset/enabled behavior and backup-on-reset.
+3. Replace `AiBookService` with typed V3 get/save/reset/enabled behavior.
 4. Add display/chapter view model projection.
 5. Add new memory/chapter/reset/enabled backend endpoints while old routes still exist temporarily.
 6. Add `frontend/src/api/aiBook.ts` action APIs for new endpoints.
@@ -1502,13 +1504,14 @@ Use a staged cutover, not a one-shot delete.
 
 ## 23. Success Criteria
 
-- Backend backs up and resets all non-V3 AI Book memory.
+- Fresh/reset local data uses only V3 AI Book memory.
+- Non-V3 AI Book memory is not backed up, migrated, or displayed.
 - No frontend default-path code constructs prompts for AI Book memory.
 - No frontend default-path code calls text/image provider APIs for AI Book generation.
 - No frontend code merges AI Book semantic memory.
 - No frontend API can save raw memory.
 - No raw memory save route is registered.
-- Model output is always patch-only.
+- Model output never returns full memory; semantic changes are patch-only.
 - Relationships page only reads backend-projected relationship view data from `characterRelations`.
 - Skills, locations, affiliations, school membership, items, and transient appearances never show as relationship cards.
 - Catch-up does not send full memory per chapter.

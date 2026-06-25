@@ -139,6 +139,97 @@
           <section class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M12 3v18" />
+                <path d="M5 8h14" />
+                <path d="M5 16h14" />
+              </svg>
+              后端模型
+            </h3>
+            <div class="status-card">
+              <span>{{ aiModelStatusTitle }}</span>
+              <small>{{ aiModelStatusMessage }}</small>
+            </div>
+            <details class="model-config">
+              <summary>模型设置</summary>
+              <div class="password-panel embedded">
+                <label class="switch-line">
+                  <input v-model="aiModelConfig.text.enabled" type="checkbox" />
+                  <span class="switch-ui"></span>
+                  <span>启用文本模型</span>
+                </label>
+                <label class="password-field">
+                  <span>文本 Base URL</span>
+                  <input v-model="aiModelConfig.text.baseUrl" placeholder="https://api.openai.com" />
+                </label>
+                <label class="password-field">
+                  <span>文本模型</span>
+                  <input v-model="aiModelConfig.text.model" placeholder="gpt-4o-mini" />
+                </label>
+                <label class="password-field">
+                  <span>文本路径</span>
+                  <input v-model="aiModelConfig.text.path" placeholder="/v1/chat/completions" />
+                </label>
+                <label class="password-field">
+                  <span>文本 API Key</span>
+                  <input v-model="aiModelConfig.text.apiKey" type="password" autocomplete="off" />
+                </label>
+
+                <label class="switch-line">
+                  <input v-model="aiModelConfig.image.enabled" type="checkbox" />
+                  <span class="switch-ui"></span>
+                  <span>启用图片模型</span>
+                </label>
+                <label class="password-field">
+                  <span>图片 Base URL</span>
+                  <input v-model="aiModelConfig.image.baseUrl" />
+                </label>
+                <label class="password-field">
+                  <span>图片模型</span>
+                  <input v-model="aiModelConfig.image.model" placeholder="gpt-image-1" />
+                </label>
+                <label class="password-field">
+                  <span>图片路径</span>
+                  <input v-model="aiModelConfig.image.path" placeholder="/v1/images/generations" />
+                </label>
+                <label class="password-field">
+                  <span>图片 API Key</span>
+                  <input v-model="aiModelConfig.image.apiKey" type="password" autocomplete="off" />
+                </label>
+
+                <label class="switch-line">
+                  <input v-model="aiModelConfig.speech.enabled" type="checkbox" />
+                  <span class="switch-ui"></span>
+                  <span>启用语音模型</span>
+                </label>
+                <label class="password-field">
+                  <span>语音 Base URL</span>
+                  <input v-model="aiModelConfig.speech.baseUrl" />
+                </label>
+                <label class="password-field">
+                  <span>语音模型</span>
+                  <input v-model="aiModelConfig.speech.model" placeholder="gpt-4o-mini-tts" />
+                </label>
+                <label class="password-field">
+                  <span>语音路径</span>
+                  <input v-model="aiModelConfig.speech.path" placeholder="/v1/audio/speech" />
+                </label>
+                <label class="password-field">
+                  <span>语音 API Key</span>
+                  <input v-model="aiModelConfig.speech.apiKey" type="password" autocomplete="off" />
+                </label>
+
+                <div class="password-actions">
+                  <button class="action-btn primary" :disabled="!aiModelIsAdmin || aiModelSaving" @click="handleSaveAiModelConfig">
+                    {{ aiModelSaving ? '保存中...' : '保存后端模型' }}
+                  </button>
+                </div>
+              </div>
+            </details>
+          </section>
+
+          <section class="drawer-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <path d="M7 10l5 5 5-5" />
                 <path d="M12 15V3" />
@@ -304,7 +395,9 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
+import { getAiModelConfig, saveAiModelConfig } from '../api/aiModel'
 import { changePassword, logout as apiLogout } from '../api/user'
+import type { AiServerModelConfig } from '../types'
 
 const props = defineProps<{
   modelValue: boolean
@@ -320,6 +413,12 @@ const appVersion = __APP_VERSION__
 const showPasswordPanel = ref(false)
 const changingPassword = ref(false)
 const secureKeyInput = ref(appStore.secureKey)
+const aiModelConfig = reactive<AiServerModelConfig>(emptyAiModelConfig())
+const aiModelLoaded = ref(false)
+const aiModelLoading = ref(false)
+const aiModelSaving = ref(false)
+const aiModelIsAdmin = ref(false)
+const aiModelCanUse = ref(false)
 const passwordForm = reactive({
   oldPassword: '',
   newPassword: '',
@@ -342,6 +441,17 @@ const userManagerMessage = computed(() => {
     : '\u8bf7\u4f7f\u7528\u7ba1\u7406\u5458\u8d26\u53f7\u767b\u5f55\u540e\u518d\u8fdb\u884c\u7528\u6237\u7ba1\u7406\u3002'
 })
 const canOpenWebdav = computed(() => appStore.isSecureMode && appStore.isLoggedIn && !!appStore.userInfo?.enableWebdav)
+const aiModelStatusTitle = computed(() => {
+  if (aiModelLoading.value) return '正在读取后端模型配置'
+  if (!appStore.isLoggedIn) return '登录后可查看'
+  if (aiModelIsAdmin.value) return '管理员可编辑后端模型配置'
+  return aiModelCanUse.value ? '当前账号可使用后端模型' : '当前账号未开启 AI 模型权限'
+})
+const aiModelStatusMessage = computed(() => {
+  if (aiModelIsAdmin.value) return '配置保存到服务器，AI资料生成会使用这里的文本模型。'
+  if (aiModelCanUse.value) return '可使用管理员配置；API Key 不会展示。'
+  return '需要管理员账号或管理密码才能保存配置。'
+})
 const webdavStatusTitle = computed(() => {
   if (!appStore.isSecureMode) return '\u4ec5\u5b89\u5168\u6a21\u5f0f\u652f\u6301\u670d\u52a1\u5668\u5907\u4efd'
   if (!appStore.isLoggedIn) return '\u767b\u5f55\u540e\u53ef\u7528'
@@ -381,6 +491,15 @@ watch(
   () => appStore.secureKey,
   (value) => {
     secureKeyInput.value = value
+  },
+)
+
+watch(
+  () => props.modelValue,
+  (open) => {
+    if (open && !aiModelLoaded.value) {
+      loadAiModelConfig()
+    }
   },
 )
 
@@ -464,6 +583,37 @@ function openWebdavManager() {
   appStore.showWebdavManager = true
 }
 
+async function loadAiModelConfig() {
+  aiModelLoading.value = true
+  try {
+    const response = await getAiModelConfig()
+    Object.assign(aiModelConfig, cloneAiModelConfig(response.config))
+    aiModelIsAdmin.value = response.isAdmin
+    aiModelCanUse.value = response.canUseServerModel
+    aiModelLoaded.value = true
+  } catch (error) {
+    appStore.showToast((error as Error).message || '后端模型配置读取失败', 'error')
+  } finally {
+    aiModelLoading.value = false
+  }
+}
+
+async function handleSaveAiModelConfig() {
+  if (!aiModelIsAdmin.value) return
+  aiModelSaving.value = true
+  try {
+    const response = await saveAiModelConfig(cloneAiModelConfig(aiModelConfig))
+    Object.assign(aiModelConfig, cloneAiModelConfig(response.config))
+    aiModelIsAdmin.value = response.isAdmin
+    aiModelCanUse.value = response.canUseServerModel
+    appStore.showToast('后端模型配置已保存', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '后端模型配置保存失败', 'error')
+  } finally {
+    aiModelSaving.value = false
+  }
+}
+
 function refreshCache() {
   shelfStore.fetchBooks()
   appStore.showToast('\u4e66\u67b6\u5df2\u5237\u65b0', 'success')
@@ -502,6 +652,18 @@ async function handleDismissVersionUpdate() {
 
 async function handleCheckVersionUpdate() {
   await appStore.checkVersionUpdate(true)
+}
+
+function emptyAiModelConfig(): AiServerModelConfig {
+  return {
+    text: { enabled: false, baseUrl: '', apiKey: '', model: '', path: '/v1/chat/completions', useFullUrl: false },
+    image: { enabled: false, baseUrl: '', apiKey: '', model: 'gpt-image-1', path: '/v1/images/generations', useFullUrl: false, imageSize: '1024x1024' },
+    speech: { enabled: false, baseUrl: '', apiKey: '', model: 'gpt-4o-mini-tts', path: '/v1/audio/speech', useFullUrl: false, voice: 'alloy', responseFormat: 'mp3' },
+  }
+}
+
+function cloneAiModelConfig(config: AiServerModelConfig): AiServerModelConfig {
+  return JSON.parse(JSON.stringify(config))
 }
 </script>
 

@@ -19,7 +19,9 @@
   "devDependencies": {
     "@types/node": "^24.12.0",
     "@vitejs/plugin-vue": "^6.0.5",
+    "@vue/test-utils": "^2.4.11",
     "@vue/tsconfig": "^0.9.0",
+    "happy-dom": "^20.10.6",
     "typescript": "~5.9.3",
     "vite": "^8.0.1",
     "vitest": "^4.0.0",

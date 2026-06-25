@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
 import { useReaderStore } from './reader'
-import { getBookContent, getChapterList, getShelfBook } from '../api/bookshelf'
+import { getBookContent, getChapterList, getShelfBook, saveBookProgress } from '../api/bookshelf'
 import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/browserCache'
 import type { Book } from '../types'
 
@@ -39,6 +39,22 @@ vi.mock('../utils/openaiSpeech', () => ({
   requestOpenAISpeechAudio: vi.fn(),
 }))
 
+
+const aiBookStoreMock = {
+  memoryView: null as any,
+  isServerModelAdmin: false,
+  canUseServerModel: false,
+  serverModelConfig: null as any,
+  load: vi.fn(),
+  generateChapterMemory: vi.fn(),
+  loadChapterMemory: vi.fn(),
+  loadServerModelConfig: vi.fn().mockResolvedValue(null),
+}
+
+vi.mock('./aiBook', () => ({
+  useAiBookStore: () => aiBookStoreMock,
+}))
+
 describe('reader local txt chapters', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -52,6 +68,8 @@ describe('reader local txt chapters', () => {
     vi.mocked(getBookContent).mockReset()
     vi.mocked(getChapterList).mockReset()
     vi.mocked(getShelfBook).mockReset()
+    vi.mocked(saveBookProgress).mockReset()
+    vi.mocked(saveBookProgress).mockResolvedValue('ok')
     vi.mocked(getBrowserCachedChapter).mockReset()
     vi.mocked(setBrowserCachedChapter).mockReset()
   })
@@ -193,6 +211,57 @@ describe('reader local txt chapters', () => {
     expect(readerStore.currentIndex).toBe(4)
     expect(readerStore.book?.durChapterPos).toBe(6400)
   })
+
+  it('keeps newer local session even when server has a deeper older chapter', async () => {
+    const localBook: Book = {
+      name: '恢复书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-restore',
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTitle: '第1章',
+    }
+    const serverBook: Book = {
+      ...localBook,
+      durChapterIndex: 4,
+      durChapterPos: 6400,
+      durChapterTime: 1_765_000_000,
+      durChapterTitle: '第5章',
+    }
+    const chapters = [
+      { title: '第1章', url: 'chapter-1', index: 0 },
+      { title: '第2章', url: 'chapter-2', index: 1 },
+      { title: '第3章', url: 'chapter-3', index: 2 },
+      { title: '第4章', url: 'chapter-4', index: 3 },
+      { title: '第5章', url: 'chapter-5', index: 4 },
+    ]
+    localStorage.setItem('reader-last-session', JSON.stringify({
+      book: localBook,
+      chapters,
+      currentIndex: 0,
+      chapterScrollProgress: 0,
+      updatedAt: Date.now(),
+    }))
+    vi.mocked(getShelfBook).mockResolvedValue(serverBook)
+    vi.mocked(getChapterList).mockResolvedValue(chapters)
+    vi.mocked(getBookContent).mockResolvedValue('服务端进度章节正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+    useAppStore().setOnlineStatus(true)
+    const readerStore = useReaderStore()
+
+    const restored = await readerStore.restorePersistedSession()
+
+    expect(restored).toBe(true)
+    expect(readerStore.currentIndex).toBe(0)
+    expect(readerStore.book?.durChapterPos).toBe(0)
+    expect(getBookContent).toHaveBeenCalledWith({
+      chapterUrl: 'chapter-1',
+      bookSourceUrl: 'source-1',
+      refresh: 0,
+    })
+  })
 })
 
 describe('reader summary display config', () => {
@@ -204,5 +273,86 @@ describe('reader summary display config', () => {
   it('defaults key points to card style', () => {
     const store = useReaderStore()
     expect(store.config.chapterSummaryKeyPointStyle).toBe('card')
+  })
+})
+
+
+describe('reader ai book auto-update', () => {
+  beforeEach(() => {
+    aiBookStoreMock.memoryView = null
+    aiBookStoreMock.load.mockReset()
+    aiBookStoreMock.generateChapterMemory.mockReset()
+    aiBookStoreMock.loadChapterMemory.mockReset()
+    aiBookStoreMock.loadServerModelConfig.mockReset()
+    aiBookStoreMock.loadServerModelConfig.mockResolvedValue(null)
+  })
+
+  it('reader auto-update no longer passes chapterContent into aiBook store', async () => {
+    aiBookStoreMock.load.mockResolvedValue({ enabled: true, bookUrl: 'book-1' })
+    aiBookStoreMock.generateChapterMemory.mockResolvedValue({})
+    vi.mocked(getBookContent).mockResolvedValue('下一章正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-1',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-1', index: 0 },
+      { title: '第二章', url: 'chapter-2', index: 1 },
+    ]
+    readerStore.currentIndex = 0
+    readerStore.content = '第一章正文'
+
+    await readerStore.nextChapter()
+
+    expect(aiBookStoreMock.load).toHaveBeenCalledWith(expect.objectContaining({ bookUrl: 'book-1' }))
+    expect(aiBookStoreMock.generateChapterMemory).toHaveBeenCalledWith({
+      bookUrl: 'book-1',
+      chapterIndex: 0,
+      mode: 'auto',
+    })
+    expect(aiBookStoreMock.generateChapterMemory.mock.calls[0][0]).not.toHaveProperty('chapterContent')
+  })
+
+
+  it('swallows background ai book generate failures after chapter switch', async () => {
+    aiBookStoreMock.load.mockResolvedValue({ enabled: true, bookUrl: 'book-1' })
+    aiBookStoreMock.generateChapterMemory.mockRejectedValue(new Error('AI失败'))
+    vi.mocked(getBookContent).mockResolvedValue('下一章正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-1',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-1', index: 0 },
+      { title: '第二章', url: 'chapter-2', index: 1 },
+    ]
+    readerStore.currentIndex = 0
+    readerStore.content = '第一章正文'
+
+    await expect(readerStore.nextChapter()).resolves.toBeUndefined()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(aiBookStoreMock.generateChapterMemory).toHaveBeenCalledWith({
+      bookUrl: 'book-1',
+      chapterIndex: 0,
+      mode: 'auto',
+    })
   })
 })

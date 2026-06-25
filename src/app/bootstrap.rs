@@ -8,7 +8,8 @@ use crate::app::config;
 use crate::crawler::http_client::HttpClient;
 use crate::parser::rule_engine::RuleEngine;
 use crate::service::{
-    ai_book_catchup_service::AiBookCatchupService, ai_book_service::AiBookService,
+    ai_book_catchup_service::AiBookCatchupService,
+    ai_book_generation_service::AiBookGenerationService, ai_book_service::AiBookService,
     ai_model_service::AiModelService, book_group_service::BookGroupService,
     book_service::BookService, book_source_service::BookSourceService,
     chapter_summary_service::ChapterSummaryService, json_document_service::JsonDocumentService,
@@ -48,12 +49,19 @@ pub async fn run() -> anyhow::Result<()> {
     let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
     user_service.migrate_legacy_users_from_json().await?;
     let book_group_service = Arc::new(BookGroupService::new(json_document_service.clone()));
-    let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
-    let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
     let ai_model_service = Arc::new(AiModelService::new(
         json_document_service.clone(),
         &cfg.storage_dir,
     ));
+    let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
+    let ai_book_generation_service = Arc::new(AiBookGenerationService::new_with_ai_model_service(
+        ai_book_service.clone(),
+        book_service.clone(),
+        book_source_service.clone(),
+        local_txt_book_service.clone(),
+        ai_model_service.clone(),
+    ));
+    let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
     let chapter_summary_service =
         Arc::new(ChapterSummaryService::new(json_document_service.clone()));
     let update_service = Arc::new(UpdateService::new(
@@ -71,6 +79,7 @@ pub async fn run() -> anyhow::Result<()> {
         local_txt_book_service,
         json_document_service,
         ai_book_service,
+        ai_book_generation_service,
         ai_book_catchup_service,
         ai_model_service,
         chapter_summary_service,

@@ -1,45 +1,56 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { getAiModelConfig } from '../api/aiModel'
-import { deleteAiBookMemory, getAiBookMemory, saveAiBookMemory } from '../api/aiBook'
-import type { AiBookAnyMemory, AiServerModelConfigResponse, Book, BookChapter } from '../types'
+import {
+  cancelAiBookCatchup,
+  generateAiBookChapterMemory,
+  getAiBookCatchupStatus,
+  getAiBookChapterMemory,
+  getAiBookMemory,
+  resetAiBookMemory,
+  setAiBookEnabled,
+  startAiBookCatchup,
+} from '../api/aiBook'
+import type {
+  AiBookCatchupStatus,
+  AiBookChapterMemoryViewModel,
+  AiBookConfig,
+  AiBookGenerationMode,
+  AiBookMemory,
+  AiBookMemoryViewModel,
+  AiServerModelConfigResponse,
+  Book,
+  BookChapter,
+} from '../types'
 import { useAppStore } from './app'
 import { getAiBookConfig, saveAiBookConfig } from '../utils/aiBookConfig'
-import type { AiBookConfig } from '../types'
-import {
-  applyMapFallbackToMemory,
-  applyMapToMemory,
-  requestAiBookMapImage,
-  requestAiBookMemoryUpdate,
-  shouldRunAiBookAutoUpdate,
-  uploadGeneratedMap,
-} from '../utils/aiBookGeneration'
-import { shouldSkipAiBookChapter } from '../utils/aiBookChapterFilter'
-import {
-  applyMapArtifactToMemoryV2,
-  applyMapFallbackToMemoryV2,
-  createEmptyAiBookMemoryV2,
-  isAiBookMemoryV2,
-  toAiBookDisplayMemory,
-} from '../utils/aiBookV2'
 
-type GenerationPhase = 'idle' | 'loading' | 'text' | 'map' | 'saving' | 'error'
+type GenerationPhase = 'idle' | 'loading' | 'text' | 'error'
 interface LoadServerModelConfigOptions {
   force?: boolean
 }
 
 export const useAiBookStore = defineStore('aiBook', () => {
   const appStore = useAppStore()
-  const memory = ref<AiBookAnyMemory | null>(null)
+  const memoryView = ref<AiBookMemoryViewModel | null>(null)
+  const chapterMemory = ref<AiBookChapterMemoryViewModel | null>(null)
+  const catchupStatus = ref<AiBookCatchupStatus | null>(null)
   const loading = ref(false)
   const phase = ref<GenerationPhase>('idle')
   const statusText = ref('')
+  const catchupPolling = ref(false)
   const updatingChapterKeys = new Set<string>()
 
   const username = computed(() => appStore.userInfo?.username || 'default')
   const config = ref<AiBookConfig>(getAiBookConfig(username.value))
   const serverModelConfig = ref<AiServerModelConfigResponse | null>(null)
-  const isBusy = computed(() => loading.value || phase.value !== 'idle')
+  const memory = computed<AiBookMemory | null>(() => toLegacyMemory(memoryView.value))
+  const isBusy = computed(() => (
+    loading.value
+    || phase.value === 'loading'
+    || phase.value === 'text'
+    || catchupPolling.value
+  ))
   const canUseServerModel = computed(() => Boolean(serverModelConfig.value?.canUseServerModel))
   const isServerModelAdmin = computed(() => Boolean(serverModelConfig.value?.isAdmin))
   let serverModelConfigRequest: Promise<AiServerModelConfigResponse | null> | null = null
@@ -53,9 +64,9 @@ export const useAiBookStore = defineStore('aiBook', () => {
     }
 
     const request = getAiModelConfig()
-      .then((config) => {
-        serverModelConfig.value = config
-        return config
+      .then((next) => {
+        serverModelConfig.value = next
+        return next
       })
       .catch(() => {
         serverModelConfig.value = null
@@ -83,45 +94,114 @@ export const useAiBookStore = defineStore('aiBook', () => {
 
   async function load(book: Book) {
     loading.value = true
+    statusText.value = '加载 AI 资料...'
+    memoryView.value = null
+    chapterMemory.value = null
     try {
-      const saved = await getAiBookMemory(book.bookUrl)
-      memory.value = saved || createEmptyAiBookMemoryV2(book)
-      return memory.value
+      const response = await getAiBookMemory(book.bookUrl)
+      applyMemoryResponse(response.memory)
+      return memoryView.value
+    } catch (error) {
+      memoryView.value = null
+      chapterMemory.value = null
+      throw error
     } finally {
       loading.value = false
+      if (phase.value === 'idle') {
+        statusText.value = ''
+      }
     }
   }
 
-  async function save(next: AiBookAnyMemory) {
-    phase.value = 'saving'
-    statusText.value = '保存 AI 资料...'
+  async function loadChapterMemory(bookUrl: string, chapterIndex: number) {
+    loading.value = true
+    statusText.value = `加载第 ${chapterIndex + 1} 章 AI 资料...`
+    chapterMemory.value = null
     try {
-      memory.value = await saveAiBookMemory(next)
-      return memory.value
+      const response = await getAiBookChapterMemory({ bookUrl, chapterIndex })
+      applyChapterResponse(response.memory, response.chapter)
+      return chapterMemory.value
+    } catch (error) {
+      chapterMemory.value = null
+      throw error
+    } finally {
+      loading.value = false
+      if (phase.value === 'idle') {
+        statusText.value = ''
+      }
+    }
+  }
+
+  async function setEnabled(book: Book, enabled: boolean) {
+    phase.value = 'loading'
+    statusText.value = enabled ? '开启 AI 资料...' : '关闭 AI 资料...'
+    try {
+      const response = await setAiBookEnabled({ bookUrl: book.bookUrl, enabled })
+      applyMemoryResponse(response.memory)
+      return memoryView.value
     } finally {
       phase.value = 'idle'
       statusText.value = ''
     }
   }
 
-  async function setEnabled(book: Book, enabled: boolean) {
-    const current = memory.value?.bookUrl === book.bookUrl ? memory.value : await load(book)
-    return save({
-      ...current,
-      bookUrl: book.bookUrl,
-      bookName: book.name,
-      author: book.author,
-      enabled,
-      updatedAt: Date.now(),
-    })
+  async function reset(book: Book) {
+    phase.value = 'loading'
+    statusText.value = '重置 AI 资料...'
+    try {
+      const response = await resetAiBookMemory(book.bookUrl)
+      applyMemoryResponse(response.memory)
+      chapterMemory.value = null
+      return memoryView.value
+    } finally {
+      phase.value = 'idle'
+      statusText.value = ''
+    }
   }
 
-  async function reset(book: Book) {
-    await deleteAiBookMemory(book.bookUrl)
-    memory.value = createEmptyAiBookMemoryV2(book)
-    phase.value = 'idle'
-    statusText.value = ''
-    return memory.value
+  async function generateChapterMemory(params: { bookUrl: string; chapterIndex: number; mode?: AiBookGenerationMode }) {
+    phase.value = 'text'
+    statusText.value = `生成第 ${params.chapterIndex + 1} 章 AI 资料...`
+    try {
+      const response = await generateAiBookChapterMemory(params)
+      applyChapterResponse(response.memory, response.chapter)
+      phase.value = 'idle'
+      statusText.value = ''
+      return chapterMemory.value
+    } catch (error) {
+      setActionError((error as Error).message || 'AI 资料更新失败')
+      throw error
+    }
+  }
+
+  async function startCatchup(params: { bookUrl: string; targetChapterIndex?: number }) {
+    catchupPolling.value = true
+    try {
+      catchupStatus.value = await startAiBookCatchup(params)
+      return catchupStatus.value
+    } finally {
+      catchupPolling.value = false
+    }
+  }
+
+  async function loadCatchupStatus(bookUrl: string) {
+    catchupPolling.value = true
+    try {
+      catchupStatus.value = await getAiBookCatchupStatus(bookUrl)
+      return catchupStatus.value
+    } finally {
+      catchupPolling.value = false
+    }
+  }
+
+  async function cancelCatchup(bookUrl: string) {
+    catchupPolling.value = true
+    try {
+      catchupStatus.value = await cancelAiBookCatchup(bookUrl)
+      return catchupStatus.value
+    } finally {
+      catchupPolling.value = false
+    }
   }
 
   async function autoUpdateCompletedChapter(params: {
@@ -130,163 +210,85 @@ export const useAiBookStore = defineStore('aiBook', () => {
     chapterContent: string
     chapters?: BookChapter[]
   }) {
-    const current = memory.value?.bookUrl === params.book.bookUrl
-      ? memory.value
-      : await getAiBookMemory(params.book.bookUrl).catch(() => null)
+    const current = memoryView.value?.bookUrl === params.book.bookUrl
+      ? memoryView.value
+      : await load(params.book).catch(() => null)
     if (!current?.enabled) return null
-
-    const currentConfig = refreshConfig()
-    if (!shouldRunAiBookAutoUpdate(current, params.chapter.index, currentConfig)) {
-      return current
-    }
-    return runChapterUpdate({ ...params, current, allowSkip: true })
+    await generateChapterMemory({
+      bookUrl: params.book.bookUrl,
+      chapterIndex: params.chapter.index,
+      mode: 'auto',
+    }).catch(() => null)
+    return memory.value
   }
 
   async function runChapterUpdate(params: {
     book: Book
     chapter: BookChapter
     chapterContent: string
-    current?: AiBookAnyMemory
+    current?: AiBookMemory | null
     allowSkip?: boolean
     throwOnError?: boolean
     chapters?: BookChapter[]
-  }) {
-    const currentConfig = refreshConfig()
-    const current = params.current || (memory.value?.bookUrl === params.book.bookUrl ? memory.value : await load(params.book))
-    if (params.allowSkip && !shouldRunAiBookAutoUpdate(current, params.chapter.index, currentConfig)) {
-      return current
-    }
-
-    if (shouldSkipAiBookChapter(params.chapter, params.chapters || [])) {
-      return saveSkippedChapterMemory(params.book, params.chapter, current)
-    }
-
+  }): Promise<AiBookMemory> {
     const key = `${params.book.bookUrl}::${params.chapter.index}`
-    if (updatingChapterKeys.has(key)) return current
+    if (updatingChapterKeys.has(key)) {
+      return resolveLegacyMemoryFallback(memory.value, params.book, params.current)
+    }
     updatingChapterKeys.add(key)
-    phase.value = 'text'
-    statusText.value = `更新 ${params.chapter.title} 的 AI 资料...`
-
     try {
-      const update = await requestAiBookMemoryUpdate({
-        config: currentConfig,
-        book: params.book,
-        chapter: params.chapter,
-        chapterContent: params.chapterContent,
-        memory: current,
-      })
-      const next = await saveAiBookMemory(update.memory)
-      memory.value = next
-
-      phase.value = 'idle'
-      statusText.value = ''
-      return next
-    } catch (error) {
-      const message = (error as Error).message || 'AI 资料更新失败'
-      phase.value = 'error'
-      statusText.value = message
-      const failed: AiBookAnyMemory = {
-        ...current,
+      await generateChapterMemory({
         bookUrl: params.book.bookUrl,
-        bookName: params.book.name,
-        author: params.book.author,
-        lastError: message,
-        lastErrorChapterIndex: params.chapter.index,
-        lastErrorChapterTitle: params.chapter.title,
-        updatedAt: Date.now(),
+        chapterIndex: params.chapter.index,
+        mode: params.allowSkip ? 'auto' : 'manual',
+      })
+      return resolveLegacyMemoryFallback(memory.value, params.book, params.current)
+    } catch (error) {
+      applyLocalError(params.chapter.index, params.chapter.title, (error as Error).message || 'AI 资料更新失败')
+      if (params.throwOnError) {
+        throw error
       }
-      memory.value = await saveAiBookMemory(failed).catch(() => failed)
-      if (params.throwOnError) throw error
-      return memory.value
+      return resolveLegacyMemoryFallback(memory.value, params.book, params.current)
     } finally {
       updatingChapterKeys.delete(key)
-      if (phase.value === 'error') {
-        window.setTimeout(() => {
-          if (phase.value === 'error') {
-            phase.value = 'idle'
-            statusText.value = ''
-          }
-        }, 3000)
-      }
     }
   }
 
-  async function saveSkippedChapterMemory(book: Book, chapter: BookChapter, current: AiBookAnyMemory) {
-    const next: AiBookAnyMemory = {
-      ...current,
-      bookUrl: book.bookUrl,
-      bookName: book.name,
-      author: book.author,
-      processedChapterIndex: Math.max(current.processedChapterIndex ?? -1, chapter.index),
-      processedChapterTitle: chapter.title,
-      lastError: undefined,
-      updatedAt: Date.now(),
-    }
-    memory.value = await saveAiBookMemory(next).catch(() => next)
-    return memory.value
+  function applyMemoryResponse(next: AiBookMemoryViewModel) {
+    memoryView.value = next
   }
 
-  async function redrawMap(book: Book, prompt?: string, sourceChapterIndex?: number, currentMemory?: AiBookAnyMemory) {
-    const currentConfig = refreshConfig()
-    const current = currentMemory || memory.value || await load(book)
-    const displayMemory = toAiBookDisplayMemory(current)
-    const resolvedPrompt = prompt
-      || (isAiBookMemoryV2(current)
-        ? current.mapState.mapPrompt || current.renderArtifacts.mapImagePrompt
-        : current.map?.prompt)
-      || buildFallbackMapPrompt(current, book)
-    phase.value = 'map'
-    statusText.value = '生成世界地图...'
-    try {
-      const image = await requestAiBookMapImage({
-        config: currentConfig,
-        prompt: resolvedPrompt,
-      })
-      const imageUrl = await uploadGeneratedMap({
-        b64Json: image.b64Json,
-        imageUrl: image.imageUrl,
-        filename: `${Date.now()}-${slugify(book.name || 'map')}.png`,
-        useBackendProxy: currentConfig.useBackendProxy || currentConfig.modelSource === 'server',
-      })
-      const map = {
-        imageUrl,
-        prompt: resolvedPrompt,
-        updatedAt: Date.now(),
-        sourceChapterIndex,
-      }
-      const next = isAiBookMemoryV2(current)
-        ? applyMapArtifactToMemoryV2(current, map)
-        : applyMapToMemory(displayMemory, map)
-      memory.value = await saveAiBookMemory(next)
-      phase.value = 'idle'
-      statusText.value = ''
-      return memory.value
-    } catch (error) {
-      const message = (error as Error).message || '地图生成失败'
-      const fallback = isAiBookMemoryV2(current)
-        ? applyMapFallbackToMemoryV2(current, resolvedPrompt, `${message}，已显示关系图`, sourceChapterIndex)
-        : applyMapFallbackToMemory(displayMemory, {
-            prompt: resolvedPrompt,
-            reason: `${message}，已显示关系图`,
-            sourceChapterIndex,
-          })
-      memory.value = await saveAiBookMemory(fallback).catch(() => fallback)
-      phase.value = 'idle'
-      statusText.value = '图片地图不可用，已显示关系图'
-      window.setTimeout(() => {
-        if (statusText.value === '图片地图不可用，已显示关系图') {
-          statusText.value = ''
-        }
-      }, 3000)
-      return memory.value
+  function applyChapterResponse(nextMemory: AiBookMemoryViewModel, nextChapter: AiBookChapterMemoryViewModel) {
+    memoryView.value = nextMemory
+    chapterMemory.value = nextChapter
+  }
+
+  function applyLocalError(chapterIndex: number, chapterTitle: string, message: string) {
+    if (!memoryView.value) {
+      return
     }
+    memoryView.value = {
+      ...memoryView.value,
+      lastError: message,
+      lastErrorChapterIndex: chapterIndex,
+      lastErrorChapterTitle: chapterTitle,
+    }
+  }
+
+  function setActionError(message: string) {
+    phase.value = 'error'
+    statusText.value = message
   }
 
   return {
     memory,
+    memoryView,
+    chapterMemory,
+    catchupStatus,
     loading,
     phase,
     statusText,
+    catchupPolling,
     isBusy,
     config,
     serverModelConfig,
@@ -296,32 +298,128 @@ export const useAiBookStore = defineStore('aiBook', () => {
     refreshConfig,
     persistConfig,
     load,
-    save,
+    loadChapterMemory,
     setEnabled,
     reset,
+    generateChapterMemory,
+    startCatchup,
+    loadCatchupStatus,
+    cancelCatchup,
+    // temporary wrappers until Task 7 switches AiBookView/reader.ts to V3 actions directly
     autoUpdateCompletedChapter,
     runChapterUpdate,
-    redrawMap,
   }
 })
 
-function buildFallbackMapPrompt(memory: AiBookAnyMemory, book: Book) {
-  const displayMemory = toAiBookDisplayMemory(memory)
-  const locations = displayMemory.locations
-    .map((item) => `${item.parentName ? `${item.parentName} > ` : ''}${item.name}${item.kind ? `（${item.kind}）` : ''}: ${item.description}`)
-    .join('\n')
-  return [
-    `为小说《${book.name}》绘制一张不剧透的世界地图。`,
-    '只包含已读进度中出现的地点和势力范围。',
-    '优先表现地点层级、区域边界、路线连接、图例和地点标签，避免画成建筑外观或场景照片。',
-    locations || displayMemory.summary || '保留未知区域，以卷轴地图风格呈现。',
-  ].join('\n')
+function toLegacyMemory(memory: AiBookMemoryViewModel | AiBookMemory | null | undefined): AiBookMemory | null {
+  if (!memory) {
+    return null
+  }
+  if ('worldview' in memory) {
+    return memory
+  }
+
+  const charactersById = new Map(memory.characters.map((item) => [item.id, item.name]))
+  const locationsById = new Map(memory.locations.map((item) => [item.id, item.name]))
+
+  return {
+    bookUrl: memory.bookUrl,
+    bookName: memory.bookName || undefined,
+    author: memory.author || undefined,
+    enabled: memory.enabled,
+    processedChapterIndex: memory.processedChapterIndex ?? undefined,
+    processedChapterTitle: memory.processedChapterTitle || undefined,
+    updatedAt: memory.updatedAt,
+    summary: memory.summary.current,
+    worldview: memory.knowledgeFacts.map((item) => ({
+      title: item.title,
+      content: item.content,
+      category: item.category,
+      confidence: item.confidence,
+      importance: item.importance,
+      evidence: item.evidence,
+    })),
+    characters: memory.characters.map((item) => ({
+      name: item.name,
+      aliases: item.aliases,
+      status: '',
+      description: item.description || undefined,
+      lastSeenChapter: formatChapter(item.lastSeenChapterIndex ?? undefined),
+      importance: item.importance,
+      evidence: item.evidence,
+    })),
+    relationships: memory.relationships.map((item) => ({
+      source: charactersById.get(item.sourceCharacterId) || item.sourceCharacterId,
+      target: charactersById.get(item.targetCharacterId) || item.targetCharacterId,
+      relation: item.label,
+      status: item.status,
+      description: item.summary,
+      evidence: item.evidence,
+    })),
+    locations: memory.locations.map((item) => ({
+      name: item.name,
+      kind: item.kind,
+      parentName: item.parentLocationId ? locationsById.get(item.parentLocationId) : undefined,
+      description: item.description,
+      status: item.currentStatus || undefined,
+      relatedCharacters: [],
+      firstSeenChapter: formatChapter(item.firstSeenChapterIndex ?? undefined),
+      importance: item.importance,
+      evidence: item.evidence,
+    })),
+    map: memory.map
+      ? {
+          imageUrl: memory.map.renderArtifacts?.imageUrl || undefined,
+          prompt: undefined,
+          updatedAt: memory.map.renderArtifacts?.updatedAt ?? undefined,
+          sourceChapterIndex: memory.map.renderArtifacts?.chapterIndex ?? undefined,
+          fallback: memory.map.renderArtifacts?.imageUrl ? undefined : 'relationship-graph',
+          fallbackReason: memory.map.state?.dirty ? '地图待重新生成' : undefined,
+        }
+      : null,
+    mapDirty: Boolean(memory.map?.state?.dirty),
+    lastError: memory.lastError || undefined,
+    lastErrorChapterIndex: memory.lastErrorChapterIndex ?? undefined,
+    lastErrorChapterTitle: memory.lastErrorChapterTitle || undefined,
+    cleanup: memory.cleanup,
+    catchupStats: memory.catchupStats,
+  }
 }
 
-function slugify(value: string) {
-  const slug = value
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, '-')
-    .replace(/^-+|-+$/g, '')
-  return slug || 'map'
+function formatChapter(index?: number) {
+  if (typeof index !== 'number') {
+    return undefined
+  }
+  return `第${index + 1}章`
+}
+
+function resolveLegacyMemoryFallback(next: AiBookMemory | null, book: Book, current?: AiBookMemory | null): AiBookMemory {
+  return toLegacyMemory(next)
+    || toLegacyMemory(current)
+    || toLegacyMemory({
+      bookUrl: book.bookUrl,
+      bookName: book.name,
+      author: book.author,
+      enabled: false,
+      updatedAt: Date.now(),
+      summary: {
+        current: '',
+        recentChanges: [],
+        openQuestions: [],
+      },
+      characters: [],
+      relationships: [],
+      knowledgeFacts: [],
+      locations: [],
+      map: null,
+      cleanup: {
+        droppedFactsCount: 0,
+        droppedByReason: {},
+        oldSchemaBackedUp: false,
+      },
+      catchupStats: null,
+      lastError: null,
+      lastErrorChapterIndex: null,
+      lastErrorChapterTitle: null,
+    })!
 }

@@ -835,7 +835,10 @@ impl BookService {
         book_url: &str,
     ) -> Result<Option<Book>, AppError> {
         let list = self.read_bookshelf(user_ns).await?;
-        Ok(list.into_iter().find(|b| b.book_url == book_url))
+        Ok(list
+            .into_iter()
+            .filter(|b| b.book_url == book_url)
+            .max_by_key(progress_rank))
     }
 
     /// Find book by chapter URL (chapter URL typically shares domain with book URL)
@@ -923,7 +926,7 @@ impl BookService {
                 book.dur_chapter_index = exist.dur_chapter_index;
             }
             if book.dur_chapter_title.is_none() {
-                book.dur_chapter_title = exist.dur_chapter_title;
+                book.dur_chapter_title = exist.dur_chapter_title.clone();
             }
             if book.dur_chapter_time.is_none() {
                 book.dur_chapter_time = exist.dur_chapter_time;
@@ -951,7 +954,7 @@ impl BookService {
 
     pub async fn save_books(&self, user_ns: &str, books: Vec<Book>) -> Result<Vec<Book>, AppError> {
         let existing = self.read_bookshelf(user_ns).await?;
-        let mut normalized = Vec::with_capacity(books.len());
+        let mut normalized: Vec<Book> = Vec::with_capacity(books.len());
         for mut book in books {
             sanitize_book_urls(&mut book);
             if book.origin.trim().is_empty() {
@@ -960,13 +963,24 @@ impl BookService {
             if book.book_url.trim().is_empty() {
                 return Err(AppError::BadRequest("bookUrl required".to_string()));
             }
-            if let Some(existing_book) = existing
+            let matching_existing = existing
                 .iter()
-                .find(|item| books_match_for_save(item, &book))
-            {
+                .filter(|item| books_match_for_save(item, &book))
+                .cloned()
+                .collect::<Vec<_>>();
+            for existing_book in &matching_existing {
                 preserve_newer_reading_progress(existing_book, &mut book);
             }
-            normalized.push(book);
+            if let Some(existing_index) = normalized
+                .iter()
+                .position(|item| books_match_for_save(item, &book))
+            {
+                let mut merged = book;
+                preserve_newer_reading_progress(&normalized[existing_index], &mut merged);
+                normalized[existing_index] = merged;
+            } else {
+                normalized.push(book);
+            }
         }
         self.write_bookshelf(user_ns, &normalized).await?;
         Ok(normalized)
@@ -1621,8 +1635,12 @@ fn progress_updated_at(book: &Book) -> i64 {
     book.dur_chapter_time.unwrap_or(0)
 }
 
+fn progress_rank(book: &Book) -> i64 {
+    progress_updated_at(book)
+}
+
 fn preserve_newer_reading_progress(existing: &Book, incoming: &mut Book) {
-    if progress_updated_at(existing) <= progress_updated_at(incoming) {
+    if progress_rank(existing) <= progress_rank(incoming) {
         return;
     }
     incoming.dur_chapter_index = existing.dur_chapter_index;
@@ -1732,6 +1750,62 @@ mod tests {
             dur_chapter_title: Some(format!("第{}章", chapter_index + 1)),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn get_shelf_book_prefers_latest_duplicate_progress() {
+        let (service, storage_dir) = test_book_service("newest-duplicate-progress");
+        let user_ns = "duplicate-user";
+        let old = test_book(0, 0, 3000);
+        let fresh = test_book(8, 7300, 2000);
+        service
+            .write_bookshelf(user_ns, &vec![old, fresh])
+            .await
+            .unwrap();
+
+        let book = service
+            .get_shelf_book(user_ns, "https://book.example/1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert_eq!(book.dur_chapter_index, Some(0));
+        assert_eq!(book.dur_chapter_pos, Some(0));
+    }
+
+    #[tokio::test]
+    async fn save_books_merges_duplicate_book_urls_and_keeps_newest_progress() {
+        let (service, storage_dir) = test_book_service("merge-duplicate-progress");
+        let user_ns = "merge-duplicate-user";
+        let first = test_book(0, 0, 1000);
+        let second = test_book(8, 7300, 2000);
+
+        let saved = service
+            .save_books(user_ns, vec![first, second])
+            .await
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].dur_chapter_index, Some(8));
+        assert_eq!(saved[0].dur_chapter_pos, Some(7300));
+    }
+
+    #[tokio::test]
+    async fn save_book_accepts_newer_lower_progress() {
+        let (service, storage_dir) = test_book_service("save-book-lower-progress");
+        let user_ns = "save-book-lower-progress-user";
+        service.save_book(user_ns, test_book(8, 7300, 1000)).await.unwrap();
+
+        let saved = service
+            .save_book(user_ns, test_book(0, 0, 3000))
+            .await
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert_eq!(saved.dur_chapter_index, Some(0));
+        assert_eq!(saved.dur_chapter_pos, Some(0));
     }
 
     #[tokio::test]

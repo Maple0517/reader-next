@@ -385,6 +385,12 @@ export interface AiBookMemory {
   lastError?: string
   lastErrorChapterIndex?: number
   lastErrorChapterTitle?: string
+  cleanup?: {
+    droppedFactsCount: number
+    droppedByReason: Record<string, number>
+    oldSchemaBackedUp: boolean
+  }
+  catchupStats?: AiBookCatchupStats | null
 }
 
 export interface AiBookModelUpdate {
@@ -393,11 +399,20 @@ export interface AiBookModelUpdate {
   mapPrompt?: string
 }
 
-export type AiBookCatchupTaskStatus = 'idle' | 'running' | 'pausing' | 'paused' | 'completed' | 'failed'
+export type AiBookCatchupTaskStatus =
+  | 'idle'
+  | 'running'
+  | 'pausing'
+  | 'paused'
+  | 'canceling'
+  | 'canceled'
+  | 'completed'
+  | 'failed'
 
 export interface AiBookCatchupStatus {
   status: AiBookCatchupTaskStatus
   bookUrl: string
+  currentStage?: string | null
   startChapterIndex?: number
   targetChapterIndex?: number
   currentChapterIndex?: number
@@ -407,7 +422,8 @@ export interface AiBookCatchupStatus {
   totalChapters: number
   completedChapters: number
   updatedAt: number | string
-  error?: string
+  error?: string | null
+  stats?: AiBookCatchupStats | null
 }
 
 export type AiBookImportance = 'high' | 'medium' | 'low'
@@ -436,6 +452,283 @@ export interface AiBookSummaryState {
   recentChanges: string[]
   openQuestions: string[]
 }
+
+export interface AiBookCharacterAbilityView {
+  name: string
+  level?: string | null
+  status?: string | null
+  knowledgeFactId?: string | null
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookCharacterView {
+  id: string
+  name: string
+  aliases: string[]
+  importance: string
+  description?: string | null
+  firstSeenChapterIndex?: number | null
+  lastSeenChapterIndex?: number | null
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookCharacterStateView {
+  characterId: string
+  currentStatus?: string | null
+  currentLocationId?: string | null
+  affiliations: string[]
+  abilities: AiBookCharacterAbilityView[]
+  resources: string[]
+  lastSeenChapterIndex?: number | null
+  evidence: AiBookEvidence[]
+}
+
+export type AiBookRelationKind =
+  | 'unknown'
+  | 'family'
+  | 'romance'
+  | 'friendship'
+  | 'rivalry'
+  | 'alliance'
+  | 'conflict'
+  | 'affiliation'
+  | 'supervision'
+
+export type AiBookRelationPolarity = 'neutral' | 'positive' | 'negative' | 'mixed'
+export type AiBookRelationStrength = 'unknown' | 'weak' | 'moderate' | 'strong' | 'critical'
+export type AiBookRelationStatus = 'unknown' | 'active' | 'distant' | 'broken' | 'developing'
+
+export interface AiBookRelationFacetView {
+  kind: AiBookRelationKind
+  subtype?: string | null
+  polarity: AiBookRelationPolarity
+  status: AiBookRelationStatus
+  summary: string
+}
+
+export interface AiBookRelationChangeView {
+  chapterIndex: number
+  chapterTitle: string
+  previousKind?: AiBookRelationKind | null
+  nextKind: AiBookRelationKind
+  previousPolarity?: AiBookRelationPolarity | null
+  nextPolarity: AiBookRelationPolarity
+  previousStatus?: AiBookRelationStatus | null
+  nextStatus: AiBookRelationStatus
+  note: string
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookRelationView {
+  id: string
+  sourceCharacterId: string
+  targetCharacterId: string
+  kind: AiBookRelationKind
+  subtype?: string | null
+  label: string
+  polarity: AiBookRelationPolarity
+  strength: AiBookRelationStrength
+  status: AiBookRelationStatus
+  direction: string
+  summary: string
+  currentDynamics: string[]
+  facets: AiBookRelationFacetView[]
+  firstSeenChapterIndex?: number | null
+  lastUpdatedChapterIndex?: number | null
+  evidence: AiBookEvidence[]
+  history: AiBookRelationChangeView[]
+}
+
+export type AiBookFactCategory =
+  | 'unknown'
+  | 'basicRule'
+  | 'powerFaction'
+  | 'historyLegend'
+  | 'techMagic'
+  | 'socialCulture'
+  | 'geography'
+  | 'organization'
+  | 'unconfirmed'
+
+export type AiBookFactConfidence = 'unknown' | 'low' | 'medium' | 'high'
+export type AiBookFactImportance = 'unknown' | 'low' | 'medium' | 'high'
+
+export interface AiBookKnowledgeFactView {
+  id: string
+  category: AiBookFactCategory
+  title: string
+  content: string
+  confidence: AiBookFactConfidence
+  importance: AiBookFactImportance
+  firstSeenChapterIndex?: number | null
+  lastConfirmedChapterIndex?: number | null
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookLocationView {
+  id: string
+  name: string
+  aliases: string[]
+  kind: string
+  scale: string
+  parentLocationId?: string | null
+  description: string
+  currentStatus?: string | null
+  importance: string
+  firstSeenChapterIndex?: number | null
+  lastSeenChapterIndex?: number | null
+  evidence: AiBookEvidence[]
+}
+
+export interface AiBookLocationEdgeView {
+  source: string
+  target: string
+  kind: 'unknown' | 'contains' | 'adjacent' | 'leadsTo' | 'partOf' | 'near'
+  description?: string | null
+}
+
+export interface AiBookMapStateView {
+  dirty: boolean
+  nodes: Array<{
+    id: string
+    label: string
+    kind?: string | null
+    x?: number | null
+    y?: number | null
+  }>
+  edges: Array<{
+    source: string
+    target: string
+    kind?: string | null
+    description?: string | null
+  }>
+}
+
+export interface AiBookRenderArtifactsView {
+  chapterIndex?: number | null
+  chapterTitle?: string | null
+  summary?: string | null
+  imageUrl?: string | null
+  updatedAt?: number | null
+}
+
+export interface AiBookMapView {
+  state?: AiBookMapStateView | null
+  renderArtifacts?: AiBookRenderArtifactsView | null
+  locations: AiBookLocationView[]
+  locationEdges: AiBookLocationEdgeView[]
+}
+
+export interface AiBookCatchupStats {
+  totalModelCalls: number
+  digestCalls: number
+  patchCalls: number
+  skippedPatchChapters: number
+  totalInputBytes: number
+  totalOutputBytes: number
+  lastCallLatencyMs?: number | null
+  averageCallLatencyMs?: number | null
+  lastChapterIndex?: number | null
+  updatedAt: number
+}
+
+export interface AiBookMemoryViewModel {
+  bookUrl: string
+  bookName?: string | null
+  author?: string | null
+  enabled: boolean
+  processedChapterIndex?: number | null
+  processedChapterTitle?: string | null
+  updatedAt: number
+  summary: AiBookSummaryState
+  characters: AiBookCharacterView[]
+  relationships: AiBookRelationView[]
+  knowledgeFacts: AiBookKnowledgeFactView[]
+  locations: AiBookLocationView[]
+  map?: AiBookMapView | null
+  cleanup: {
+    droppedFactsCount: number
+    droppedByReason: Record<string, number>
+    oldSchemaBackedUp: boolean
+  }
+  catchupStats?: AiBookCatchupStats | null
+  lastError?: string | null
+  lastErrorChapterIndex?: number | null
+  lastErrorChapterTitle?: string | null
+}
+
+export interface AiBookChapterDigestView {
+  chapterIndex: number
+  chapterTitle: string
+  summary: string
+  keyPoints: string[]
+  characters: Array<{
+    name: string
+    aliases: string[]
+    status: string
+    faction?: string | null
+    location?: string | null
+    description?: string | null
+    lastSeenChapter?: string | null
+  }>
+  characterStates: Array<{
+    name: string
+    status: string
+    description?: string | null
+    lastSeenChapterIndex?: number | null
+    lastSeenChapterTitle?: string | null
+    updatedAt?: number | null
+  }>
+  characterRelations: Array<{
+    source: string
+    target: string
+    kind: AiBookRelationKind
+    polarity: AiBookRelationPolarity
+    strength: AiBookRelationStrength
+    status: AiBookRelationStatus
+    description?: string | null
+  }>
+  knowledgeFacts: Array<{
+    title: string
+    content: string
+    category: AiBookFactCategory
+    confidence: AiBookFactConfidence
+    importance: AiBookFactImportance
+  }>
+  locations: Array<{
+    name: string
+    kind?: string | null
+    description: string
+    status?: string | null
+    relatedCharacters: string[]
+    firstSeenChapter?: string | null
+  }>
+  locationEdges: AiBookLocationEdgeView[]
+}
+
+export interface AiBookChapterMemoryViewModel {
+  bookUrl: string
+  chapterIndex: number
+  chapterTitle?: string | null
+  digest?: AiBookChapterDigestView | null
+  characters: AiBookCharacterView[]
+  relationships: AiBookRelationView[]
+  knowledgeFacts: AiBookKnowledgeFactView[]
+  locations: AiBookLocationView[]
+  generationStatus: string
+  lastError?: string | null
+}
+
+export interface AiBookMemoryViewResponse {
+  memory: AiBookMemoryViewModel
+}
+
+export interface AiBookChapterMemoryViewResponse {
+  chapter: AiBookChapterMemoryViewModel
+  memory: AiBookMemoryViewModel
+}
+
+export type AiBookGenerationMode = 'manual' | 'auto'
 
 export interface AiBookChapterDigest {
   chapterIndex: number

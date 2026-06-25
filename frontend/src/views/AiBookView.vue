@@ -5,7 +5,7 @@
       <span>加载中...</span>
     </div>
 
-    <div v-else-if="book && memory" class="ai-shell">
+    <div v-else-if="book && memoryView" class="ai-shell">
       <header class="ai-header">
         <div class="title-stack">
           <div class="title-row">
@@ -22,12 +22,18 @@
 
         <div class="header-actions">
           <label class="enable-switch">
-            <input type="checkbox" :checked="memory.enabled" @change="toggleEnabled" />
+            <input type="checkbox" :checked="memoryView.enabled" @change="toggleEnabled" />
             <span></span>
             自动更新
           </label>
-          <button class="primary-btn" :disabled="catchupActionDisabled" @click="updateToCurrent">
+          <button class="primary-btn" :disabled="generateDisabled" @click="generateCurrentChapter">
+            {{ generateButtonLabel }}
+          </button>
+          <button class="secondary-btn" :disabled="catchupActionDisabled" @click="toggleCatchup">
             {{ catchupActionLabel }}
+          </button>
+          <button class="danger-btn" :disabled="aiStore.isBusy" @click="resetMemory">
+            重置
           </button>
         </div>
       </header>
@@ -47,11 +53,9 @@
       </div>
 
       <div v-if="statusNotice" class="status-strip" :class="{ error: statusNotice.isError }">
-        <div class="status-main">
-          <strong>{{ statusNotice.isError ? '生成失败' : '状态' }}</strong>
-          <p>{{ statusNotice.summary }}</p>
-        </div>
-        <details v-if="statusNotice.detail" class="status-detail">
+        <strong>{{ statusNotice.isError ? '生成失败' : '状态' }}</strong>
+        <p>{{ statusNotice.summary }}</p>
+        <details v-if="statusNotice.detail">
           <summary>查看详情</summary>
           <pre>{{ statusNotice.detail }}</pre>
         </details>
@@ -65,95 +69,111 @@
 
       <main class="ai-content">
         <section v-if="activeTab === 'overview'" class="overview-grid">
-          <div class="overview-main">
-            <h2>世界观</h2>
-            <p class="summary">{{ overviewSummary }}</p>
-            <div v-if="recentChanges.length" class="summary-points">
-              <span>最近变化</span>
-              <ul>
-                <li v-for="item in recentChanges" :key="item">{{ item }}</li>
-              </ul>
+          <article class="panel-card current-summary-card">
+            <div class="panel-head">
+              <div>
+                <h2>当前章节</h2>
+                <p>{{ currentChapterLabel }}</p>
+              </div>
+              <span class="pill">{{ chapterGenerationStatusLabel }}</span>
             </div>
-            <div v-if="openQuestions.length" class="summary-points">
-              <span>未解问题</span>
-              <ul>
-                <li v-for="item in openQuestions" :key="item">{{ item }}</li>
-              </ul>
+            <p class="summary">{{ currentChapterSummary }}</p>
+            <ul v-if="currentKeyPoints.length" class="bullet-list">
+              <li v-for="item in currentKeyPoints" :key="item">{{ item }}</li>
+            </ul>
+            <EmptyState v-else text="当前章节还没有摘要" />
+          </article>
+
+          <article class="panel-card">
+            <div class="panel-head">
+              <div>
+                <h2>全书摘要</h2>
+                <p>后端 V3 视图模型</p>
+              </div>
+              <span class="pill">{{ processedChapterLabel }}</span>
+            </div>
+            <p class="summary">{{ memoryView.summary.current || '暂无资料' }}</p>
+            <div class="summary-columns">
+              <div>
+                <strong>最近变化</strong>
+                <ul class="bullet-list compact">
+                  <li v-for="item in memoryView.summary.recentChanges" :key="item">{{ item }}</li>
+                  <li v-if="!memoryView.summary.recentChanges.length" class="muted">暂无</li>
+                </ul>
+              </div>
+              <div>
+                <strong>未解问题</strong>
+                <ul class="bullet-list compact">
+                  <li v-for="item in memoryView.summary.openQuestions" :key="item">{{ item }}</li>
+                  <li v-if="!memoryView.summary.openQuestions.length" class="muted">暂无</li>
+                </ul>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel-card">
+            <div class="panel-head">
+              <div>
+                <h2>角色状态</h2>
+                <p>来自章节 digest.characterStates</p>
+              </div>
+            </div>
+            <div class="state-grid">
+              <article v-for="item in currentCharacterStates" :key="`${item.name}-${item.status}`" class="state-item">
+                <strong>{{ item.name }}</strong>
+                <p>{{ item.status || item.description || '暂无状态' }}</p>
+                <small>{{ item.lastSeenChapterTitle || formatChapter(item.lastSeenChapterIndex) || '当前章节' }}</small>
+              </article>
+            </div>
+            <EmptyState v-if="!currentCharacterStates.length" text="当前章节还没有角色状态" />
+          </article>
+
+          <article class="panel-card">
+            <div class="panel-head">
+              <div>
+                <h2>世界观</h2>
+                <p>{{ memoryView.knowledgeFacts.length }} 条</p>
+              </div>
             </div>
             <div class="worldview-groups">
               <section v-for="group in worldviewGroups" :key="group.category" class="worldview-group">
                 <div class="group-head">
-                  <button class="group-toggle" @click="toggleWorldviewGroup(group.category)">
-                    <span>{{ group.collapsed ? '+' : '-' }}</span>
-                    <h3>{{ group.category }}</h3>
-                  </button>
+                  <strong>{{ group.category }}</strong>
                   <span>{{ group.items.length }}</span>
                 </div>
-                <div v-if="!group.collapsed" class="group-items">
-                  <article v-for="note in group.items" :key="`${group.category}-${note.title}`" class="note-item">
-                    <div class="item-title">
-                      <h4>{{ note.title }}</h4>
-                      <span v-if="note.confidence">{{ note.confidence }}</span>
-                    </div>
-                    <p>{{ note.content }}</p>
-                    <details v-if="hasEvidence(note.evidence)" class="evidence-block">
-                      <summary>来源</summary>
-                      <ul>
-                        <li v-for="item in visibleEvidence(note.evidence)" :key="evidenceKey(item)">
-                          <strong>{{ evidenceChapterLabel(item) }}</strong>
-                          <span>{{ item.note }}</span>
-                          <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
-                        </li>
-                      </ul>
-                    </details>
-                  </article>
-                </div>
+                <article v-for="note in group.items" :key="note.id" class="list-item">
+                  <div class="item-title">
+                    <h3>{{ note.title }}</h3>
+                    <span>{{ note.confidence }}</span>
+                  </div>
+                  <p>{{ note.content }}</p>
+                  <details v-if="hasEvidence(note.evidence)" class="evidence-block">
+                    <summary>来源</summary>
+                    <ul>
+                      <li v-for="item in visibleEvidence(note.evidence)" :key="evidenceKey(item)">
+                        <strong>{{ evidenceChapterLabel(item) }}</strong>
+                        <span>{{ item.note }}</span>
+                        <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
+                      </li>
+                    </ul>
+                  </details>
+                </article>
               </section>
             </div>
             <EmptyState v-if="!worldviewGroups.length" text="暂无世界观资料" />
-          </div>
-
-          <aside class="overview-side">
-            <div class="metric">
-              <span>角色</span>
-              <strong>{{ importantCharacters.length }}</strong>
-            </div>
-            <div class="metric">
-              <span>关系</span>
-              <strong>{{ displayRelationships.length }}</strong>
-            </div>
-            <div class="metric">
-              <span>地点</span>
-              <strong>{{ displayLocations.length }}</strong>
-            </div>
-            <div class="metric">
-              <span>最近章节</span>
-              <strong>{{ memory.processedChapterIndex != null ? memory.processedChapterIndex + 1 : '-' }}</strong>
-            </div>
-          </aside>
+          </article>
         </section>
 
-        <section v-else-if="activeTab === 'characters'" class="list-panel">
-          <div class="panel-toolbar">
-            <label class="search-field">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-3.5-3.5" />
-              </svg>
-              <input v-model="characterSearch" placeholder="搜索角色、别名、势力、位置" />
-            </label>
-            <span class="result-count">{{ filteredCharacters.length }} / {{ importantCharacters.length }}</span>
-          </div>
-          <article v-for="character in filteredCharacters" :key="character.name" class="list-item">
+        <section v-else-if="activeTab === 'characters'" class="stack-panel">
+          <article v-for="character in displayCharacters" :key="character.id" class="list-item">
             <div class="item-title">
               <h3>{{ character.name }}</h3>
-              <span v-if="character.faction">{{ character.faction }}</span>
+              <span>{{ character.importance || 'unknown' }}</span>
             </div>
-            <p>{{ character.status || character.description || '暂无状态' }}</p>
+            <p>{{ character.currentStatus || character.description || '暂无状态' }}</p>
             <div class="meta-line">
-              <span v-if="character.location">位置：{{ character.location }}</span>
+              <span v-if="character.aliases.length">别名：{{ character.aliases.join('、') }}</span>
               <span v-if="character.lastSeenChapter">最近：{{ character.lastSeenChapter }}</span>
-              <span v-if="character.aliases?.length">别名：{{ character.aliases.join('、') }}</span>
             </div>
             <details v-if="hasEvidence(character.evidence)" class="evidence-block">
               <summary>来源</summary>
@@ -166,17 +186,22 @@
               </ul>
             </details>
           </article>
-          <EmptyState v-if="!filteredCharacters.length" :text="importantCharacters.length ? '没有匹配的角色' : '暂无重要角色资料'" />
+          <EmptyState v-if="!displayCharacters.length" text="暂无角色资料" />
         </section>
 
-        <section v-else-if="activeTab === 'relationships'" class="relation-grid">
-          <article v-for="relationship in displayRelationships" :key="`${relationship.source}-${relationship.target}-${relationship.relation}`" class="relation-item">
-            <div class="relation-head">
-              <strong>{{ relationship.source }}</strong>
-              <span>{{ relationship.relation }}</span>
-              <strong>{{ relationship.target }}</strong>
+        <section v-else-if="activeTab === 'relationships'" class="stack-panel">
+          <article v-for="relationship in displayRelationships" :key="relationship.id" class="list-item">
+            <div class="item-title relation-head">
+              <strong>{{ relationship.sourceName }}</strong>
+              <span>{{ relationship.label }}</span>
+              <strong>{{ relationship.targetName }}</strong>
             </div>
-            <p>{{ relationship.description || relationship.status || '暂无说明' }}</p>
+            <p>{{ relationship.summary || relationship.status || '暂无说明' }}</p>
+            <div class="meta-line">
+              <span>kind：{{ relationship.kind }}</span>
+              <span>polarity：{{ relationship.polarity }}</span>
+              <span>strength：{{ relationship.strength }}</span>
+            </div>
             <details v-if="hasEvidence(relationship.evidence)" class="evidence-block">
               <summary>来源</summary>
               <ul>
@@ -188,131 +213,62 @@
               </ul>
             </details>
           </article>
-          <EmptyState v-if="!displayRelationships.length" text="暂无重要人物关系" />
+
+          <article v-if="currentChapterRelations.length" class="panel-card">
+            <div class="panel-head">
+              <div>
+                <h2>当前章节关系变化</h2>
+                <p>来自章节 digest.characterRelations</p>
+              </div>
+            </div>
+            <ul class="bullet-list">
+              <li v-for="item in currentChapterRelations" :key="`${item.source}-${item.target}-${item.kind}-${item.status}`">
+                {{ item.source }} · {{ item.target }} · {{ item.kind }} · {{ item.status }}
+                <span v-if="item.description"> — {{ item.description }}</span>
+              </li>
+            </ul>
+          </article>
+          <EmptyState v-if="!displayRelationships.length && !currentChapterRelations.length" text="暂无关系资料" />
         </section>
 
-        <section v-else-if="activeTab === 'map'" class="map-panel">
-          <div class="map-toolbar">
-            <div class="map-title">
-              <h2>世界地图</h2>
-              <p>{{ mapStatusText }}</p>
-              <p v-if="displayBaseMemory?.mapDirty" class="map-dirty-hint">地点有新变化，点击重绘地图手动生成。</p>
-            </div>
-            <button class="secondary-btn" :disabled="aiStore.isBusy" @click="redrawMap">
-              {{ aiStore.phase === 'map' ? '绘制中...' : '重绘地图' }}
-            </button>
-          </div>
-
-          <div class="map-frame">
-            <img v-if="displayBaseMemory?.map?.imageUrl" :src="displayBaseMemory.map.imageUrl" alt="世界地图" />
-            <div v-else-if="relationshipGraph.nodes.length" class="graph-fallback">
-              <div class="graph-canvas">
-                <div class="graph-legend">
-                  <span class="legend-location">地点</span>
-                  <span class="legend-character">角色</span>
-                </div>
-                <svg :viewBox="`0 0 ${graphLayout.width} ${graphLayout.height}`" role="img" aria-label="人物关系图">
-                  <defs>
-                    <marker id="graph-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-                      <path d="M 0 0 L 10 5 L 0 10 z" />
-                    </marker>
-                  </defs>
-                  <g class="graph-links">
-                    <g
-                      v-for="link in graphLayout.links"
-                      :key="`${link.source}-${link.target}-${link.label}`"
-                      class="graph-link"
-                      :class="{ highlighted: link.highlighted, dimmed: link.dimmed, located: link.label === '位于' }"
-                    >
-                      <path :d="link.path" />
-                      <g v-if="link.showLabel" class="graph-link-label">
-                        <rect
-                          :x="link.labelX - graphLabelWidth(link.label) / 2"
-                          :y="link.labelY - 13"
-                          :width="graphLabelWidth(link.label)"
-                          height="22"
-                          rx="11"
-                        />
-                        <text :x="link.labelX" :y="link.labelY + 3">{{ link.label }}</text>
-                      </g>
-                    </g>
-                  </g>
-                  <g
-                    v-for="node in graphLayout.nodes"
-                    :key="node.id"
-                    class="graph-node"
-                    :class="{
-                      active: selectedGraphNode?.id === node.id,
-                      location: node.kind === 'location',
-                      dimmed: node.dimmed,
-                      connected: node.connectedToSelected,
-                    }"
-                    @click="selectGraphNode(node.id)"
-                  >
-                    <foreignObject :x="node.x" :y="node.y" :width="node.width" :height="node.height">
-                      <div xmlns="http://www.w3.org/1999/xhtml" class="graph-node-card">
-                        <span class="node-dot"></span>
-                        <strong>{{ node.label }}</strong>
-                      </div>
-                    </foreignObject>
-                  </g>
-                </svg>
+        <section v-else class="stack-panel">
+          <article class="panel-card">
+            <div class="panel-head map-head">
+              <div>
+                <h2>地图</h2>
+                <p>{{ mapStatusText }}</p>
               </div>
-              <aside v-if="selectedGraphNode" class="graph-detail">
-                <div class="graph-detail-head">
-                  <span>{{ selectedGraphNode.kind === 'location' ? '地点' : '角色' }}</span>
-                  <strong>{{ selectedGraphNode.label }}</strong>
-                </div>
-                <p>{{ selectedGraphNode.detail || '暂无说明' }}</p>
-                <div v-if="selectedGraphConnections.length" class="graph-connection-list">
-                  <span>直接关联</span>
-                  <button
-                    v-for="connection in selectedGraphConnections"
-                    :key="`${connection.id}-${connection.relation}`"
-                    @click="selectGraphNode(connection.id)"
-                  >
-                    <strong>{{ connection.label }}</strong>
-                    <small>{{ connection.relation }}</small>
-                  </button>
-                </div>
-                <small>{{ displayBaseMemory?.map?.fallbackReason || '图片地图未生成，显示关系图' }}</small>
-              </aside>
+              <button class="secondary-btn" disabled>
+                暂未开放
+              </button>
             </div>
-            <div v-else class="map-empty">暂无地图</div>
-          </div>
+            <div class="map-frame">
+              <EmptyState text="V3 切换期间，地图生成与持久化暂未接入；当前页仅保留地点资料。" />
+            </div>
+          </article>
 
-          <div class="location-tree">
-            <article
-              v-for="row in visibleLocationRows"
-              :key="row.location.name"
-              class="location-item tree-location"
-              :style="{ '--depth-offset': `${row.depth * 22}px` }"
-            >
+          <article class="panel-card">
+            <div class="panel-head">
+              <div>
+                <h2>地点</h2>
+                <p>{{ memoryView.locations.length }} 个地点</p>
+              </div>
+            </div>
+            <article v-for="location in displayLocations" :key="location.id" class="list-item">
               <div class="item-title">
-                <div class="location-title-wrap">
-                  <button
-                    v-if="row.hasChildren"
-                    class="location-toggle"
-                    :aria-label="isLocationCollapsed(row.location.name) ? '展开地点' : '收起地点'"
-                    @click="toggleLocation(row.location.name)"
-                  >
-                    {{ isLocationCollapsed(row.location.name) ? '+' : '-' }}
-                  </button>
-                  <span v-else class="location-toggle ghost"></span>
-                  <h3>{{ row.location.name }}</h3>
-                </div>
-                <span v-if="row.location.kind">{{ row.location.kind }}</span>
+                <h3>{{ location.name }}</h3>
+                <span>{{ location.kind || location.scale }}</span>
               </div>
-              <p>{{ row.location.description }}</p>
+              <p>{{ location.description || '暂无说明' }}</p>
               <div class="meta-line">
-                <span v-if="row.location.status">状态：{{ row.location.status }}</span>
-                <span v-if="row.location.parentName">上级：{{ row.location.parentName }}</span>
-                <span v-if="row.location.relatedCharacters?.length">相关：{{ row.location.relatedCharacters.join('、') }}</span>
+                <span v-if="location.currentStatus">状态：{{ location.currentStatus }}</span>
+                <span v-if="location.parentName">上级：{{ location.parentName }}</span>
+                <span v-if="location.firstSeenChapter">首次：{{ location.firstSeenChapter }}</span>
               </div>
-              <details v-if="hasEvidence(row.location.evidence)" class="evidence-block">
+              <details v-if="hasEvidence(location.evidence)" class="evidence-block">
                 <summary>来源</summary>
                 <ul>
-                  <li v-for="item in visibleEvidence(row.location.evidence)" :key="evidenceKey(item)">
+                  <li v-for="item in visibleEvidence(location.evidence)" :key="evidenceKey(item)">
                     <strong>{{ evidenceChapterLabel(item) }}</strong>
                     <span>{{ item.note }}</span>
                     <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
@@ -320,317 +276,8 @@
                 </ul>
               </details>
             </article>
-            <EmptyState v-if="!visibleLocationRows.length" text="暂无地点资料" />
-          </div>
-        </section>
-
-        <section v-else class="settings-panel">
-          <article class="settings-card source-card">
-            <div class="settings-card-head">
-              <h2>模型来源</h2>
-              <span class="server-status" :class="{ active: canUseServerModel }">
-                {{ canUseServerModel ? '可用后端配置' : '未授权后端配置' }}
-              </span>
-            </div>
-            <div class="source-options">
-              <button class="source-option" :class="{ active: configDraft.modelSource === 'browser' }" @click="configDraft.modelSource = 'browser'">
-                自己配置模型
-              </button>
-              <button
-                class="source-option"
-                :class="{ active: configDraft.modelSource === 'server' }"
-                :disabled="!canUseServerModel"
-                @click="configDraft.modelSource = 'server'"
-              >
-                使用后端配置
-              </button>
-            </div>
-            <p class="settings-hint">
-              后端配置由管理员保存到服务器；只有开启 AI 模型权限的账号才能使用。自己配置仍只保存在当前浏览器。
-            </p>
-            <div class="runtime-card">
-              <span>当前实际使用</span>
-              <strong>{{ activeTextRuntime.sourceLabel }} · {{ activeTextRuntime.model }}</strong>
-              <small>{{ activeTextRuntime.path }}</small>
-            </div>
+            <EmptyState v-if="!displayLocations.length" text="暂无地点资料" />
           </article>
-
-          <div v-if="configDraft.modelSource === 'server'" class="settings-cards">
-            <article class="settings-card">
-              <div class="settings-card-head">
-                <h2>后端文本模型</h2>
-                <span class="server-status" :class="{ active: serverTextReady }">{{ serverTextReady ? '已启用' : '未配置' }}</span>
-              </div>
-              <p class="settings-hint">{{ serverConfig?.text.model || '管理员尚未配置文本模型' }}</p>
-            </article>
-            <article class="settings-card">
-              <div class="settings-card-head">
-                <h2>后端图片模型</h2>
-                <span class="server-status" :class="{ active: serverImageReady }">{{ serverImageReady ? '已启用' : '未配置' }}</span>
-              </div>
-              <p class="settings-hint">{{ serverConfig?.image.model || '管理员尚未配置图片模型' }} · {{ serverConfig?.image.imageSize || '1024x1024' }}</p>
-            </article>
-            <article class="settings-card">
-              <div class="settings-card-head">
-                <h2>后端语音模型</h2>
-                <span class="server-status" :class="{ active: serverSpeechReady }">{{ serverSpeechReady ? '已启用' : '未配置' }}</span>
-              </div>
-              <p class="settings-hint">{{ serverConfig?.speech.model || '管理员尚未配置 OpenAI Speech' }} · {{ serverConfig?.speech.voice || 'alloy' }}</p>
-            </article>
-          </div>
-
-          <div v-else class="settings-cards">
-            <article class="settings-card">
-              <div class="settings-card-head">
-                <h2>文本模型</h2>
-                <label class="switch-line compact">
-                  <input v-model="configDraft.textUseFullUrl" type="checkbox" />
-                  <span class="switch-ui"></span>
-                  <span>完整链接</span>
-                </label>
-              </div>
-              <div class="settings-grid">
-                <label class="field span-2">
-                  <span>Base URL</span>
-                  <input v-model="configDraft.textBaseUrl" placeholder="http://localhost:8825" />
-                </label>
-                <label class="field">
-                  <span>模型</span>
-                  <input v-model="configDraft.textModel" />
-                </label>
-                <label class="field">
-                  <span>接口类型</span>
-                  <select v-model="textProviderPreset">
-                    <option value="chat">Chat 兼容</option>
-                    <option value="responses">OpenAI Responses</option>
-                    <option value="gemini">Gemini 原生</option>
-                    <option value="anthropic">Anthropic 原生</option>
-                    <option value="custom">自定义</option>
-                  </select>
-                </label>
-                <label v-if="textProviderPreset === 'custom'" class="field">
-                  <span>接口路径</span>
-                  <input v-model="configDraft.textPath" placeholder="/v1/chat/completions" />
-                </label>
-                <label class="field">
-                  <span>API Key</span>
-                  <input v-model="configDraft.textApiKey" type="password" autocomplete="off" />
-                </label>
-              </div>
-            </article>
-
-            <article class="settings-card">
-              <div class="settings-card-head">
-                <h2>图片模型</h2>
-                <label class="switch-line compact">
-                  <input v-model="configDraft.imageUseFullUrl" type="checkbox" />
-                  <span class="switch-ui"></span>
-                  <span>完整链接</span>
-                </label>
-              </div>
-              <div class="settings-grid">
-                <label class="field span-2">
-                  <span>Base URL</span>
-                  <input v-model="configDraft.imageBaseUrl" placeholder="http://localhost:8826" />
-                </label>
-                <label class="field">
-                  <span>模型</span>
-                  <input v-model="configDraft.imageModel" />
-                </label>
-                <label class="field">
-                  <span>接口类型</span>
-                  <select v-model="imageProviderPreset">
-                    <option value="openai-image">OpenAI 图片兼容</option>
-                    <option value="custom">自定义</option>
-                  </select>
-                </label>
-                <label v-if="imageProviderPreset === 'custom'" class="field">
-                  <span>接口路径</span>
-                  <input v-model="configDraft.imagePath" placeholder="/v1/images/generations" />
-                </label>
-                <label class="field">
-                  <span>尺寸</span>
-                  <select v-model="configDraft.imageSize">
-                    <option value="1024x1024">1024x1024</option>
-                    <option value="1792x1024">1792x1024</option>
-                    <option value="1024x1792">1024x1792</option>
-                  </select>
-                </label>
-                <label class="field span-2">
-                  <span>API Key</span>
-                  <input v-model="configDraft.imageApiKey" type="password" autocomplete="off" />
-                </label>
-              </div>
-            </article>
-          </div>
-
-          <div v-if="configDraft.modelSource === 'browser'" class="settings-footer">
-            <label class="switch-line proxy-option">
-              <input v-model="configDraft.useBackendProxy" type="checkbox" />
-              <span class="switch-ui"></span>
-              <span>使用后端代理调用模型</span>
-            </label>
-          </div>
-          <div class="settings-actions">
-            <button class="primary-btn" @click="saveConfig">保存配置</button>
-            <button class="danger-btn" @click="resetMemory">重置 AI资料</button>
-          </div>
-
-          <section v-if="isServerModelAdmin" ref="adminModelPanelRef" class="admin-model-panel">
-            <div class="admin-model-head">
-              <h2>后端模型配置</h2>
-              <button class="primary-btn" @click="saveServerConfig">保存后端配置</button>
-            </div>
-            <div class="settings-cards">
-              <article class="settings-card">
-                <div class="settings-card-head">
-                  <h2>文本模型</h2>
-                  <label class="switch-line compact">
-                    <input v-model="serverConfigDraft.text.enabled" type="checkbox" />
-                    <span class="switch-ui"></span>
-                    <span>启用</span>
-                  </label>
-                </div>
-                <div class="settings-grid">
-                  <label class="field span-2">
-                    <span>Base URL</span>
-                    <input v-model="serverConfigDraft.text.baseUrl" placeholder="https://api.openai.com" />
-                  </label>
-                  <label class="field">
-                    <span>模型</span>
-                    <input v-model="serverConfigDraft.text.model" placeholder="gpt-4o-mini" />
-                  </label>
-                  <label class="field">
-                    <span>接口类型</span>
-                    <select v-model="serverTextProviderPreset">
-                      <option value="chat">Chat 兼容</option>
-                      <option value="responses">OpenAI Responses</option>
-                      <option value="gemini">Gemini 原生</option>
-                      <option value="anthropic">Anthropic 原生</option>
-                      <option value="custom">自定义</option>
-                    </select>
-                  </label>
-                  <label v-if="serverTextProviderPreset === 'custom'" class="field">
-                    <span>接口路径</span>
-                    <input v-model="serverConfigDraft.text.path" placeholder="/v1/chat/completions" />
-                  </label>
-                  <label class="field">
-                    <span>API Key</span>
-                    <input v-model="serverConfigDraft.text.apiKey" type="password" autocomplete="off" />
-                  </label>
-                  <label class="switch-line compact">
-                    <input v-model="serverConfigDraft.text.useFullUrl" type="checkbox" />
-                    <span class="switch-ui"></span>
-                    <span>完整链接</span>
-                  </label>
-                </div>
-              </article>
-
-              <article class="settings-card">
-                <div class="settings-card-head">
-                  <h2>图片模型</h2>
-                  <label class="switch-line compact">
-                    <input v-model="serverConfigDraft.image.enabled" type="checkbox" />
-                    <span class="switch-ui"></span>
-                    <span>启用</span>
-                  </label>
-                </div>
-                <div class="settings-grid">
-                  <label class="field span-2">
-                    <span>Base URL</span>
-                    <input v-model="serverConfigDraft.image.baseUrl" placeholder="https://api.openai.com" />
-                  </label>
-                  <label class="field">
-                    <span>模型</span>
-                    <input v-model="serverConfigDraft.image.model" placeholder="gpt-image-1" />
-                  </label>
-                  <label class="field">
-                    <span>接口类型</span>
-                    <select v-model="serverImageProviderPreset">
-                      <option value="openai-image">OpenAI 图片兼容</option>
-                      <option value="custom">自定义</option>
-                    </select>
-                  </label>
-                  <label v-if="serverImageProviderPreset === 'custom'" class="field">
-                    <span>接口路径</span>
-                    <input v-model="serverConfigDraft.image.path" placeholder="/v1/images/generations" />
-                  </label>
-                  <label class="field">
-                    <span>尺寸</span>
-                    <select v-model="serverConfigDraft.image.imageSize">
-                      <option value="1024x1024">1024x1024</option>
-                      <option value="1792x1024">1792x1024</option>
-                      <option value="1024x1792">1024x1792</option>
-                    </select>
-                  </label>
-                  <label class="field span-2">
-                    <span>API Key</span>
-                    <input v-model="serverConfigDraft.image.apiKey" type="password" autocomplete="off" />
-                  </label>
-                  <label class="switch-line compact">
-                    <input v-model="serverConfigDraft.image.useFullUrl" type="checkbox" />
-                    <span class="switch-ui"></span>
-                    <span>完整链接</span>
-                  </label>
-                </div>
-              </article>
-
-              <article class="settings-card">
-                <div class="settings-card-head">
-                  <h2>OpenAI Speech</h2>
-                  <label class="switch-line compact">
-                    <input v-model="serverConfigDraft.speech.enabled" type="checkbox" />
-                    <span class="switch-ui"></span>
-                    <span>启用</span>
-                  </label>
-                </div>
-                <div class="settings-grid">
-                  <label class="field span-2">
-                    <span>Base URL</span>
-                    <input v-model="serverConfigDraft.speech.baseUrl" placeholder="https://api.openai.com" />
-                  </label>
-                  <label class="field">
-                    <span>模型</span>
-                    <input v-model="serverConfigDraft.speech.model" placeholder="gpt-4o-mini-tts" />
-                  </label>
-                  <label class="field">
-                    <span>接口类型</span>
-                    <select v-model="serverSpeechProviderPreset">
-                      <option value="openai-speech">OpenAI Speech 兼容</option>
-                      <option value="custom">自定义</option>
-                    </select>
-                  </label>
-                  <label v-if="serverSpeechProviderPreset === 'custom'" class="field">
-                    <span>接口路径</span>
-                    <input v-model="serverConfigDraft.speech.path" placeholder="/v1/audio/speech" />
-                  </label>
-                  <label class="field">
-                    <span>音色</span>
-                    <input v-model="serverConfigDraft.speech.voice" placeholder="alloy" />
-                  </label>
-                  <label class="field">
-                    <span>格式</span>
-                    <select v-model="serverConfigDraft.speech.responseFormat">
-                      <option value="mp3">mp3</option>
-                      <option value="wav">wav</option>
-                      <option value="opus">opus</option>
-                      <option value="flac">flac</option>
-                      <option value="pcm">pcm</option>
-                    </select>
-                  </label>
-                  <label class="field">
-                    <span>API Key</span>
-                    <input v-model="serverConfigDraft.speech.apiKey" type="password" autocomplete="off" />
-                  </label>
-                  <label class="switch-line compact">
-                    <input v-model="serverConfigDraft.speech.useFullUrl" type="checkbox" />
-                    <span class="switch-ui"></span>
-                    <span>完整链接</span>
-                  </label>
-                </div>
-              </article>
-            </div>
-          </section>
         </section>
       </main>
     </div>
@@ -650,49 +297,53 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineComponent, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { cancelAiBookCatchup, getAiBookCatchupStatus, startAiBookCatchup } from '../api/aiBook'
-import { saveAiModelConfig } from '../api/aiModel'
-import { getBookContent, getChapterList, getShelfBook } from '../api/bookshelf'
+import { getShelfBook } from '../api/bookshelf'
 import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
 import { useReaderStore } from '../stores/reader'
-import type {
-  AiBookConfig,
-  AiBookCatchupStatus,
-  AiBookCatchupTaskStatus,
-  AiBookEvidence,
-  AiBookMemory,
-  AiServerModelConfig,
-  Book,
-  BookChapter,
-  ImageProviderPreset,
-  SpeechProviderPreset,
-  TextProviderPreset,
-} from '../types'
-import { buildAiBookRelationshipGraph, layoutAiBookRelationshipGraph } from '../utils/aiBookGraph'
-import { buildAiBookLocationRows, groupAiBookWorldview } from '../utils/aiBookPresentation'
-import {
-  filterDisplayCharacters,
-  normalizeDisplayCharacters,
-  normalizeDisplayLocations,
-  normalizeDisplayRelationships,
-} from '../utils/aiBookSelectors'
-import { isAiBookMemoryV2, toAiBookDisplayMemory } from '../utils/aiBookV2'
-import {
-  DEFAULT_IMAGE_MODEL_PATH,
-  DEFAULT_SPEECH_MODEL_PATH,
-  DEFAULT_TEXT_MODEL_PATH,
-  describeAiBookTextRuntime,
-  mediaPresetFromPath,
-  shouldAutoUseServerAiBookConfig,
-  textPathForPreset,
-  textPresetFromPath,
-} from '../utils/aiBookConfig'
+import type { AiBookCatchupStatus, AiBookCatchupTaskStatus, AiBookEvidence, Book } from '../types'
+import { describeCatchupDetail, describeCatchupProgress } from '../utils/aiBookCatchupStatus'
 import { collapseWhitespace, summarizeDisplayError } from '../utils/httpError'
 
-type AiTab = 'overview' | 'characters' | 'relationships' | 'map' | 'settings'
+type AiTab = 'overview' | 'characters' | 'relationships' | 'map'
+
+type DisplayCharacter = {
+  id: string
+  name: string
+  aliases: string[]
+  importance: string
+  description: string
+  currentStatus: string
+  lastSeenChapter: string
+  evidence: AiBookEvidence[]
+}
+
+type DisplayRelationship = {
+  id: string
+  sourceName: string
+  targetName: string
+  label: string
+  summary: string
+  kind: string
+  polarity: string
+  strength: string
+  status: string
+  evidence: AiBookEvidence[]
+}
+
+type DisplayLocation = {
+  id: string
+  name: string
+  kind: string
+  scale: string
+  description: string
+  currentStatus: string
+  parentName: string
+  firstSeenChapter: string
+  evidence: AiBookEvidence[]
+}
 
 const EmptyState = defineComponent({
   props: { text: { type: String, required: true } },
@@ -706,26 +357,13 @@ const router = useRouter()
 const aiStore = useAiBookStore()
 const appStore = useAppStore()
 const readerStore = useReaderStore()
-const catchupPollingStatuses = new Set<AiBookCatchupTaskStatus>(['running', 'pausing'])
-const catchupTerminalStatuses = new Set<AiBookCatchupTaskStatus>(['paused', 'completed', 'failed'])
-
 const loading = ref(true)
 const loadError = ref('')
 const activeTab = ref<AiTab>('overview')
-const adminModelPanelRef = ref<HTMLElement | null>(null)
 const book = ref<Book | null>(null)
-const chapters = ref<BookChapter[]>([])
 const catchupStatus = ref<AiBookCatchupStatus | null>(null)
 const catchupActionPending = ref(false)
-const configDraft = reactive<AiBookConfig>({ ...aiStore.config })
-const serverConfigDraft = reactive<AiServerModelConfig>(createEmptyServerModelConfig())
-const selectedGraphNodeId = ref('')
-const characterSearch = ref('')
-const collapsedLocationIds = ref(new Set<string>())
-const collapsedWorldviewCategories = ref(new Set<string>())
 let catchupPollTimer: number | null = null
-let catchupPollInFlight = false
-let lastCatchupReloadKey = ''
 let catchupDisposed = false
 
 const tabs: Array<{ key: AiTab; label: string }> = [
@@ -733,216 +371,160 @@ const tabs: Array<{ key: AiTab; label: string }> = [
   { key: 'characters', label: '角色' },
   { key: 'relationships', label: '关系' },
   { key: 'map', label: '地图' },
-  { key: 'settings', label: '设置' },
 ]
 
-const memory = computed(() => aiStore.memory)
-const displayBaseMemory = computed(() => memory.value ? toAiBookDisplayMemory(memory.value) : null)
-const v2Summary = computed(() => isAiBookMemoryV2(memory.value) ? memory.value.summary : null)
-const overviewSummary = computed(() => v2Summary.value?.current || displayBaseMemory.value?.summary || '暂无资料')
-const recentChanges = computed(() => v2Summary.value?.recentChanges || [])
-const openQuestions = computed(() => v2Summary.value?.openQuestions || [])
-const canUseServerModel = computed(() => aiStore.canUseServerModel || aiStore.isServerModelAdmin)
-const isServerModelAdmin = computed(() => aiStore.isServerModelAdmin)
-const serverConfig = computed(() => aiStore.serverModelConfig?.config || null)
-const serverTextReady = computed(() => Boolean(serverConfig.value?.text.enabled && serverConfig.value.text.baseUrl && serverConfig.value.text.model))
-const serverImageReady = computed(() => Boolean(serverConfig.value?.image.enabled && serverConfig.value.image.baseUrl && serverConfig.value.image.model))
-const serverSpeechReady = computed(() => Boolean(serverConfig.value?.speech.enabled && serverConfig.value.speech.baseUrl && serverConfig.value.speech.model))
-const activeTextRuntime = computed(() => describeAiBookTextRuntime(aiStore.config, serverConfig.value))
-const worldviewGroups = computed(() => groupAiBookWorldview(displayBaseMemory.value?.worldview || [], collapsedWorldviewCategories.value))
-const importantCharacters = computed(() => normalizeDisplayCharacters(displayBaseMemory.value?.characters || []))
-const filteredCharacters = computed(() => filterDisplayCharacters(importantCharacters.value, characterSearch.value))
-const displayRelationships = computed(() => normalizeDisplayRelationships(displayBaseMemory.value?.relationships || []))
-const displayLocations = computed(() => normalizeDisplayLocations(displayBaseMemory.value?.locations || []))
-const visibleLocationRows = computed(() => buildAiBookLocationRows(displayLocations.value, collapsedLocationIds.value))
-const mapStatusText = computed(() => {
-  if (displayBaseMemory.value?.mapDirty) return '待手动重绘'
-  return displayBaseMemory.value?.map?.updatedAt ? formatTime(displayBaseMemory.value.map.updatedAt) : '未生成'
-})
-const displayMemory = computed<AiBookMemory | null>(() => displayBaseMemory.value
-  ? {
-      ...displayBaseMemory.value,
-      characters: importantCharacters.value,
-      relationships: displayRelationships.value,
-      locations: displayLocations.value,
-    }
-  : null)
-const textProviderPreset = computed<TextProviderPreset>({
-  get: () => textPresetFromPath(configDraft.textPath),
-  set: (preset) => applyTextPreset(configDraft, preset),
-})
-const imageProviderPreset = computed<ImageProviderPreset | 'custom'>({
-  get: () => mediaPresetFromPath(configDraft.imagePath, 'image') as ImageProviderPreset,
-  set: (preset) => {
-    if (preset !== 'custom') configDraft.imagePath = DEFAULT_IMAGE_MODEL_PATH
-  },
-})
-const serverTextProviderPreset = computed<TextProviderPreset>({
-  get: () => textPresetFromPath(serverConfigDraft.text.path),
-  set: (preset) => applyTextPreset(serverConfigDraft.text, preset),
-})
-const serverImageProviderPreset = computed<ImageProviderPreset | 'custom'>({
-  get: () => mediaPresetFromPath(serverConfigDraft.image.path, 'image') as ImageProviderPreset,
-  set: (preset) => {
-    if (preset !== 'custom') serverConfigDraft.image.path = DEFAULT_IMAGE_MODEL_PATH
-  },
-})
-const serverSpeechProviderPreset = computed<SpeechProviderPreset | 'custom'>({
-  get: () => mediaPresetFromPath(serverConfigDraft.speech.path, 'speech') as SpeechProviderPreset,
-  set: (preset) => {
-    if (preset !== 'custom') serverConfigDraft.speech.path = DEFAULT_SPEECH_MODEL_PATH
-  },
-})
-const relationshipGraph = computed(() => displayMemory.value
-  ? buildAiBookRelationshipGraph(displayMemory.value)
-  : { nodes: [], links: [] })
-const activeGraphNodeId = computed(() => {
-  const selected = selectedGraphNodeId.value
-  if (selected && relationshipGraph.value.nodes.some((node) => node.id === selected)) {
-    return selected
+const memoryView = computed(() => {
+  const currentBook = book.value
+  const currentMemory = aiStore.memoryView
+  if (!currentBook || !currentMemory || currentMemory.bookUrl !== currentBook.bookUrl) {
+    return null
   }
-  return relationshipGraph.value.nodes[0]?.id || ''
+  return currentMemory
 })
-const graphLayout = computed(() => layoutAiBookRelationshipGraph(relationshipGraph.value, activeGraphNodeId.value))
-const selectedGraphNode = computed(() => {
-  return graphLayout.value.nodes.find((node) => node.id === activeGraphNodeId.value)
-    || graphLayout.value.nodes[0]
-    || null
+const chapterMemory = computed(() => {
+  const currentBook = book.value
+  const currentChapter = aiStore.chapterMemory
+  if (!currentBook || !currentChapter || currentChapter.bookUrl !== currentBook.bookUrl || currentChapter.chapterIndex !== currentChapterIndex.value) {
+    return null
+  }
+  return currentChapter
 })
-const selectedGraphConnections = computed(() => {
-  const current = selectedGraphNode.value
-  if (!current) return []
-  return graphLayout.value.links
-    .filter((link) => link.source === current.id || link.target === current.id)
-    .map((link) => {
-      const otherId = link.source === current.id ? link.target : link.source
-      const other = graphLayout.value.nodes.find((node) => node.id === otherId)
-      return other ? { id: other.id, label: other.label, relation: link.label } : null
-    })
-    .filter((item): item is { id: string; label: string; relation: string } => Boolean(item))
+const currentChapterIndex = computed(() => {
+  if (readerStore.book?.bookUrl === book.value?.bookUrl) {
+    return Math.max(0, readerStore.currentIndex)
+  }
+  return Math.max(0, book.value?.durChapterIndex || 0)
 })
+const currentChapterLabel = computed(() => {
+  const title = chapterMemory.value?.chapterTitle
+    || (readerStore.book?.bookUrl === book.value?.bookUrl ? readerStore.currentChapter?.title : book.value?.durChapterTitle)
+    || ''
+  const prefix = formatChapter(currentChapterIndex.value)
+  return title ? `${prefix} · ${title}` : prefix
+})
+const processedChapterLabel = computed(() => formatChapter(memoryView.value?.processedChapterIndex))
 const progressText = computed(() => {
-  const index = memory.value?.processedChapterIndex
-  if (index == null) return '尚未生成'
-  return `已更新至第 ${index + 1} 章`
+  const processed = processedChapterLabel.value
+  const current = currentChapterLabel.value
+  if (memoryView.value?.processedChapterIndex == null) {
+    return `当前阅读 ${current}`
+  }
+  return `${processed} 已入库 · 当前阅读 ${current}`
 })
-const isCatchupRunning = computed(() => catchupStatus.value ? catchupPollingStatuses.has(catchupStatus.value.status) : false)
-const catchupActionDisabled = computed(() => catchupActionPending.value || aiStore.isBusy || catchupStatus.value?.status === 'pausing')
+const characterNameById = computed(() => new Map((memoryView.value?.characters || []).map((item) => [item.id, item.name])))
+const locationNameById = computed(() => new Map((memoryView.value?.locations || []).map((item) => [item.id, item.name])))
+const chapterStateByName = computed(() => new Map((chapterMemory.value?.digest?.characterStates || []).map((item) => [item.name, item])))
+const currentChapterSummary = computed(() => chapterMemory.value?.digest?.summary || chapterMemory.value?.lastError || '当前章节还没有摘要')
+const currentKeyPoints = computed(() => chapterMemory.value?.digest?.keyPoints || [])
+const currentCharacterStates = computed(() => chapterMemory.value?.digest?.characterStates || [])
+const currentChapterRelations = computed(() => chapterMemory.value?.digest?.characterRelations || [])
+const displayCharacters = computed<DisplayCharacter[]>(() => (memoryView.value?.characters || []).map((character) => {
+  const chapterState = chapterStateByName.value.get(character.name)
+  return {
+    id: character.id,
+    name: character.name,
+    aliases: character.aliases || [],
+    importance: character.importance || 'unknown',
+    description: character.description || '',
+    currentStatus: chapterState?.status || '',
+    lastSeenChapter: chapterState?.lastSeenChapterTitle || formatChapter(chapterState?.lastSeenChapterIndex ?? character.lastSeenChapterIndex ?? undefined),
+    evidence: character.evidence,
+  }
+}))
+const displayRelationships = computed<DisplayRelationship[]>(() => (memoryView.value?.relationships || []).map((relationship) => ({
+  id: relationship.id,
+  sourceName: characterNameById.value.get(relationship.sourceCharacterId) || relationship.sourceCharacterId,
+  targetName: characterNameById.value.get(relationship.targetCharacterId) || relationship.targetCharacterId,
+  label: relationship.label,
+  summary: relationship.summary,
+  kind: relationship.kind,
+  polarity: relationship.polarity,
+  strength: relationship.strength,
+  status: relationship.status,
+  evidence: relationship.evidence,
+})))
+const displayLocations = computed<DisplayLocation[]>(() => (memoryView.value?.locations || []).map((location) => ({
+  id: location.id,
+  name: location.name,
+  kind: location.kind,
+  scale: location.scale,
+  description: location.description,
+  currentStatus: location.currentStatus || '',
+  parentName: location.parentLocationId ? locationNameById.value.get(location.parentLocationId) || '' : '',
+  firstSeenChapter: formatChapter(location.firstSeenChapterIndex ?? undefined),
+  evidence: location.evidence,
+})))
+const worldviewGroups = computed(() => {
+  const groups = new Map<string, NonNullable<typeof memoryView.value>["knowledgeFacts"]>()
+  for (const fact of memoryView.value?.knowledgeFacts || []) {
+    const key = fact.category || 'unknown'
+    const items = groups.get(key) || []
+    items.push(fact)
+    groups.set(key, items)
+  }
+  return [...groups.entries()].map(([category, items]) => ({ category, items }))
+})
+const mapStatusText = computed(() => '地图生成功能已暂时禁用')
+const generateDisabled = computed(() => aiStore.isBusy || !book.value)
+const generateButtonLabel = computed(() => aiStore.phase === 'text' ? '生成中...' : '生成当前章节')
+const pollingStatuses = new Set<AiBookCatchupTaskStatus>(['running', 'canceling', 'pausing'])
+const terminalStatuses = new Set<AiBookCatchupTaskStatus>(['paused', 'canceled', 'completed', 'failed'])
+const isCatchupRunning = computed(() => catchupStatus.value ? pollingStatuses.has(catchupStatus.value.status) : false)
+const catchupActionDisabled = computed(() => aiStore.isBusy || catchupActionPending.value || !book.value)
 const catchupActionLabel = computed(() => {
-  if (aiStore.phase === 'text') return '更新中...'
-  if (catchupStatus.value?.status === 'pausing') return '取消中...'
+  if (catchupStatus.value?.status === 'canceling' || catchupStatus.value?.status === 'pausing') return '取消中...'
   if (isCatchupRunning.value) return '取消补齐'
   return '补齐到当前进度'
 })
-const catchupStatusLabel = computed(() => catchupStatus.value ? describeCatchupStatus(catchupStatus.value.status) : '')
+const catchupStatusLabel = computed(() => describeCatchupStatus(catchupStatus.value?.status || 'idle'))
 const catchupProgressPercent = computed(() => {
   const total = Math.max(catchupStatus.value?.totalChapters || 0, 0)
   const completed = Math.max(catchupStatus.value?.completedChapters || 0, 0)
   if (!total) return catchupStatus.value?.status === 'completed' ? 100 : 0
-  return Math.max(0, Math.min(100, Math.round((completed / total) * 100)))
+  return Math.round((Math.min(completed, total) / total) * 100)
 })
 const catchupProgressSummary = computed(() => {
   if (!catchupStatus.value) return ''
-  const total = Math.max(catchupStatus.value.totalChapters || 0, 0)
-  const completed = Math.max(catchupStatus.value.completedChapters || 0, 0)
-  const target = typeof catchupStatus.value.targetChapterIndex === 'number'
-    ? `目标第 ${catchupStatus.value.targetChapterIndex + 1} 章`
-    : ''
-  if (!total) return target || '等待任务开始'
-  return `${Math.min(completed, total)}/${total}${target ? ` · ${target}` : ''}`
+  return describeCatchupProgress(catchupStatus.value)
 })
 const catchupDetailText = computed(() => {
   if (!catchupStatus.value) return ''
-  if (catchupStatus.value.status === 'failed') {
-    return catchupStatus.value.error || '补齐任务失败'
-  }
-  const current = formatCatchupChapter(catchupStatus.value.currentChapterIndex, catchupStatus.value.currentChapterTitle)
-  const processed = formatCatchupChapter(catchupStatus.value.processedChapterIndex, catchupStatus.value.processedChapterTitle)
-  if (catchupStatus.value.status === 'running' && current) return `当前正在处理 ${current}`
-  if (catchupStatus.value.status === 'pausing' && current) return `取消请求已发送，当前仍在处理 ${current}`
-  if (catchupStatus.value.status === 'completed') return processed ? `已完成，最新补齐到 ${processed}` : '已完成'
-  if (catchupStatus.value.status === 'paused') return processed ? `已暂停，最新补齐到 ${processed}` : '任务已暂停'
-  if (processed) return `已补齐到 ${processed}`
-  return '将从当前已保存进度继续补齐'
+  return describeCatchupDetail(catchupStatus.value)
 })
-const catchupUpdatedAtText = computed(() => {
-  if (!catchupStatus.value?.updatedAt) return ''
-  return `更新于 ${formatTime(catchupStatus.value.updatedAt)}`
-})
+const catchupUpdatedAtText = computed(() => catchupStatus.value?.updatedAt ? `更新于 ${formatTime(catchupStatus.value.updatedAt)}` : '')
+const chapterGenerationStatusLabel = computed(() => chapterMemory.value?.generationStatus || 'idle')
 const statusNotice = computed(() => {
-  const memoryError = memory.value?.lastError || ''
-  const catchupError = catchupStatus.value?.status === 'failed' ? catchupStatus.value.error || '' : ''
-  const source = aiStore.statusText || (collapseWhitespace(memoryError) === collapseWhitespace(catchupError) ? '' : memoryError)
-  if (!source.trim()) return null
-  const isLastError = !aiStore.statusText && Boolean(memory.value?.lastError)
-  const summary = summarizeDisplayError(source)
-  const normalizedSource = collapseWhitespace(source)
-  const hasDetail = normalizedSource !== summary && source.trim().length > summary.length + 20
+  const errorText = [
+    aiStore.statusText,
+    chapterMemory.value?.lastError,
+    memoryView.value?.lastError,
+    catchupStatus.value?.status === 'failed' ? catchupStatus.value.error : '',
+  ].find((item) => (item || '').trim()) || ''
+  if (!errorText) return null
+  const summary = summarizeDisplayError(errorText)
+  const normalized = collapseWhitespace(errorText)
   return {
     summary,
-    detail: hasDetail ? source.trim() : '',
-    isError: aiStore.phase === 'error' || isLastError,
+    detail: normalized !== summary ? errorText : '',
+    isError: aiStore.phase === 'error' || Boolean(chapterMemory.value?.lastError) || Boolean(memoryView.value?.lastError),
   }
 })
-
-watch(
-  () => aiStore.config,
-  (next) => Object.assign(configDraft, next),
-  { deep: true },
-)
-
-watch(
-  () => configDraft.textModel,
-  () => {
-    if (textProviderPreset.value === 'gemini') configDraft.textPath = textPathForPreset('gemini', configDraft.textModel)
-  },
-)
-
-watch(
-  () => serverConfigDraft.text.model,
-  () => {
-    if (serverTextProviderPreset.value === 'gemini') {
-      serverConfigDraft.text.path = textPathForPreset('gemini', serverConfigDraft.text.model)
-    }
-  },
-)
-
-watch(
-  () => aiStore.serverModelConfig?.config,
-  (next) => {
-    if (next) Object.assign(serverConfigDraft, cloneServerModelConfig(next))
-  },
-  { deep: true },
-)
 
 onMounted(async () => {
   catchupDisposed = false
-  await appStore.fetchUserInfo()
-  aiStore.refreshConfig()
-  await aiStore.loadServerModelConfig({ force: true })
-  if (shouldAutoUseServerAiBookConfig(aiStore.config, canUseServerModel.value)) {
-    aiStore.persistConfig({ ...aiStore.config, modelSource: 'server' })
-  }
-  Object.assign(configDraft, aiStore.config)
-  if (aiStore.serverModelConfig?.config) {
-    Object.assign(serverConfigDraft, cloneServerModelConfig(aiStore.serverModelConfig.config))
-  }
   const bookUrl = String(route.query.bookUrl || '')
   if (!bookUrl) {
     loadError.value = '缺少书籍参数，无法加载 AI资料'
-    appStore.showToast(loadError.value, 'error')
     loading.value = false
     return
   }
   try {
+    await appStore.fetchUserInfo()
     loadError.value = ''
     book.value = await getShelfBook(bookUrl)
     await aiStore.load(book.value)
-    chapters.value = await getChapterList({
-      bookUrl: book.value.bookUrl,
-      bookSourceUrl: book.value.origin,
-    }).catch(() => [])
-    await refreshCatchupStatus({ silent: true })
+    await loadCurrentChapterMemory()
+    await refreshCatchupStatus(true)
   } catch (error) {
     loadError.value = (error as Error).message || 'AI资料加载失败'
     appStore.showToast(loadError.value, 'error')
@@ -957,16 +539,11 @@ onUnmounted(() => {
 })
 
 watch(
-  () => [route.query.tab, route.query.section, loading.value] as const,
-  async () => {
-    if (loading.value) return
-    if (route.query.tab === 'settings') activeTab.value = 'settings'
-    if (route.query.tab === 'settings' && route.query.section === 'server-model') {
-      await nextTick()
-      adminModelPanelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
+  () => [book.value?.bookUrl, currentChapterIndex.value] as const,
+  ([bookUrl]) => {
+    if (!bookUrl || loading.value) return
+    void loadCurrentChapterMemory()
   },
-  { immediate: true },
 )
 
 function goBack() {
@@ -984,7 +561,31 @@ async function toggleEnabled(event: Event) {
   }
 }
 
-async function updateToCurrent() {
+async function loadCurrentChapterMemory() {
+  if (!book.value) return
+  try {
+    await aiStore.loadChapterMemory(book.value.bookUrl, currentChapterIndex.value)
+  } catch {
+    // 章节视图允许缺失，页面继续渲染全书视图
+  }
+}
+
+async function generateCurrentChapter() {
+  if (!book.value) return
+  try {
+    await aiStore.generateChapterMemory({
+      bookUrl: book.value.bookUrl,
+      chapterIndex: currentChapterIndex.value,
+      mode: 'manual',
+    })
+    appStore.showToast('当前章节 AI资料已生成', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '当前章节生成失败', 'error')
+  }
+}
+
+async function toggleCatchup() {
+  if (!book.value) return
   if (isCatchupRunning.value) {
     await cancelCatchupTask()
     return
@@ -993,36 +594,19 @@ async function updateToCurrent() {
 }
 
 async function startCatchupTask() {
-  if (!book.value || !memory.value) return
+  if (!book.value) return
   catchupActionPending.value = true
   try {
-    const status = await startAiBookCatchup({
+    const status = await aiStore.startCatchup({
       bookUrl: book.value.bookUrl,
-      targetChapterIndex: resolveCurrentIndex(),
+      targetChapterIndex: currentChapterIndex.value,
     })
-    await applyCatchupStatus(status, { reloadOnTerminal: true })
-    if (status.status === 'completed') {
-      appStore.showToast('当前进度已更新', 'success')
-    } else if (status.status === 'failed') {
-      appStore.showToast(status.error || '补齐任务启动后失败', 'error')
-    } else if (status.status === 'paused') {
-      appStore.showToast('补齐任务已暂停', 'success')
-    } else {
-      appStore.showToast('已启动补齐任务', 'success')
-    }
-    return
+    await applyCatchupStatus(status)
+    appStore.showToast(status.status === 'completed' ? '补齐完成' : '已启动补齐任务', 'success')
   } catch (error) {
-    if (!shouldFallbackToLocalCatchup(error)) {
-      appStore.showToast((error as Error).message || '补齐任务启动失败', 'error')
-      return
-    }
-    appStore.showToast('后端补齐任务不可用，改为前端逐章更新', 'warning')
-    await updateToCurrentFallback()
-    return
+    appStore.showToast((error as Error).message || '补齐任务启动失败', 'error')
   } finally {
-    if (!aiStore.isBusy) {
-      catchupActionPending.value = false
-    }
+    catchupActionPending.value = false
   }
 }
 
@@ -1030,8 +614,8 @@ async function cancelCatchupTask() {
   if (!book.value) return
   catchupActionPending.value = true
   try {
-    const status = await cancelAiBookCatchup(book.value.bookUrl)
-    await applyCatchupStatus(status, { reloadOnTerminal: true })
+    const status = await aiStore.cancelCatchup(book.value.bookUrl)
+    await applyCatchupStatus(status)
     appStore.showToast('补齐任务已取消', 'success')
   } catch (error) {
     appStore.showToast((error as Error).message || '补齐任务取消失败', 'error')
@@ -1040,146 +624,69 @@ async function cancelCatchupTask() {
   }
 }
 
-async function updateToCurrentFallback() {
-  if (!book.value || !memory.value) return
-  const targetIndex = resolveCurrentIndex()
-  if (!chapters.value.length) {
-    appStore.showToast('目录未加载，无法更新', 'warning')
-    return
-  }
-  const retryIndex = typeof memory.value.lastErrorChapterIndex === 'number'
-    ? memory.value.lastErrorChapterIndex
-    : undefined
-  const startIndex = Math.max(0, retryIndex ?? ((memory.value.processedChapterIndex ?? -1) + 1))
-  if (startIndex > targetIndex) {
-    appStore.showToast('当前进度已更新', 'success')
-    return
-  }
-
-  try {
-    let currentMemory = memory.value
-    for (let index = startIndex; index <= targetIndex; index += 1) {
-      const chapter = chapters.value[index]
-      if (!chapter) continue
-      const chapterContent = await resolveChapterContent(index, chapter)
-      currentMemory = await aiStore.runChapterUpdate({
-        book: book.value,
-        chapter,
-        chapterContent,
-        current: currentMemory,
-        chapters: chapters.value,
-        throwOnError: true,
-      })
-    }
-    appStore.showToast('AI资料已更新', 'success')
-  } catch (error) {
-    appStore.showToast((error as Error).message || 'AI资料更新失败', 'error')
-  } finally {
-    catchupActionPending.value = false
-  }
-}
-
-async function redrawMap() {
-  if (!book.value) return
-  const next = await aiStore.redrawMap(book.value)
-  const displayNext = next ? toAiBookDisplayMemory(next) : null
-  if (displayNext?.map?.imageUrl) {
-    appStore.showToast('地图已更新', 'success')
-  } else {
-    appStore.showToast('图片地图不可用，已显示关系图', 'warning')
-  }
-}
-
-function selectGraphNode(id: string) {
-  selectedGraphNodeId.value = id
-}
-
-function toggleLocation(name: string) {
-  const key = normalizeKey(name)
-  const next = new Set(collapsedLocationIds.value)
-  if (next.has(key)) {
-    next.delete(key)
-  } else {
-    next.add(key)
-  }
-  collapsedLocationIds.value = next
-}
-
-function isLocationCollapsed(name: string) {
-  return collapsedLocationIds.value.has(normalizeKey(name))
-}
-
-function toggleWorldviewGroup(category: string) {
-  const key = normalizeKey(category)
-  const next = new Set(collapsedWorldviewCategories.value)
-  if (next.has(key)) {
-    next.delete(key)
-  } else {
-    next.add(key)
-  }
-  collapsedWorldviewCategories.value = next
-}
-
-function graphLabelWidth(label: string) {
-  return Math.max(44, Math.min(108, label.length * 14 + 22))
-}
-
-function saveConfig() {
-  if (configDraft.modelSource === 'server' && !canUseServerModel.value) {
-    appStore.showToast('当前账号没有使用后端模型配置的权限', 'warning')
-    configDraft.modelSource = 'browser'
-  }
-  aiStore.persistConfig({ ...configDraft })
-  appStore.showToast('AI配置已保存', 'success')
-}
-
-async function saveServerConfig() {
-  if (!isServerModelAdmin.value) return
-  try {
-    const saved = await saveAiModelConfig(cloneServerModelConfig(serverConfigDraft))
-    aiStore.serverModelConfig = saved
-    Object.assign(serverConfigDraft, cloneServerModelConfig(saved.config))
-    appStore.showToast('后端模型配置已保存', 'success')
-  } catch (error) {
-    appStore.showToast((error as Error).message || '后端模型配置保存失败', 'error')
-  }
-}
-
 async function resetMemory() {
   if (!book.value) return
   if (!confirm('确定重置当前书的 AI资料？')) return
-  await aiStore.reset(book.value)
-  appStore.showToast('AI资料已重置', 'success')
-}
-
-function resolveCurrentIndex() {
-  if (readerStore.book?.bookUrl === book.value?.bookUrl) {
-    return Math.max(0, readerStore.currentIndex)
+  try {
+    await aiStore.reset(book.value)
+    await loadCurrentChapterMemory()
+    catchupStatus.value = null
+    appStore.showToast('AI资料已重置', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '重置失败', 'error')
   }
-  return Math.max(0, Math.min(chapters.value.length - 1, book.value?.durChapterIndex || 0))
 }
 
-async function resolveChapterContent(index: number, chapter: BookChapter) {
-  if (readerStore.book?.bookUrl === book.value?.bookUrl) {
-    const content = await readerStore.fetchChapterContent(index)
-    if (content) return content
+async function refreshCatchupStatus(silent = false) {
+  if (!book.value || catchupDisposed) return
+  try {
+    const status = await aiStore.loadCatchupStatus(book.value.bookUrl)
+    await applyCatchupStatus(status)
+  } catch (error) {
+    if (!silent) {
+      appStore.showToast((error as Error).message || '补齐任务状态获取失败', 'error')
+    }
   }
-  return getBookContent({
-    chapterUrl: chapter.url,
-    bookSourceUrl: book.value?.origin,
-  })
 }
 
-function formatTime(value: number | string) {
-  return new Date(value).toLocaleString()
+async function applyCatchupStatus(status: AiBookCatchupStatus | null) {
+  if (!status || catchupDisposed) return
+  catchupStatus.value = status
+  if (pollingStatuses.has(status.status)) {
+    scheduleCatchupPoll()
+    return
+  }
+  stopCatchupPolling()
+  if (terminalStatuses.has(status.status) && book.value) {
+    await aiStore.load(book.value)
+    await loadCurrentChapterMemory()
+  }
+}
+
+function scheduleCatchupPoll() {
+  stopCatchupPolling()
+  if (catchupDisposed || !catchupStatus.value || !pollingStatuses.has(catchupStatus.value.status)) return
+  catchupPollTimer = window.setTimeout(() => {
+    void refreshCatchupStatus(true)
+  }, 2000)
+}
+
+function stopCatchupPolling() {
+  if (catchupPollTimer != null) {
+    window.clearTimeout(catchupPollTimer)
+    catchupPollTimer = null
+  }
 }
 
 function describeCatchupStatus(status: AiBookCatchupTaskStatus) {
   switch (status) {
     case 'running':
       return '运行中'
+    case 'canceling':
     case 'pausing':
-      return '暂停中'
+      return '取消中'
+    case 'canceled':
+      return '已取消'
     case 'paused':
       return '已暂停'
     case 'completed':
@@ -1191,78 +698,13 @@ function describeCatchupStatus(status: AiBookCatchupTaskStatus) {
   }
 }
 
-function formatCatchupChapter(index?: number, title?: string) {
-  if (typeof index !== 'number' && !title) return ''
-  const parts = []
-  if (typeof index === 'number') parts.push(`第 ${index + 1} 章`)
-  if (title) parts.push(title)
-  return parts.join(' · ')
+function formatChapter(index?: number | null) {
+  if (typeof index !== 'number') return '当前章节'
+  return `第 ${index + 1} 章`
 }
 
-function stopCatchupPolling() {
-  if (catchupPollTimer != null) {
-    window.clearTimeout(catchupPollTimer)
-    catchupPollTimer = null
-  }
-}
-
-function scheduleCatchupPoll() {
-  stopCatchupPolling()
-  if (catchupDisposed) return
-  if (!catchupStatus.value || !catchupPollingStatuses.has(catchupStatus.value.status)) return
-  catchupPollTimer = window.setTimeout(() => {
-    void refreshCatchupStatus({ silent: true })
-  }, 2000)
-}
-
-async function reloadAiBookAfterCatchup(status: AiBookCatchupStatus) {
-  if (catchupDisposed) return
-  if (!book.value || !catchupTerminalStatuses.has(status.status)) return
-  const key = `${status.status}:${status.updatedAt}`
-  if (lastCatchupReloadKey === key) return
-  lastCatchupReloadKey = key
-  await aiStore.load(book.value)
-}
-
-async function applyCatchupStatus(status: AiBookCatchupStatus, options: { reloadOnTerminal: boolean }) {
-  if (catchupDisposed) return
-  catchupStatus.value = status
-  if (catchupPollingStatuses.has(status.status)) {
-    scheduleCatchupPoll()
-    return
-  }
-  stopCatchupPolling()
-  if (options.reloadOnTerminal) {
-    await reloadAiBookAfterCatchup(status)
-  }
-}
-
-async function refreshCatchupStatus(options: { silent: boolean }) {
-  if (catchupDisposed || !book.value || catchupPollInFlight) return catchupStatus.value
-  catchupPollInFlight = true
-  try {
-    const status = await getAiBookCatchupStatus(book.value.bookUrl)
-    if (catchupDisposed) return catchupStatus.value
-    await applyCatchupStatus(status, { reloadOnTerminal: true })
-    return status
-  } catch (error) {
-    if (catchupDisposed) return catchupStatus.value
-    if (!options.silent) {
-      appStore.showToast((error as Error).message || '补齐任务状态获取失败', 'error')
-    }
-    if (isCatchupRunning.value) {
-      scheduleCatchupPoll()
-    }
-    return catchupStatus.value
-  } finally {
-    catchupPollInFlight = false
-  }
-}
-
-function shouldFallbackToLocalCatchup(error: unknown) {
-  const message = ((error as Error)?.message || '').toLowerCase()
-  return message.includes('404')
-    || message.includes('405')
+function formatTime(value: number | string) {
+  return new Date(value).toLocaleString()
 }
 
 function hasEvidence(evidence: AiBookEvidence[] | undefined) {
@@ -1278,69 +720,9 @@ function evidenceKey(evidence: AiBookEvidence) {
 }
 
 function evidenceChapterLabel(evidence: AiBookEvidence) {
-  return evidence.chapterTitle || `第 ${evidence.chapterIndex + 1} 章`
+  return evidence.chapterTitle || formatChapter(evidence.chapterIndex)
 }
 
-function normalizeKey(value: string | undefined) {
-  return (value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[·•・]/g, '.')
-    .replace(/\s+/g, '')
-}
-
-function createEmptyServerModelConfig(): AiServerModelConfig {
-  return {
-    text: {
-      enabled: false,
-      baseUrl: '',
-      apiKey: '',
-      model: 'gpt-4o-mini',
-      path: DEFAULT_TEXT_MODEL_PATH,
-      useFullUrl: false,
-    },
-    image: {
-      enabled: false,
-      baseUrl: '',
-      apiKey: '',
-      model: 'gpt-image-1',
-      path: DEFAULT_IMAGE_MODEL_PATH,
-      useFullUrl: false,
-      imageSize: '1024x1024',
-    },
-    speech: {
-      enabled: false,
-      baseUrl: '',
-      apiKey: '',
-      model: 'gpt-4o-mini-tts',
-      path: DEFAULT_SPEECH_MODEL_PATH,
-      useFullUrl: false,
-      voice: 'alloy',
-      responseFormat: 'mp3',
-    },
-  }
-}
-
-function cloneServerModelConfig(config: AiServerModelConfig): AiServerModelConfig {
-  const cloned = JSON.parse(JSON.stringify(config)) as AiServerModelConfig
-  cloned.text.path = normalizeModelPath(cloned.text.path, DEFAULT_TEXT_MODEL_PATH)
-  cloned.image.path = normalizeModelPath(cloned.image.path, DEFAULT_IMAGE_MODEL_PATH)
-  cloned.speech.path = normalizeModelPath(cloned.speech.path, DEFAULT_SPEECH_MODEL_PATH)
-  return cloned
-}
-
-function applyTextPreset(target: { textModel?: string; textPath?: string; model?: string; path?: string }, preset: TextProviderPreset) {
-  if (preset === 'custom') return
-  const model = target.textModel ?? target.model ?? ''
-  const path = textPathForPreset(preset, model)
-  if ('textPath' in target) target.textPath = path
-  else target.path = path
-}
-
-function normalizeModelPath(path: string | undefined, fallback: string) {
-  const value = (path || '').trim() || fallback
-  return value.startsWith('/') ? value : `/${value}`
-}
 </script>
 
 <style scoped>
@@ -1360,36 +742,13 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   color: var(--color-text-secondary);
 }
 
-.ai-empty-panel {
-  max-width: 520px;
-  margin: 72px auto;
-  padding: 24px;
-  border: 1px solid var(--color-border);
-  border-radius: 16px;
-  background: var(--color-bg-elevated);
-  color: var(--color-text);
-}
-
-.ai-empty-panel h2 {
-  margin: 18px 0 10px;
-}
-
-.ai-empty-panel p {
-  margin: 0 0 8px;
-  color: var(--color-text-secondary);
-}
-
-.ai-empty-panel small {
-  color: var(--color-text-tertiary);
-}
-
 .ai-shell {
   height: 100%;
   display: flex;
   flex-direction: column;
   max-width: 1240px;
   margin: 0 auto;
-  padding: 16px 28px 22px;
+  padding: 16px 24px 22px;
   box-sizing: border-box;
   min-height: 0;
 }
@@ -1397,43 +756,41 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
 .ai-header {
   display: flex;
   justify-content: space-between;
-  gap: 18px;
+  gap: 16px;
   align-items: center;
-  border-bottom: 1px solid var(--color-border-light);
   padding-bottom: 12px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
-.title-stack {
+.title-stack,
+.title-row {
   min-width: 0;
 }
 
 .title-row {
   display: flex;
-  align-items: center;
   gap: 12px;
-  min-width: 0;
+  align-items: center;
 }
 
-.ai-header h1 {
+.ai-header h1,
+.ai-empty-panel h2,
+.panel-head h2,
+.item-title h3 {
   margin: 0;
-  min-width: 0;
-  font-size: 24px;
-  line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .ai-header p,
-.map-toolbar p {
-  margin: 4px 0 0;
+.panel-head p,
+.ai-empty-panel p,
+small,
+.meta-line {
   color: var(--color-text-tertiary);
-  font-size: 13px;
 }
 
 .back-btn,
-.secondary-btn,
 .primary-btn,
+.secondary-btn,
 .danger-btn {
   display: inline-flex;
   align-items: center;
@@ -1443,8 +800,8 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   padding: 0 13px;
   border-radius: 8px;
   border: 1px solid var(--color-border);
-  color: var(--color-text-secondary);
   background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1452,11 +809,6 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
 .back-btn svg {
   width: 16px;
   height: 16px;
-}
-
-.back-btn {
-  flex: 0 0 auto;
-  background: transparent;
 }
 
 .primary-btn {
@@ -1469,27 +821,35 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   color: var(--color-danger, #d14b4b);
 }
 
-.primary-btn:disabled,
-.secondary-btn:disabled {
+button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
 .header-actions,
-.settings-actions,
-.map-toolbar {
+.catchup-head,
+.catchup-main,
+.panel-head,
+.item-title,
+.relation-head,
+.map-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
+}
+
+.header-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .enable-switch {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  color: var(--color-text-secondary);
   cursor: pointer;
+  color: var(--color-text-secondary);
 }
 
 .enable-switch input {
@@ -1502,7 +862,6 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   border-radius: 999px;
   background: var(--color-border);
   position: relative;
-  transition: background var(--duration-fast);
 }
 
 .enable-switch span::after {
@@ -1525,60 +884,40 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   transform: translateX(16px);
 }
 
-.catchup-strip {
-  margin-top: 14px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: rgba(68, 140, 255, 0.08);
-  border: 1px solid rgba(68, 140, 255, 0.16);
-  display: grid;
-  gap: 8px;
-  flex: 0 0 auto;
+.catchup-strip,
+.status-strip,
+.panel-card,
+.list-item,
+.ai-empty-panel {
+  border: 1px solid var(--color-border-light);
+  border-radius: 12px;
+  background: var(--color-bg-elevated);
 }
 
-.catchup-strip.is-completed {
+.catchup-strip,
+.status-strip {
+  margin-top: 14px;
+  padding: 12px 14px;
+}
+
+.catchup-strip {
+  display: grid;
+  gap: 8px;
+  background: rgba(68, 140, 255, 0.08);
+}
+
+.catchup-strip.is-completed,
+.catchup-strip.is-canceled {
   background: rgba(58, 181, 115, 0.1);
-  border-color: rgba(58, 181, 115, 0.18);
 }
 
 .catchup-strip.is-failed {
   background: rgba(209, 75, 75, 0.1);
-  border-color: rgba(209, 75, 75, 0.18);
 }
 
-.catchup-strip.is-paused,
+.catchup-strip.is-canceling,
 .catchup-strip.is-pausing {
   background: rgba(201, 127, 58, 0.1);
-  border-color: rgba(201, 127, 58, 0.18);
-}
-
-.catchup-head,
-.catchup-main {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.catchup-main {
-  min-width: 0;
-}
-
-.catchup-main strong,
-.catchup-main span,
-.catchup-head small,
-.catchup-strip p {
-  color: var(--color-text-secondary);
-}
-
-.catchup-main span,
-.catchup-head small,
-.catchup-strip p {
-  font-size: 13px;
-}
-
-.catchup-strip p {
-  margin: 0;
 }
 
 .catchup-progress-track {
@@ -1591,74 +930,36 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
 
 .catchup-progress-bar {
   height: 100%;
-  border-radius: inherit;
   background: var(--color-primary);
-  transition: width var(--duration-fast);
 }
 
 .status-strip {
-  margin-top: 14px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(201, 127, 58, 0.12);
-  color: var(--color-text-secondary);
+  display: grid;
+  gap: 8px;
   font-size: 13px;
-  flex: 0 0 auto;
-  max-height: 240px;
-  overflow: hidden;
 }
 
 .status-strip.error {
   background: rgba(209, 75, 75, 0.12);
 }
 
-.status-main {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-width: 0;
-}
-
-.status-main strong {
-  flex: 0 0 auto;
-  color: var(--color-text);
-  font-weight: 700;
-}
-
-.status-main p {
-  min-width: 0;
+.status-strip p,
+.list-item p,
+.summary {
   margin: 0;
-  line-height: 1.55;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
 }
 
-.status-detail {
-  margin-top: 8px;
-}
-
-.status-detail summary {
-  width: fit-content;
-  cursor: pointer;
-  color: var(--color-primary);
-  font-weight: 700;
-}
-
-.status-detail pre {
-  max-height: 150px;
+.status-strip pre {
   margin: 8px 0 0;
   padding: 10px;
   overflow: auto;
-  border-radius: 6px;
-  border: 1px solid rgba(209, 75, 75, 0.18);
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.46);
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-  line-height: 1.5;
 }
 
 .tabs {
@@ -1685,175 +986,75 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   min-height: 0;
   overflow-y: auto;
   padding: 14px 0 28px;
-  scrollbar-width: none;
 }
 
-.overview-grid {
+.overview-grid,
+.stack-panel,
+.worldview-groups,
+.worldview-group,
+.state-grid,
+.summary-columns {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 260px;
-  gap: 24px;
+  gap: 14px;
 }
 
-.overview-main h2 {
-  margin: 0 0 14px;
-  font-size: 18px;
+.summary-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.summary {
-  margin: 0 0 18px;
-  line-height: 1.8;
+.state-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.panel-card,
+.list-item {
+  padding: 14px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--color-bg-sunken);
   color: var(--color-text-secondary);
-}
-
-.summary-points {
-  display: grid;
-  gap: 8px;
-  margin: 0 0 16px;
-}
-
-.summary-points span {
   font-size: 12px;
   font-weight: 700;
-  color: var(--color-text-muted);
 }
 
-.summary-points ul {
-  display: grid;
-  gap: 6px;
+.bullet-list {
   margin: 0;
   padding-left: 18px;
   color: var(--color-text-secondary);
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
-.worldview-groups,
-.worldview-group,
-.list-panel,
-.relation-grid,
-.location-tree {
+.bullet-list.compact {
   display: grid;
-  gap: 12px;
+  gap: 6px;
 }
 
-.worldview-group {
-  gap: 10px;
+.state-item {
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--color-bg-sunken);
 }
 
-.group-items {
-  display: grid;
-  gap: 10px;
+.state-item p,
+.state-item small {
+  margin-top: 6px;
 }
 
-.group-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 2px;
-}
-
-.group-toggle {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+.group-head strong,
+.item-title strong {
   color: var(--color-text);
-  font-weight: 700;
-  text-align: left;
-}
-
-.group-toggle span {
-  width: 22px;
-  height: 22px;
-  flex: 0 0 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-bg-elevated);
-  color: var(--color-text-secondary);
-  font-size: 13px;
-  line-height: 1;
-}
-
-.group-head h3 {
-  margin: 0;
-  font-size: 14px;
-}
-
-.group-head span,
-.result-count {
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.note-item,
-.list-item,
-.relation-item,
-.location-item,
-.metric {
-  border: 1px solid var(--color-border-light);
-  border-radius: 8px;
-  padding: 14px;
-  background: var(--color-bg-elevated);
-}
-
-.item-title,
-.relation-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  justify-content: space-between;
-}
-
-.item-title h3 {
-  margin: 0;
-  font-size: 15px;
-}
-
-.item-title h4 {
-  margin: 0;
-  font-size: 14px;
 }
 
 .item-title span,
-.relation-head span {
-  font-size: 12px;
+.group-head span {
   color: var(--color-primary);
-}
-
-.note-item p,
-.list-item p,
-.relation-item p,
-.location-item p {
-  margin: 8px 0 0;
-  line-height: 1.7;
-  color: var(--color-text-secondary);
-}
-
-.overview-side {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-content: start;
-  gap: 12px;
-}
-
-.metric {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.metric span,
-.meta-line {
-  color: var(--color-text-tertiary);
   font-size: 12px;
-}
-
-.metric strong {
-  font-size: 28px;
 }
 
 .meta-line {
@@ -1861,36 +1062,29 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   flex-wrap: wrap;
   gap: 12px;
   margin-top: 10px;
+  font-size: 12px;
 }
 
 .evidence-block {
   margin-top: 10px;
-  color: var(--color-text-tertiary);
   font-size: 12px;
 }
 
 .evidence-block summary {
-  width: fit-content;
   cursor: pointer;
   color: var(--color-primary);
   font-weight: 700;
 }
 
 .evidence-block ul {
-  display: grid;
-  gap: 8px;
   margin: 8px 0 0;
   padding-left: 16px;
-}
-
-.evidence-block li {
-  line-height: 1.55;
+  display: grid;
+  gap: 8px;
 }
 
 .evidence-block strong {
   display: block;
-  color: var(--color-text-secondary);
-  font-weight: 700;
 }
 
 .evidence-block blockquote {
@@ -1900,640 +1094,33 @@ function normalizeModelPath(path: string | undefined, fallback: string) {
   color: var(--color-text-muted);
 }
 
-.panel-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  position: sticky;
-  top: -14px;
-  z-index: 2;
-  padding: 2px 0 10px;
-  background: var(--color-bg);
-}
-
-.search-field {
-  min-width: 260px;
-  max-width: 420px;
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  padding: 0 12px;
-  border: 1px solid var(--color-border-light);
-  border-radius: 8px;
-  background: var(--color-bg-elevated);
-  color: var(--color-text-tertiary);
-}
-
-.search-field svg {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-}
-
-.search-field input {
-  min-width: 0;
-  flex: 1;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--color-text);
-  font-size: 14px;
-}
-
-.relation-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.map-panel {
-  display: grid;
-  gap: 12px;
-}
-
-.map-toolbar {
-  justify-content: space-between;
-  min-height: 42px;
-  padding: 0 2px;
-}
-
-.map-title {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
-}
-
-.map-title h2 {
-  margin: 0;
-  font-size: 18px;
-  white-space: nowrap;
-}
-
-.map-title p {
-  margin: 0;
-  white-space: nowrap;
-}
-
-.map-dirty-hint {
-  color: var(--color-primary);
-  font-weight: 600;
-}
-
 .map-frame {
-  min-height: min(58vh, 640px);
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--color-border-light);
-  background: #1f2522;
+  min-height: min(50vh, 480px);
+  margin-top: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-light);
+  background: #1f2522;
 }
 
 .map-frame img {
   width: 100%;
   height: 100%;
-  max-height: 620px;
   object-fit: contain;
-  display: block;
 }
 
-.location-tree {
-  gap: 10px;
-}
-
-.tree-location {
-  margin-left: var(--depth-offset);
-  position: relative;
-}
-
-.tree-location::before {
-  content: "";
-  position: absolute;
-  left: -12px;
-  top: -10px;
-  bottom: -10px;
-  width: 1px;
-  background: var(--color-border-light);
-  opacity: 0.55;
-}
-
-.tree-location[style*="--depth-offset: 0px"]::before {
-  display: none;
-}
-
-.location-title-wrap {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.location-toggle {
-  width: 22px;
-  height: 22px;
-  flex: 0 0 22px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-bg);
-  color: var(--color-text-secondary);
-  font-weight: 700;
-  line-height: 1;
-}
-
-.location-toggle.ghost {
-  border-color: transparent;
-  background: transparent;
-}
-
-.graph-fallback {
-  width: 100%;
-  min-height: 500px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  background: var(--color-bg-elevated);
-}
-
-.graph-canvas {
-  min-height: 500px;
-  display: flex;
-  align-items: stretch;
-  position: relative;
-  background:
-    linear-gradient(rgba(70, 134, 121, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(70, 134, 121, 0.045) 1px, transparent 1px),
-    radial-gradient(circle at 50% 50%, rgba(212, 129, 42, 0.07), transparent 38%),
-    var(--color-bg-elevated);
-  background-size: 28px 28px, 28px 28px, 100% 100%, auto;
-}
-
-.graph-legend {
-  position: absolute;
-  top: 14px;
-  left: 18px;
-  z-index: 1;
-  display: inline-flex;
-  gap: 8px;
-  padding: 6px;
-  border: 1px solid var(--color-border-light);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.76);
-  backdrop-filter: blur(10px);
-}
-
-.graph-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 24px;
-  padding: 0 10px;
-  border-radius: 999px;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.graph-legend span::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-}
-
-.legend-location::before {
-  background: #468679;
-}
-
-.legend-character::before {
-  background: var(--color-primary);
-}
-
-.graph-canvas svg {
-  width: 100%;
-  height: auto;
-  min-height: 500px;
-}
-
-.graph-link path {
-  fill: none;
-  stroke: rgba(52, 61, 56, 0.18);
-  stroke-width: 2;
-  marker-end: url(#graph-arrow);
-  transition: opacity var(--duration-fast), stroke var(--duration-fast), stroke-width var(--duration-fast);
-}
-
-.graph-link.located path {
-  stroke-dasharray: 5 8;
-}
-
-.graph-link.highlighted path {
-  stroke: rgba(212, 129, 42, 0.72);
-  stroke-width: 3;
-}
-
-.graph-link.dimmed {
-  opacity: 0.18;
-}
-
-.graph-link marker path,
-marker#graph-arrow path {
-  fill: rgba(52, 61, 56, 0.35);
-}
-
-.graph-link text {
-  fill: var(--color-text-secondary);
-  font-size: 11px;
-  font-weight: 700;
-  text-anchor: middle;
-}
-
-.graph-link-label rect {
-  fill: rgba(255, 255, 255, 0.88);
-  stroke: var(--color-border-light);
-}
-
-.graph-node {
-  cursor: pointer;
-  transition: opacity var(--duration-fast);
-}
-
-.graph-node.dimmed {
-  opacity: 0.28;
-}
-
-.graph-node-card {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 13px;
-  border: 2px solid rgba(212, 129, 42, 0.62);
-  border-radius: 999px;
-  background: rgba(255, 247, 238, 0.94);
-  color: var(--color-text);
-  box-shadow: 0 10px 24px rgba(140, 120, 90, 0.1);
-  overflow: hidden;
-  transition:
-    border-color var(--duration-fast),
-    background var(--duration-fast),
-    color var(--duration-fast),
-    box-shadow var(--duration-fast),
-    transform var(--duration-fast);
-}
-
-.graph-node-card strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  line-height: 1.2;
-}
-
-.node-dot {
-  flex: 0 0 auto;
-  width: 9px;
-  height: 9px;
-  border-radius: 999px;
-  background: var(--color-primary);
-}
-
-.graph-node.location .graph-node-card {
-  border-color: rgba(70, 134, 121, 0.72);
-  background: rgba(235, 247, 244, 0.94);
-}
-
-.graph-node.location .node-dot {
-  background: #468679;
-}
-
-.graph-node.connected .graph-node-card {
-  box-shadow:
-    0 10px 24px rgba(140, 120, 90, 0.12),
-    0 0 0 4px rgba(212, 129, 42, 0.08);
-}
-
-.graph-node.active .graph-node-card {
-  transform: translateY(-1px);
-  border-color: var(--color-primary);
-  background: var(--color-primary);
-  color: #fff;
-  box-shadow:
-    0 14px 30px rgba(212, 129, 42, 0.24),
-    0 0 0 5px rgba(212, 129, 42, 0.14);
-}
-
-.graph-node.active .node-dot {
-  background: rgba(255, 255, 255, 0.86);
-}
-
-.graph-detail {
-  border-left: 1px solid var(--color-border-light);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0)),
-    var(--color-bg);
-}
-
-.graph-detail-head {
-  display: grid;
-  gap: 6px;
-}
-
-.graph-detail span,
-.graph-detail small {
+.empty-state,
+.muted {
   color: var(--color-text-tertiary);
-  font-size: 12px;
 }
 
-.graph-detail strong {
-  font-size: 18px;
-  line-height: 1.35;
-}
-
-.graph-detail p {
-  margin: 0;
-  line-height: 1.7;
-  color: var(--color-text-secondary);
-}
-
-.graph-connection-list {
-  display: grid;
-  gap: 8px;
-}
-
-.graph-connection-list > span {
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-}
-
-.graph-connection-list button {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 10px;
-  border: 1px solid var(--color-border-light);
-  border-radius: 8px;
-  background: var(--color-bg-elevated);
-  text-align: left;
-  transition: border-color var(--duration-fast), background var(--duration-fast);
-}
-
-.graph-connection-list button:hover {
-  border-color: var(--color-primary-border);
-  background: var(--color-primary-bg);
-}
-
-.graph-connection-list button strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
-.graph-connection-list button small {
-  flex: 0 0 auto;
-}
-
-.map-empty,
-.empty-state {
-  color: var(--color-text-tertiary);
-  padding: 48px;
-  text-align: center;
-}
-
-.settings-panel {
-  display: grid;
-  gap: 14px;
-}
-
-.source-card {
-  padding: 16px;
-}
-
-.source-options {
-  display: inline-flex;
-  gap: 8px;
-  padding: 4px;
-  border-radius: 8px;
-  background: var(--color-bg-sunken);
-}
-
-.source-option {
-  min-height: 32px;
-  padding: 0 12px;
-  border-radius: 7px;
-  color: var(--color-text-secondary);
-  font-weight: 700;
-}
-
-.source-option.active {
-  background: var(--color-bg-elevated);
-  color: var(--color-primary);
-  box-shadow: var(--shadow-xs);
-}
-
-.source-option:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.server-status {
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.server-status.active {
-  color: var(--color-primary);
-}
-
-.settings-hint {
-  margin: 10px 0 0;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.runtime-card {
-  display: grid;
-  gap: 4px;
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border-light);
-  border-radius: 8px;
-  background: var(--color-bg-sunken);
-}
-
-.runtime-card span,
-.runtime-card small {
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-}
-
-.runtime-card strong {
-  color: var(--color-text);
-  font-size: 13px;
-}
-
-.admin-model-panel {
-  display: grid;
-  gap: 14px;
-  margin-top: 4px;
-  padding-top: 14px;
-  border-top: 1px solid var(--color-border-light);
-}
-
-.admin-model-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.admin-model-head h2 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.settings-cards {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.settings-card,
-.settings-footer {
-  border: 1px solid var(--color-border-light);
-  border-radius: 8px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0)),
-    var(--color-bg-elevated);
-  box-shadow: var(--shadow-xs);
-}
-
-.settings-card {
-  padding: 16px;
-}
-
-.settings-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.settings-card h2 {
-  margin: 0;
-  font-size: 15px;
-  letter-spacing: 0;
-}
-
-.settings-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.field {
-  display: grid;
-  gap: 7px;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.field.span-2 {
-  grid-column: 1 / -1;
-}
-
-.settings-grid input,
-.settings-grid select {
-  min-height: 40px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-elevated);
-  color: var(--color-text);
-  padding: 0 11px;
-  outline: none;
-}
-
-.settings-grid input:focus,
-.settings-grid select:focus {
-  border-color: var(--color-primary-border);
-  box-shadow: 0 0 0 3px rgba(212, 129, 42, 0.1);
-}
-
-.settings-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px;
-}
-
-.switch-line {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--color-text-secondary);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.switch-line.compact {
-  font-size: 12px;
-}
-
-.switch-line input {
-  display: none;
-}
-
-.switch-ui {
-  width: 36px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--color-bg-sunken);
-  border: 1px solid var(--color-border);
-  position: relative;
-  transition: background var(--duration-fast), border-color var(--duration-fast);
-}
-
-.switch-ui::after {
-  content: "";
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  left: 2px;
-  top: 2px;
-  border-radius: 50%;
-  background: var(--color-bg-elevated);
-  box-shadow: var(--shadow-xs);
-  transition: transform var(--duration-fast);
-}
-
-.switch-line input:checked + .switch-ui {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-}
-
-.switch-line input:checked + .switch-ui::after {
-  transform: translateX(16px);
-}
-
-.settings-actions {
-  justify-content: flex-end;
+.ai-empty-panel {
+  max-width: 520px;
+  margin: 72px auto;
+  padding: 24px;
 }
 
 @media (max-width: 768px) {
@@ -2541,45 +1128,20 @@ marker#graph-arrow path {
     padding: 16px;
   }
 
-  .catchup-head,
-  .catchup-main {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
   .ai-header,
+  .title-row,
   .header-actions,
-  .map-toolbar,
-  .panel-toolbar {
+  .catchup-head,
+  .catchup-main,
+  .panel-head,
+  .item-title,
+  .relation-head,
+  .map-head,
+  .summary-columns,
+  .state-grid {
+    grid-template-columns: 1fr;
+    flex-direction: column;
     align-items: stretch;
-    flex-direction: column;
-  }
-
-  .search-field {
-    min-width: 0;
-    max-width: none;
-  }
-
-  .title-row {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .overview-grid,
-  .relation-grid,
-  .settings-cards,
-  .graph-fallback {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .graph-detail {
-    border-left: 0;
-    border-top: 1px solid var(--color-border-light);
   }
 
   .tabs {
