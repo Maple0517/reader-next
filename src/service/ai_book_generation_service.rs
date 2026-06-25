@@ -1045,6 +1045,11 @@ pub fn parse_model_json_value(text: &str) -> Result<Value, AppError> {
                 .ok_or(())
                 .and_then(|json| serde_json::from_str::<Value>(json).map_err(|_| ()))
         })
+        .or_else(|_| {
+            repair_truncated_json_object(json_text)
+                .ok_or(())
+                .and_then(|json| serde_json::from_str::<Value>(&json).map_err(|_| ()))
+        })
         .map_err(|_| {
             AppError::BadRequest(format!(
                 "AI资料生成返回 JSON 格式不正确；模型输出预览: {}",
@@ -1060,6 +1065,62 @@ fn preview_model_output(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn repair_truncated_json_object(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let mut stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in text[start..].chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                if stack.pop()? != ch {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if stack.is_empty() {
+        return None;
+    }
+
+    let mut repaired = text[start..].trim().to_string();
+    if in_string {
+        if escaped && repaired.ends_with('\\') {
+            repaired.pop();
+        }
+        repaired.push('"');
+    }
+    while let Some(close) = stack.pop() {
+        trim_trailing_comma(&mut repaired);
+        repaired.push(close);
+    }
+    serde_json::from_str::<Value>(&repaired).ok()?;
+    Some(repaired)
+}
+
+fn trim_trailing_comma(text: &mut String) {
+    while text.ends_with(char::is_whitespace) {
+        text.pop();
+    }
+    if text.ends_with(',') {
+        text.pop();
+    }
 }
 
 fn extract_first_json_object(text: &str) -> Option<&str> {
@@ -1280,6 +1341,18 @@ mod tests {
 
         assert!(err.contains("AI资料生成返回 JSON 格式不正确"));
         assert!(err.contains("模型解释文字"));
+    }
+
+    #[test]
+    fn ai_book_generation_repairs_truncated_top_level_object() {
+        let value = parse_model_json_value(
+            r#"{"chapterIndex":6,"summary":{"chapterIndex":6,"summary":"张羽继续吐纳"},"patch":{"characters":[{"name":"张羽","description":"学生"}],"knowledgeFacts":[{"title":"羽书限制","content":"一次只能专精一个技能"}]"#,
+        )
+        .unwrap();
+        let digest = deserialize_digest_generation_value(value).unwrap();
+
+        assert_eq!(digest.chapter_index, 6);
+        assert_eq!(digest.summary, "张羽继续吐纳");
     }
 
     #[test]
