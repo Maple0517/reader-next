@@ -102,6 +102,7 @@ defineProps<{
 
 .relationship-map {
   position: relative;
+  container-type: inline-size;
   min-height: 264px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
@@ -114,7 +115,7 @@ defineProps<{
 .relationship-map::before {
   content: '';
   position: absolute;
-  inset: 14px;
+  inset: 18px;
   border-radius: 999px;
   border: 1px dashed color-mix(in srgb, currentColor 8%, transparent);
   opacity: 0.75;
@@ -167,9 +168,9 @@ defineProps<{
   transform: translate(-50%, -50%);
   display: grid;
   gap: 2px;
-  min-width: 82px;
-  max-width: 122px;
-  padding: 9px 11px;
+  min-width: 64px;
+  max-width: clamp(72px, 31%, 88px);
+  padding: 7px 9px;
   border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
   border-radius: 999px;
   color: inherit;
@@ -180,8 +181,9 @@ defineProps<{
 }
 
 .relationship-node.protagonist {
-  min-width: 108px;
-  padding: 12px 14px;
+  min-width: 78px;
+  max-width: clamp(84px, 34%, 98px);
+  padding: 10px 11px;
   border-color: color-mix(in srgb, var(--color-primary, #c97f3a) 42%, transparent);
   background: color-mix(in srgb, var(--color-primary, #c97f3a) 16%, transparent);
   box-shadow: 0 14px 32px color-mix(in srgb, var(--color-primary, #c97f3a) 14%, transparent);
@@ -288,19 +290,38 @@ defineProps<{
   opacity: 0.68;
 }
 
+@container (max-width: 320px) {
+  .relationship-map {
+    min-height: 232px;
+  }
+
+  .relationship-node {
+    min-width: 58px;
+    max-width: 76px;
+    padding: 6px 7px;
+  }
+
+  .relationship-node.protagonist {
+    min-width: 70px;
+    max-width: 84px;
+    padding: 8px 9px;
+  }
+}
+
 @media (max-width: 720px) {
   .relationship-map {
     min-height: 232px;
   }
 
   .relationship-node {
-    min-width: 70px;
-    max-width: 96px;
+    min-width: 58px;
+    max-width: 76px;
     padding: 7px 8px;
   }
 
   .relationship-node.protagonist {
-    min-width: 92px;
+    min-width: 70px;
+    max-width: 84px;
   }
 }
 </style>
