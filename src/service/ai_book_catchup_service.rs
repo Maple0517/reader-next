@@ -21,7 +21,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 #[cfg(test)]
@@ -451,11 +451,22 @@ impl AiBookCatchupService {
         F: Future<Output = Result<T, AppError>>,
     {
         self.set_stage(key, stage).await;
-        let result = future.await.map_err(StageError::App);
-        if self.cancel_should_stop(key).await {
-            return Err(StageError::Canceled);
+        tokio::pin!(future);
+        loop {
+            if self.cancel_should_stop(key).await {
+                return Err(StageError::Canceled);
+            }
+            tokio::select! {
+                result = &mut future => {
+                    let result = result.map_err(StageError::App);
+                    if self.cancel_should_stop(key).await {
+                        return Err(StageError::Canceled);
+                    }
+                    return result;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
         }
-        result
     }
 
     async fn set_stage(&self, key: &str, stage: &str) {
@@ -1529,12 +1540,13 @@ mod tests {
         let canceled = service.request_cancel("u1", "book-a").await.unwrap();
         assert_eq!(canceled.status, "canceling");
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let while_blocked = service.get_status("u1", "book-a").await.unwrap();
-        assert_eq!(while_blocked.status, "canceling");
-        assert_eq!(while_blocked.completed_chapters, 0);
-        handle.abort();
-        let _ = handle.await;
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        let final_status = service.get_status("u1", "book-a").await.unwrap();
+        assert_eq!(final_status.status, "canceled");
+        assert_eq!(final_status.completed_chapters, 0);
     }
 
     #[tokio::test]
@@ -1562,14 +1574,13 @@ mod tests {
         let canceled = service.request_cancel("u1", "book-a").await.unwrap();
         assert_eq!(canceled.status, "canceling");
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let while_blocked = service.get_status("u1", "book-a").await.unwrap();
-        assert_eq!(while_blocked.status, "canceling");
-        handle.abort();
-        let _ = handle.await;
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
 
         let final_status = service.get_status("u1", "book-a").await.unwrap();
-        assert_eq!(final_status.status, "canceling");
+        assert_eq!(final_status.status, "canceled");
     }
 
     #[test]
