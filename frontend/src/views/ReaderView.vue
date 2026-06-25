@@ -191,6 +191,14 @@
                 >正文</button>
                 <button
                   class="summary-tab"
+                  :class="{ active: chapterSummaryActiveTab === 'relationships' }"
+                  :aria-selected="chapterSummaryActiveTab === 'relationships'"
+                  role="tab"
+                  type="button"
+                  @click="chapterSummaryActiveTab = 'relationships'"
+                >人物关系</button>
+                <button
+                  class="summary-tab"
                   :class="{ active: chapterSummaryActiveTab === 'settings' }"
                   :aria-selected="chapterSummaryActiveTab === 'settings'"
                   role="tab"
@@ -226,6 +234,12 @@
                 <button v-if="chapterSummary" class="summary-action" @click.stop="copyChapterSummary">复制</button>
               </div>
             </section>
+            <ChapterSummaryRelationshipPanel
+              v-else-if="chapterSummaryActiveTab === 'relationships'"
+              :graph="chapterSummaryRelationshipGraph"
+              :status="chapterSummaryRelationshipStatus"
+              :body-style="chapterSummaryBodyStyle"
+            />
             <section v-else class="chapter-summary-settings-panel reader-ui-font" role="tabpanel">
               <div class="summary-setting-group">
                 <div class="summary-setting-title">显示</div>
@@ -405,6 +419,14 @@
                 >正文</button>
                 <button
                   class="summary-tab"
+                  :class="{ active: chapterSummaryActiveTab === 'relationships' }"
+                  :aria-selected="chapterSummaryActiveTab === 'relationships'"
+                  role="tab"
+                  type="button"
+                  @click="chapterSummaryActiveTab = 'relationships'"
+                >人物关系</button>
+                <button
+                  class="summary-tab"
                   :class="{ active: chapterSummaryActiveTab === 'settings' }"
                   :aria-selected="chapterSummaryActiveTab === 'settings'"
                   role="tab"
@@ -440,6 +462,12 @@
                 <button v-if="chapterSummary" class="summary-action" @click.stop="copyChapterSummary">复制</button>
               </div>
             </section>
+            <ChapterSummaryRelationshipPanel
+              v-else-if="chapterSummaryActiveTab === 'relationships'"
+              :graph="chapterSummaryRelationshipGraph"
+              :status="chapterSummaryRelationshipStatus"
+              :body-style="chapterSummaryBodyStyle"
+            />
             <section v-else class="chapter-summary-settings-panel reader-ui-font" role="tabpanel">
               <div class="summary-setting-group">
                 <div class="summary-setting-title">显示</div>
@@ -589,6 +617,14 @@
           >正文</button>
           <button
             class="summary-tab"
+            :class="{ active: chapterSummaryActiveTab === 'relationships' }"
+            :aria-selected="chapterSummaryActiveTab === 'relationships'"
+            role="tab"
+            type="button"
+            @click="chapterSummaryActiveTab = 'relationships'"
+          >人物关系</button>
+          <button
+            class="summary-tab"
             :class="{ active: chapterSummaryActiveTab === 'settings' }"
             :aria-selected="chapterSummaryActiveTab === 'settings'"
             role="tab"
@@ -627,6 +663,12 @@
           </div>
         </div>
       </section>
+      <ChapterSummaryRelationshipPanel
+        v-else-if="chapterSummaryActiveTab === 'relationships'"
+        :graph="chapterSummaryRelationshipGraph"
+        :status="chapterSummaryRelationshipStatus"
+        :body-style="chapterSummaryBodyStyle"
+      />
       <section v-else class="chapter-summary-settings-panel reader-ui-font" role="tabpanel">
         <div class="summary-setting-group">
           <div class="summary-setting-title">显示</div>
@@ -782,6 +824,7 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { getBookInfo } from '../api/bookshelf'
+import { getAiBookMemory } from '../api/aiBook'
 import {
   getChapterSummary,
   generateChapterSummary,
@@ -794,12 +837,14 @@ import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
 import { buildChapterSummaryIdentity, isCurrentChapterSummaryIdentity } from '../utils/chapterSummaryState'
+import { buildSummaryRelationshipGraph } from '../utils/summaryRelationshipGraph'
 import { chooseChapterSummaryPlacement, clampChapterSummarySiderWidth, getChapterSummaryFontSize } from '../utils/chapterSummaryLayout'
-import type { Book, ChapterSummaryConfigResponse, ChapterSummaryRecord } from '../types'
+import type { AiBookMemoryViewModel, Book, ChapterSummaryConfigResponse, ChapterSummaryRecord } from '../types'
 
 import ReaderSidebar from '../components/reader/ReaderSidebar.vue'
 import ReaderToolbar from '../components/reader/ReaderToolbar.vue'
 import ReaderMobileControls from '../components/reader/ReaderMobileControls.vue'
+import ChapterSummaryRelationshipPanel from '../components/reader/ChapterSummaryRelationshipPanel.vue'
 import { useReaderSearch } from '../composables/useReaderSearch'
 import { useReaderSelection } from '../composables/useReaderSelection'
 import { useHorizontalPaging } from '../composables/useHorizontalPaging'
@@ -903,8 +948,10 @@ const chapterSummary = ref<ChapterSummaryRecord | null>(null)
 const chapterSummaryStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const chapterSummaryError = ref('')
 const showChapterSummary = ref(config.value.showChapterSummary)
-type ChapterSummaryTab = 'content' | 'settings'
+type ChapterSummaryTab = 'content' | 'relationships' | 'settings'
 const chapterSummaryActiveTab = ref<ChapterSummaryTab>('content')
+const chapterSummaryRelationshipMemory = ref<AiBookMemoryViewModel | null>(null)
+const chapterSummaryRelationshipStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const chapterSummaryConfig = ref<ChapterSummaryConfigResponse | null>(null)
 const savingChapterSummaryConfig = ref(false)
 const chapterSummaryConfigDraft = reactive({
@@ -922,6 +969,7 @@ let chapterSummaryResizeStartX = 0
 let chapterSummaryResizeStartWidth = 0
 let chapterSummaryTimer: number | null = null
 let chapterSummaryRequestId = 0
+let chapterSummaryRelationshipRequestId = 0
 const speechTimerNow = ref(Date.now())
 const speechTimerText = computed(() => {
   if (!store.speechStopAt) return ''
@@ -1004,6 +1052,10 @@ const chapterSummaryBodyStyle = computed(() => ({
   fontSize: `${getChapterSummaryFontSize(config.value.chapterSummaryFontSize)}px`,
   fontFamily: currentFontFamily.value || 'var(--font-body)',
 }))
+const chapterSummaryRelationshipGraph = computed(() => buildSummaryRelationshipGraph({
+  memory: chapterSummaryRelationshipMemory.value,
+  currentChapterIndex: store.currentIndex,
+}))
 
 function clearChapterSummaryTimer() {
   if (!chapterSummaryTimer) return
@@ -1017,6 +1069,35 @@ function resetChapterSummaryState() {
   chapterSummaryStatus.value = 'idle'
   chapterSummaryError.value = ''
 }
+
+function resetChapterSummaryRelationshipState() {
+  chapterSummaryRelationshipRequestId += 1
+  chapterSummaryRelationshipMemory.value = null
+  chapterSummaryRelationshipStatus.value = 'idle'
+}
+
+async function loadChapterSummaryRelationshipMemory() {
+  const bookUrl = store.book?.bookUrl
+  if (!bookUrl) {
+    resetChapterSummaryRelationshipState()
+    return
+  }
+
+  const requestId = ++chapterSummaryRelationshipRequestId
+  chapterSummaryRelationshipMemory.value = null
+  chapterSummaryRelationshipStatus.value = 'loading'
+  try {
+    const response = await getAiBookMemory(bookUrl)
+    if (requestId !== chapterSummaryRelationshipRequestId || store.book?.bookUrl !== bookUrl) return
+    chapterSummaryRelationshipMemory.value = response.memory
+    chapterSummaryRelationshipStatus.value = 'ready'
+  } catch {
+    if (requestId !== chapterSummaryRelationshipRequestId || store.book?.bookUrl !== bookUrl) return
+    chapterSummaryRelationshipMemory.value = null
+    chapterSummaryRelationshipStatus.value = 'error'
+  }
+}
+
 
 function applyChapterSummaryConfigDraft(response: ChapterSummaryConfigResponse) {
   chapterSummaryConfig.value = response
@@ -2496,6 +2577,19 @@ watch(
   },
   { immediate: true },
 )
+
+watch(() => store.book?.bookUrl, () => {
+  resetChapterSummaryRelationshipState()
+  if (chapterSummaryActiveTab.value === 'relationships') {
+    void loadChapterSummaryRelationshipMemory()
+  }
+})
+
+watch(chapterSummaryActiveTab, (tab) => {
+  if (tab === 'relationships' && chapterSummaryRelationshipStatus.value === 'idle') {
+    void loadChapterSummaryRelationshipMemory()
+  }
+})
 
 watch(
   () => config.value.chapterSummarySiderWidth,
