@@ -27,11 +27,18 @@ export interface SummaryRelationshipGraphLink {
   path: string
 }
 
+export interface SummaryRelationshipGraphGroupedRow {
+  tone: SummaryRelationshipTone
+  label: string
+  rows: Array<{ id: string; name: string; label: string; summary: string; tone: SummaryRelationshipTone; strength: AiBookRelationStrength }>
+}
+
 export interface SummaryRelationshipGraphView {
   protagonist: SummaryRelationshipGraphNode | null
   nodes: SummaryRelationshipGraphNode[]
   links: SummaryRelationshipGraphLink[]
-  rows: Array<{ id: string; name: string; label: string; summary: string; tone: SummaryRelationshipTone }>
+  rows: Array<{ id: string; name: string; label: string; summary: string; tone: SummaryRelationshipTone; strength: AiBookRelationStrength }>
+  groupedRows: SummaryRelationshipGraphGroupedRow[]
   emptyReason: string
 }
 
@@ -39,6 +46,7 @@ export function buildSummaryRelationshipGraph(input: {
   memory: AiBookMemoryViewModel | null
   currentChapterIndex: number
   limit?: number
+  graphLimit?: number
 }): SummaryRelationshipGraphView {
   const memory = input.memory
   if (!memory) {
@@ -68,27 +76,34 @@ export function buildSummaryRelationshipGraph(input: {
   const related = [...grouped.entries()]
     .map(([characterId, relations]) => ({ characterId, relations, score: relationshipScore(relations, input.currentChapterIndex) }))
     .sort((a, b) => b.score - a.score)
-    .slice(0, input.limit ?? 5)
 
-  if (related.length === 0) return empty('人物关系不足，继续阅读后会补全。')
+  const totalLimit = input.limit ?? 15
+  const graphNodeLimit = input.graphLimit ?? 5
+  const allRelated = related.slice(0, totalLimit)
+  const graphRelated = related.slice(0, graphNodeLimit)
 
+  if (allRelated.length === 0) return empty('人物关系不足，继续阅读后会补全。')
+
+  const protagonistRelations = memory.relationships.filter(
+    (r) => r.sourceCharacterId === protagonistId || r.targetCharacterId === protagonistId,
+  )
   const center: SummaryRelationshipGraphNode = {
     id: protagonist.id,
-    name: protagonist.name,
+    name: pickDisplayName(protagonist.name, protagonist.aliases, protagonistRelations),
     description: protagonist.description || '主角',
     isProtagonist: true,
     x: 50,
     y: 50,
   }
 
-  const outerNodes = related.map((item, index) => {
+  const outerNodes = graphRelated.map((item, index) => {
     const character = characterById.get(item.characterId)!
-    const angle = -90 + (360 / related.length) * index
+    const angle = -90 + (360 / graphRelated.length) * index
     const radius = 34
     const rad = angle * Math.PI / 180
     return {
       id: character.id,
-      name: character.name,
+      name: pickDisplayName(character.name, character.aliases, item.relations),
       description: character.description || '',
       isProtagonist: false,
       x: Math.round((50 + Math.cos(rad) * radius) * 10) / 10,
@@ -97,7 +112,7 @@ export function buildSummaryRelationshipGraph(input: {
   })
 
   const nodeById = new Map([center, ...outerNodes].map((node) => [node.id, node]))
-  const links = related.map((item) => {
+  const links = graphRelated.map((item) => {
     const node = nodeById.get(item.characterId)!
     const label = aggregateLabel(item.relations)
     const summary = aggregateSummary(item.relations)
@@ -113,23 +128,52 @@ export function buildSummaryRelationshipGraph(input: {
     }
   })
 
+  const allCharacterById = new Map(allRelated.map((item) => {
+    const character = characterById.get(item.characterId)!
+    return [item.characterId, {
+      name: pickDisplayName(character.name, character.aliases, item.relations),
+    }]
+  }))
+
+  const rows = allRelated.map((item) => ({
+    id: item.characterId,
+    name: allCharacterById.get(item.characterId)?.name || item.characterId,
+    label: aggregateLabel(item.relations),
+    summary: aggregateSummary(item.relations),
+    tone: toneFor(item.relations),
+    strength: strongest(item.relations.map((relation) => relation.strength)),
+  }))
+
   return {
     protagonist: center,
     nodes: [center, ...outerNodes],
     links,
-    rows: links.map((link) => ({
-      id: link.id,
-      name: nodeById.get(link.targetId)?.name || link.targetId,
-      label: link.label,
-      summary: link.summary,
-      tone: link.tone,
-    })),
+    rows,
+    groupedRows: buildGroupedRows(rows),
     emptyReason: '',
   }
 }
 
 function empty(emptyReason: string): SummaryRelationshipGraphView {
-  return { protagonist: null, nodes: [], links: [], rows: [], emptyReason }
+  return { protagonist: null, nodes: [], links: [], rows: [], groupedRows: [], emptyReason }
+}
+
+function pickDisplayName(
+  canonicalName: string,
+  aliases: string[],
+  relations: AiBookRelationView[],
+): string {
+  if (!aliases.length) return canonicalName
+  const dynamicsText = relations
+    .flatMap((r) => r.currentDynamics || [])
+    .join(' ')
+  if (!dynamicsText) return canonicalName
+  if (!dynamicsText.includes(canonicalName)) {
+    for (const alias of aliases) {
+      if (alias && dynamicsText.includes(alias)) return alias
+    }
+  }
+  return canonicalName
 }
 
 function findProtagonistId(
@@ -210,4 +254,31 @@ function labelForKind(kind: AiBookRelationKind) {
 
 function unique(values: string[]) {
   return [...new Set(values.filter(Boolean))]
+}
+
+const TONE_ORDER: SummaryRelationshipTone[] = ['family', 'romance', 'ally', 'conflict', 'affiliation', 'neutral']
+
+const TONE_LABELS: Record<SummaryRelationshipTone, string> = {
+  family: '家族',
+  romance: '情感',
+  ally: '盟友',
+  conflict: '冲突',
+  affiliation: '阵营',
+  neutral: '中立',
+}
+
+function buildGroupedRows(rows: SummaryRelationshipGraphView['rows']): SummaryRelationshipGraphGroupedRow[] {
+  const byTone = new Map<SummaryRelationshipTone, typeof rows>()
+  for (const row of rows) {
+    const list = byTone.get(row.tone) || []
+    list.push(row)
+    byTone.set(row.tone, list)
+  }
+  return TONE_ORDER
+    .filter((tone) => byTone.has(tone))
+    .map((tone) => ({
+      tone,
+      label: TONE_LABELS[tone],
+      rows: byTone.get(tone)!.sort((a, b) => strengthScore(b.strength) - strengthScore(a.strength)),
+    }))
 }
