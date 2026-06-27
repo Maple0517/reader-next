@@ -7,7 +7,7 @@ use crate::model::{
     search::SearchBook,
 };
 use crate::service::local_txt_book::{is_local_txt_origin, is_local_txt_url, LOCAL_TXT_ORIGIN};
-use crate::service::search_relevance::{score_search_book, sort_and_filter_search_results};
+use crate::service::search_relevance::{filter_strong_search_results, score_search_book};
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use axum::body::Body;
 use axum::body::Bytes;
@@ -283,6 +283,7 @@ pub async fn search_book(
             tracing::error!("search_book failed: {:?}", e);
             e
         })?;
+    let books = filter_strong_search_results(&key, books);
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(books).unwrap_or_default(),
     )))
@@ -348,9 +349,7 @@ pub async fn search_book_multi(
 /// Merge search results from different book sources for the same book.
 ///
 /// The caller's query is used only after parsing remote book-source data: exact
-/// and strong title matches are ranked first, weak token-overlap noise is hidden
-/// when strong matches exist, and all-weak result sets are kept to avoid false
-/// empty states for unusual titles.
+/// and strong title matches are ranked first, weak token-overlap noise is hidden.
 fn merge_search_results(
     query: &str,
     results: Vec<crate::model::search::SearchBook>,
@@ -405,7 +404,7 @@ fn merge_search_results(
     }
 
     let result: Vec<SearchBook> = merged.into_values().collect();
-    sort_and_filter_search_results(query, result)
+    filter_strong_search_results(query, result)
 }
 
 #[derive(Debug, Clone)]
@@ -651,7 +650,7 @@ fn take_search_book_multi_sse_batch(
     books: Vec<SearchBook>,
     seen: &mut std::collections::HashSet<String>,
 ) -> Vec<SearchBook> {
-    let ranked_books = sort_and_filter_search_results(query, books);
+    let ranked_books = filter_strong_search_results(query, books);
     let mut batch = Vec::new();
 
     for book in ranked_books {
@@ -985,60 +984,10 @@ pub async fn get_chapter_list(
         }
     }
 
-    // Get first page of chapters
-    let (chapters, pagination) = state
+    let chapters = state
         .book_service
-        .get_chapter_list_first_page(&user_ns, &source, &toc_url)
+        .get_chapter_list_with_cache(&user_ns, &source, &toc_url, do_refresh)
         .await?;
-
-    // Save first page to cache immediately
-    let _ = state
-        .book_service
-        .save_chapter_list_cache(&user_ns, &toc_url, &chapters)
-        .await;
-
-    // If there are more pages to fetch, do it in background
-    if !pagination.pending_urls.is_empty() {
-        let state_clone = state.clone();
-        let user_ns_clone = user_ns.clone();
-        let toc_url_clone = toc_url.clone();
-
-        tokio::spawn(async move {
-            tracing::debug!("starting background chapter fetch");
-            match state_clone
-                .book_service
-                .fetch_remaining_chapters(pagination)
-                .await
-            {
-                Ok(remaining) => {
-                    if !remaining.is_empty() {
-                        // Append to cache
-                        match state_clone
-                            .book_service
-                            .append_chapter_list_cache(&user_ns_clone, &toc_url_clone, &remaining)
-                            .await
-                        {
-                            Ok(all_chapters) => {
-                                tracing::debug!(
-                                    "background chapter fetch complete: {}",
-                                    all_chapters.len()
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "failed to append background chapters to cache: {:?}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("background chapter fetch failed: {:?}", e);
-                }
-            }
-        });
-    }
 
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(chapters).unwrap_or_default(),
@@ -2280,7 +2229,7 @@ pub async fn search_book_source_sse(
                 if let Ok((cur_idx, Ok(list), target_name, target_author)) = res {
                     let mut batch = Vec::new();
                     for b in list {
-                        if b.name == target_name && b.author == target_author {
+                        if available_source_matches_target(&b, &target_name, &target_author) {
                             batch.push(b);
                         }
                     }
@@ -2338,20 +2287,6 @@ pub async fn get_available_book_source(
     // Try to find book by URL first, then by name+author
     let book_url = req.url.clone();
 
-    if !paged_request {
-        if let Some(ref url) = book_url {
-            if let Some(list) = state
-                .book_service
-                .load_book_sources_cache(&user_ns, url)
-                .await?
-            {
-                return Ok(Json(ApiResponse::ok(
-                    serde_json::to_value(list).unwrap_or_default(),
-                )));
-            }
-        }
-    }
-
     // Find book on shelf - try URL first, then name+author
     let book = if let Some(ref url) = book_url {
         state.book_service.get_shelf_book(&user_ns, url).await?
@@ -2376,6 +2311,26 @@ pub async fn get_available_book_source(
     let book = book.or_else(|| fallback_available_book(&req));
 
     let book = book.ok_or_else(|| AppError::BadRequest("书籍信息错误".to_string()))?;
+    if !paged_request {
+        if let Some(ref url) = book_url {
+            if let Some(list) = state
+                .book_service
+                .load_book_sources_cache(&user_ns, url)
+                .await?
+            {
+                let list = take_available_source_cached_matches(
+                    list,
+                    None,
+                    &book.name,
+                    &book.author,
+                    usize::MAX,
+                );
+                return Ok(Json(ApiResponse::ok(
+                    serde_json::to_value(list).unwrap_or_default(),
+                )));
+            }
+        }
+    }
     let sources = state.book_source_service.list(&user_ns).await?;
     if sources.is_empty() {
         if paged_request {
@@ -2520,6 +2475,8 @@ pub async fn get_available_book_source_sse(
                 let cached = take_available_source_cached_matches(
                     cached,
                     (!current_origin.trim().is_empty()).then_some(current_origin.as_str()),
+                    &book.name,
+                    &book.author,
                     AVAILABLE_SOURCE_SSE_RESULT_LIMIT,
                 );
                 if cached.is_empty() {
@@ -3086,6 +3043,8 @@ fn normalize_available_author(value: &str) -> String {
 fn take_available_source_cached_matches(
     cached: Vec<SearchBook>,
     excluded_origin: Option<&str>,
+    target_name: &str,
+    target_author: &str,
     limit: usize,
 ) -> Vec<SearchBook> {
     let mut matches = Vec::new();
@@ -3098,6 +3057,9 @@ fn take_available_source_cached_matches(
             .map(|origin| book.origin == origin)
             .unwrap_or(false)
         {
+            continue;
+        }
+        if !available_source_matches_target(&book, target_name, target_author) {
             continue;
         }
         if seen.insert(available_source_sse_result_key(&book)) {
@@ -3284,6 +3246,32 @@ mod tests {
     }
 
     #[test]
+    fn take_search_book_multi_sse_batch_drops_weak_only_source_results() {
+        let books = vec![
+            SearchBook {
+                name: "普通玄幻".to_string(),
+                author: "作者甲".to_string(),
+                origin: "source-a".to_string(),
+                book_url: "a".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "冷门修仙".to_string(),
+                author: "作者乙".to_string(),
+                origin: "source-b".to_string(),
+                book_url: "b".to_string(),
+                ..SearchBook::default()
+            },
+        ];
+        let mut seen = HashSet::new();
+
+        let batch = take_search_book_multi_sse_batch("不存在的冷门书名", books, &mut seen);
+
+        assert!(batch.is_empty());
+        assert!(seen.is_empty());
+    }
+
+    #[test]
     fn available_book_source_limits_result_count_and_reports_more() {
         let books: Vec<SearchBook> = (0..25)
             .map(|index| SearchBook {
@@ -3356,10 +3344,47 @@ mod tests {
             ..SearchBook::default()
         }];
 
-        let matches =
-            take_available_source_cached_matches(cached, Some("https://m.22biqu.com/"), 5);
+        let matches = take_available_source_cached_matches(
+            cached,
+            Some("https://m.22biqu.com/"),
+            "深空彼岸",
+            "辰东",
+            5,
+        );
 
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn available_book_source_cache_drops_wrong_name_or_author() {
+        let cached = vec![
+            SearchBook {
+                name: "深空彼岸".to_string(),
+                author: "辰东".to_string(),
+                origin: "source-a".to_string(),
+                book_url: "a".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "深空彼岸".to_string(),
+                author: "别人".to_string(),
+                origin: "source-b".to_string(),
+                book_url: "b".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                name: "错书".to_string(),
+                author: "辰东".to_string(),
+                origin: "source-c".to_string(),
+                book_url: "c".to_string(),
+                ..SearchBook::default()
+            },
+        ];
+
+        let matches = take_available_source_cached_matches(cached, None, "深空彼岸", "辰东", 5);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].origin, "source-a");
     }
 
     #[test]

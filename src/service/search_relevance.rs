@@ -85,6 +85,17 @@ pub fn sort_and_filter_search_results(query: &str, mut books: Vec<SearchBook>) -
     }
 }
 
+pub fn filter_strong_search_results(query: &str, books: Vec<SearchBook>) -> Vec<SearchBook> {
+    if query.trim().is_empty() {
+        return books;
+    }
+
+    sort_and_filter_search_results(query, books)
+        .into_iter()
+        .filter(|book| score_search_book(query, book).strong_match)
+        .collect()
+}
+
 fn normalize_search_text(value: &str) -> String {
     value
         .chars()
@@ -141,7 +152,7 @@ fn ordered_subsequence_match_count(query: &[char], title: &[char]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{score_search_book, sort_and_filter_search_results};
+    use super::{filter_strong_search_results, score_search_book, sort_and_filter_search_results};
     use crate::model::search::SearchBook;
 
     fn book(name: &str) -> SearchBook {
@@ -209,5 +220,15 @@ mod tests {
         );
 
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn strict_filter_drops_all_weak_noise() {
+        let results = filter_strong_search_results(
+            "不存在的冷门书名",
+            vec![book("普通玄幻"), book("冷门修仙")],
+        );
+
+        assert!(results.is_empty());
     }
 }
