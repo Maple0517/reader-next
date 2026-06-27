@@ -226,16 +226,38 @@ function doSearch(key: string) {
   }
 }
 
+let lastSearchKey = ''
+let lastSearchScope = ''
+let lastSearchGroup = ''
+let lastSearchSourceUrl = ''
+
 watch(
   [() => shelfStore.searchKey, searchScope, selectedGroup, selectedSourceUrl],
-  ([key]) => {
+  ([key, scope, group, sourceUrl]) => {
     ensureSearchSelection()
     if (key) {
+      // 如果搜索条件没变且已有结果，不重新搜索
+      const conditionsUnchanged =
+        key === lastSearchKey &&
+        scope === lastSearchScope &&
+        group === lastSearchGroup &&
+        sourceUrl === lastSearchSourceUrl
+      if (conditionsUnchanged && shelfStore.searchResults.length > 0) {
+        return
+      }
+      lastSearchKey = key
+      lastSearchScope = scope
+      lastSearchGroup = group
+      lastSearchSourceUrl = sourceUrl
       doSearch(key)
     } else {
       closeEventSource()
       shelfStore.searchResults = []
       shelfStore.isSearching = false
+      lastSearchKey = ''
+      lastSearchScope = ''
+      lastSearchGroup = ''
+      lastSearchSourceUrl = ''
     }
   },
   { immediate: true }

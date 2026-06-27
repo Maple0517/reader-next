@@ -23,18 +23,6 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration, Instant};
 
-/// State for background chapter fetching
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChapterPagination {
-    pub user_ns: String,
-    pub source: BookSource,
-    pub toc_url: String,
-    pub visited_urls: Vec<String>,
-    pub pending_urls: Vec<String>,
-    pub seen_chapter_urls: Vec<String>,
-    pub next_index: i32,
-}
-
 #[derive(Clone)]
 pub struct BookService {
     http: HttpClient,
@@ -433,190 +421,6 @@ impl BookService {
             .save_chapter_list_cache(user_ns, toc_url, &chapters)
             .await;
         Ok(chapters)
-    }
-
-    /// Get first page of chapters and pagination info for background fetching
-    pub async fn get_chapter_list_first_page(
-        &self,
-        user_ns: &str,
-        source: &BookSource,
-        toc_url: &str,
-    ) -> Result<(Vec<BookChapter>, ChapterPagination), AppError> {
-        let res = self
-            .fetch_source_url(user_ns, source, toc_url, &source.book_source_url)
-            .await?;
-        let (chapters, next_urls) = self.parser.chapter_list(source, &res.body, &res.url);
-
-        let mut chapter_index = 0i32;
-        let mut result = Vec::new();
-        for mut ch in chapters {
-            ch.index = chapter_index;
-            chapter_index += 1;
-            result.push(ch);
-        }
-
-        // The actual URL we fetched (after redirects) should be considered visited
-        let actual_visited_url = res.url.clone();
-
-        // Get chapter URLs from first page for deduplication
-        let first_page_chapter_urls: std::collections::HashSet<String> =
-            result.iter().map(|c| c.url.clone()).collect();
-
-        // Filter out already visited URLs and the current page URL from pending_urls
-        // Also filter out URLs that point to the same page (same path but different domain)
-        let pending_urls: Vec<String> = next_urls
-            .into_iter()
-            .filter(|u| {
-                // Filter out exact matches
-                if u == &actual_visited_url || u == toc_url {
-                    return false;
-                }
-                // Filter out URLs with the same path but different domain
-                // This handles cases like m.22biqu.com vs m.22biqu.net
-                if let (Ok(parsed_u), Ok(parsed_visited)) =
-                    (url::Url::parse(u), url::Url::parse(&actual_visited_url))
-                {
-                    if parsed_u.path() == parsed_visited.path() {
-                        return false;
-                    }
-                }
-                true
-            })
-            .collect();
-
-        let pagination = ChapterPagination {
-            user_ns: user_ns.to_string(),
-            source: source.clone(),
-            toc_url: toc_url.to_string(),
-            visited_urls: vec![toc_url.to_string(), actual_visited_url],
-            pending_urls,
-            seen_chapter_urls: first_page_chapter_urls.iter().cloned().collect(),
-            next_index: chapter_index,
-        };
-
-        Ok((result, pagination))
-    }
-
-    /// Continue fetching remaining chapters from pagination state
-    pub async fn fetch_remaining_chapters(
-        &self,
-        pagination: ChapterPagination,
-    ) -> Result<Vec<BookChapter>, AppError> {
-        let mut all_chapters = Vec::new();
-        let mut visited_page_urls: std::collections::HashSet<String> =
-            pagination.visited_urls.iter().cloned().collect();
-        let mut seen_chapter_urls: std::collections::HashSet<String> =
-            pagination.seen_chapter_urls.iter().cloned().collect();
-        let mut chapter_index = pagination.next_index;
-
-        let pending_urls: Vec<String> = pagination
-            .pending_urls
-            .into_iter()
-            .filter(|u| !visited_page_urls.contains(u))
-            .collect();
-
-        if pending_urls.len() > 1 {
-            // Multiple URLs from option dropdown - fetch all pages
-            for url in pending_urls {
-                if visited_page_urls.contains(&url) {
-                    continue;
-                }
-                visited_page_urls.insert(url.clone());
-
-                let res = self
-                    .fetch_source_url(
-                        &pagination.user_ns,
-                        &pagination.source,
-                        &url,
-                        &pagination.source.book_source_url,
-                    )
-                    .await?;
-                let (chapters, _) =
-                    self.parser
-                        .chapter_list(&pagination.source, &res.body, &res.url);
-
-                // Check if this page is a duplicate (all chapters already seen)
-                // This handles cases where the first page URL differs from toc_url (e.g., different domain)
-                let all_seen = chapters
-                    .iter()
-                    .all(|ch| seen_chapter_urls.contains(&ch.url));
-                if all_seen && !chapters.is_empty() {
-                    tracing::debug!("Skipping duplicate page: {}", url);
-                    continue;
-                }
-
-                for ch in chapters {
-                    if seen_chapter_urls.contains(&ch.url) {
-                        continue;
-                    }
-                    seen_chapter_urls.insert(ch.url.clone());
-
-                    all_chapters.push(BookChapter {
-                        title: ch.title,
-                        url: ch.url,
-                        index: chapter_index,
-                        ..Default::default()
-                    });
-                    chapter_index += 1;
-                }
-            }
-        } else if pending_urls.len() == 1 {
-            // Single next page link - follow sequentially
-            let mut current_url = pending_urls[0].clone();
-            loop {
-                if visited_page_urls.contains(&current_url) {
-                    break;
-                }
-                visited_page_urls.insert(current_url.clone());
-
-                let res = self
-                    .fetch_source_url(
-                        &pagination.user_ns,
-                        &pagination.source,
-                        &current_url,
-                        &pagination.source.book_source_url,
-                    )
-                    .await?;
-                let (chapters, next_urls) =
-                    self.parser
-                        .chapter_list(&pagination.source, &res.body, &res.url);
-
-                // Check if this page is a duplicate
-                let all_seen = chapters
-                    .iter()
-                    .all(|ch| seen_chapter_urls.contains(&ch.url));
-                if all_seen && !chapters.is_empty() {
-                    tracing::debug!("Skipping duplicate page: {}", current_url);
-                    break; // Stop following pagination if we hit a duplicate page
-                }
-
-                for ch in chapters {
-                    if seen_chapter_urls.contains(&ch.url) {
-                        continue;
-                    }
-                    seen_chapter_urls.insert(ch.url.clone());
-
-                    all_chapters.push(BookChapter {
-                        title: ch.title,
-                        url: ch.url,
-                        index: chapter_index,
-                        ..Default::default()
-                    });
-                    chapter_index += 1;
-                }
-
-                // Get next page
-                let next = next_urls
-                    .into_iter()
-                    .find(|u| !visited_page_urls.contains(u));
-                match next {
-                    Some(url) if !url.is_empty() => current_url = url,
-                    _ => break,
-                }
-            }
-        }
-
-        Ok(all_chapters)
     }
 
     async fn get_chapter_list_with_pagination(
@@ -1280,27 +1084,6 @@ impl BookService {
         Ok(())
     }
 
-    pub async fn append_chapter_list_cache(
-        &self,
-        user_ns: &str,
-        toc_url: &str,
-        new_chapters: &Vec<BookChapter>,
-    ) -> Result<Vec<BookChapter>, AppError> {
-        let mut existing = self
-            .load_chapter_list_cache(user_ns, toc_url)
-            .await?
-            .unwrap_or_default();
-        let start_index = existing.len() as i32;
-        for (i, ch) in new_chapters.iter().enumerate() {
-            let mut ch = ch.clone();
-            ch.index = start_index + i as i32;
-            existing.push(ch);
-        }
-        self.save_chapter_list_cache(user_ns, toc_url, &existing)
-            .await?;
-        Ok(existing)
-    }
-
     pub async fn delete_chapter_list_cache(
         &self,
         user_ns: &str,
@@ -1596,15 +1379,7 @@ fn is_local_txt_book(book: &Book) -> bool {
 }
 
 fn books_match_for_save(existing: &Book, incoming: &Book) -> bool {
-    if existing.book_url == incoming.book_url {
-        return true;
-    }
-    if is_local_txt_book(existing) || is_local_txt_book(incoming) {
-        return false;
-    }
-    !existing.name.is_empty()
-        && existing.name == incoming.name
-        && existing.author == incoming.author
+    existing.book_url == incoming.book_url
 }
 
 fn books_match_for_delete(existing: &Book, target: &Book) -> bool {
@@ -1793,10 +1568,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_books_keeps_same_title_from_different_sources() {
+        let (service, storage_dir) = test_book_service("same-title-different-sources");
+        let user_ns = "same-title-different-sources-user";
+        let first = test_book(0, 0, 1000);
+        let mut second = test_book(0, 0, 1000);
+        second.origin = "https://other-source.example".to_string();
+        second.book_url = "https://other-book.example/1".to_string();
+
+        let saved = service
+            .save_books(user_ns, vec![first, second])
+            .await
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert_eq!(saved.len(), 2);
+    }
+
+    #[tokio::test]
     async fn save_book_accepts_newer_lower_progress() {
         let (service, storage_dir) = test_book_service("save-book-lower-progress");
         let user_ns = "save-book-lower-progress-user";
-        service.save_book(user_ns, test_book(8, 7300, 1000)).await.unwrap();
+        service
+            .save_book(user_ns, test_book(8, 7300, 1000))
+            .await
+            .unwrap();
 
         let saved = service
             .save_book(user_ns, test_book(0, 0, 3000))
