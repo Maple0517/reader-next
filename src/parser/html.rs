@@ -424,7 +424,15 @@ pub fn select_list<'a>(doc: &'a Html, selector: &str) -> Vec<ElementRef<'a>> {
         return select_with_combination(doc, sel_text);
     }
 
-    collect_matches(doc, &parse_selector_with_index(sel_text))
+    let mut matches = collect_matches(doc, &parse_selector_with_index(sel_text));
+    for part in split.parts.iter().skip(1) {
+        let parsed = parse_selector_with_index(part);
+        matches = matches
+            .into_iter()
+            .flat_map(|el| collect_matches_from_element(el, &parsed))
+            .collect();
+    }
+    matches
 }
 
 /// Handle list combination operators

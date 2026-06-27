@@ -477,7 +477,7 @@ impl RuleEngine {
                 cover_url,
                 intro,
                 kind,
-                last_chapter,
+                last_chapter: clean_last_chapter(last_chapter),
                 update_time,
                 word_count,
                 book_source_urls: None,
@@ -527,7 +527,7 @@ impl RuleEngine {
                 cover_url,
                 intro,
                 kind,
-                last_chapter,
+                last_chapter: clean_last_chapter(last_chapter),
                 update_time,
                 word_count,
                 book_source_urls: None,
@@ -744,7 +744,7 @@ impl RuleEngine {
                 cover_url: cover_url_abs,
                 intro,
                 kind,
-                last_chapter,
+                last_chapter: clean_last_chapter(last_chapter),
                 update_time,
                 word_count,
                 book_source_urls: None,
@@ -794,7 +794,7 @@ impl RuleEngine {
                 cover_url: cover_url.map(|u| resolve_url(base_url, &u)),
                 intro,
                 kind,
-                last_chapter,
+                last_chapter: clean_last_chapter(last_chapter),
                 update_time,
                 word_count,
                 book_source_urls: None,
@@ -842,7 +842,7 @@ impl RuleEngine {
                 cover_url,
                 intro,
                 kind,
-                last_chapter,
+                last_chapter: clean_last_chapter(last_chapter),
                 update_time,
                 word_count,
                 book_source_urls: None,
@@ -850,6 +850,23 @@ impl RuleEngine {
         }
         out
     }
+}
+
+fn clean_last_chapter(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    if value.chars().count() <= 80 && value.lines().count() <= 1 {
+        return Some(value);
+    }
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('第') && line.contains('章'))
+        .last()
+        .map(str::to_string)
+        .or(Some(value))
 }
 
 fn parse_book_info_html(
@@ -927,7 +944,7 @@ fn parse_book_info_html(
         cover_url,
         toc_url: final_toc_url,
         intro,
-        latest_chapter_title: last_chapter,
+        latest_chapter_title: clean_last_chapter(last_chapter),
         word_count,
         info_html: None,
         toc_html: None,
@@ -1015,7 +1032,7 @@ fn parse_book_info_xpath(
         cover_url,
         toc_url: toc_url.or_else(|| Some(book_url.to_string())),
         intro,
-        latest_chapter_title: last_chapter,
+        latest_chapter_title: clean_last_chapter(last_chapter),
         word_count,
         info_html: None,
         toc_html: None,
@@ -1093,7 +1110,7 @@ fn parse_book_info_json(
         cover_url,
         toc_url: toc_url.or_else(|| Some(book_url.to_string())),
         intro,
-        latest_chapter_title: last_chapter,
+        latest_chapter_title: clean_last_chapter(last_chapter),
         word_count,
         info_html: None,
         toc_html: None,
@@ -1126,7 +1143,7 @@ fn parse_chapter_list_html(
 
     // Use a set to deduplicate chapters by URL
     let mut seen_urls = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(items.len());
+    let mut out: Vec<BookChapter> = Vec::with_capacity(items.len());
 
     for el in items {
         let title = rule
@@ -1163,12 +1180,11 @@ fn parse_chapter_list_html(
             .unwrap_or(false);
         let url_abs = finalize_chapter_url(base_url, &url, &title, is_volume, out.len());
 
-        // Skip duplicate chapters (same URL)
         if seen_urls.contains(&url_abs) {
-            continue;
+            out.retain(|chapter| chapter.url != url_abs);
+        } else {
+            seen_urls.insert(url_abs.clone());
         }
-
-        seen_urls.insert(url_abs.clone());
 
         out.push(BookChapter {
             title,
@@ -1213,7 +1229,7 @@ fn parse_chapter_list_xpath(
     let items = xpath_select_nodes(scope, list_rule);
 
     let mut seen_urls = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(items.len());
+    let mut out: Vec<BookChapter> = Vec::with_capacity(items.len());
     for item in items {
         let title = eval_field_xpath_with_ctx(
             rule.chapter_name.as_deref().unwrap_or(""),
@@ -1249,9 +1265,10 @@ fn parse_chapter_list_xpath(
                 .unwrap_or(false);
         let url_abs = finalize_chapter_url(base_url, &url, &title, is_volume, out.len());
         if seen_urls.contains(&url_abs) {
-            continue;
+            out.retain(|chapter| chapter.url != url_abs);
+        } else {
+            seen_urls.insert(url_abs.clone());
         }
-        seen_urls.insert(url_abs.clone());
         out.push(BookChapter {
             title,
             url: url_abs,
