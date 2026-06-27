@@ -30,6 +30,8 @@ playwright-report/
 test-results/
 .superpowers/
 .codegraph/
+.lean-ctx/
+*.bak
 
 # Local agent secrets/context
 AGENTS.local.md
