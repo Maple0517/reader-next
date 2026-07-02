@@ -26,6 +26,19 @@ const AI_CHAPTER_SUMMARY_CONFIG_ROUTE: &str = "/reader3/ai/chapter-summary/confi
 const AI_PROXY_ROUTE: &str = "/reader3/ai/proxy";
 const AI_PROXY_IMAGE_ROUTE: &str = "/reader3/ai/proxy/image";
 
+// V4 API routes
+const V4_MEMORY_ROUTE: &str = "/api/books/v4/memory";
+const V4_CHARACTERS_ROUTE: &str = "/api/books/v4/characters";
+const V4_CHARACTER_CARD_ROUTE: &str = "/api/books/v4/characters/:character_id";
+const V4_CHAPTER_MEMORY_ROUTE: &str = "/api/books/v4/chapter-memory";
+const V4_MEMORY_STATUS_ROUTE: &str = "/api/books/v4/memory/status";
+const V4_MEMORY_RESET_ROUTE: &str = "/api/books/v4/memory/reset";
+const V4_ENABLED_ROUTE: &str = "/api/books/v4/enabled";
+const V4_CHAPTER_GENERATE_ROUTE: &str = "/api/books/v4/chapter-memory/generate";
+const V4_CATCHUP_START_ROUTE: &str = "/api/books/v4/catchup/start";
+const V4_CATCHUP_STATUS_ROUTE: &str = "/api/books/v4/catchup/status";
+const V4_CATCHUP_CANCEL_ROUTE: &str = "/api/books/v4/catchup/cancel";
+
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(handlers::health))
@@ -262,10 +275,7 @@ pub fn build_router(state: AppState) -> Router {
             AI_MODEL_CONFIG_ROUTE,
             get(handlers::get_ai_model_config).post(handlers::save_ai_model_config),
         )
-        .route(
-            AI_CHAPTER_SUMMARY_ROUTE,
-            get(handlers::get_chapter_summary),
-        )
+        .route(AI_CHAPTER_SUMMARY_ROUTE, get(handlers::get_chapter_summary))
         .route(
             AI_CHAPTER_SUMMARY_GENERATE_ROUTE,
             post(handlers::generate_chapter_summary),
@@ -276,6 +286,18 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(AI_PROXY_ROUTE, post(handlers::ai_proxy))
         .route(AI_PROXY_IMAGE_ROUTE, post(handlers::ai_proxy_image))
+        // V4 API routes
+        .route(V4_MEMORY_ROUTE, get(handlers::get_v4_memory))
+        .route(V4_CHARACTERS_ROUTE, get(handlers::get_v4_characters))
+        .route(V4_CHARACTER_CARD_ROUTE, get(handlers::get_v4_character_card))
+        .route(V4_CHAPTER_MEMORY_ROUTE, get(handlers::get_v4_chapter_memory))
+        .route(V4_MEMORY_STATUS_ROUTE, get(handlers::get_v4_memory_status))
+        .route(V4_MEMORY_RESET_ROUTE, post(handlers::post_v4_memory_reset))
+        .route(V4_ENABLED_ROUTE, post(handlers::post_v4_enabled))
+        .route(V4_CHAPTER_GENERATE_ROUTE, post(handlers::post_v4_chapter_generate))
+        .route(V4_CATCHUP_START_ROUTE, post(handlers::post_v4_catchup_start))
+        .route(V4_CATCHUP_STATUS_ROUTE, get(handlers::get_v4_catchup_status))
+        .route(V4_CATCHUP_CANCEL_ROUTE, post(handlers::post_v4_catchup_cancel))
         .route("/reader3/getReplaceRules", get(handlers::get_replace_rules))
         .route(
             "/reader3/saveReplaceRule",
@@ -454,6 +476,7 @@ mod tests {
             ai_model_service,
             chapter_summary_service,
             update_service,
+            pool: pool.clone(),
         };
         (state, dir)
     }
@@ -525,6 +548,81 @@ mod tests {
             wrong_method_enabled.status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
+
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn v4_routes_are_registered() {
+        let (state, dir) = create_test_state().await;
+        // Initialize V4 schema
+        db::v4::init_v4(&state.pool).await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let client = Client::new();
+        let base_url = format!("http://{}", addr);
+
+        // All V4 GET routes should respond (not 404)
+        for (method, path) in [
+            (Method::GET, V4_MEMORY_ROUTE),
+            (Method::GET, V4_CHARACTERS_ROUTE),
+            (Method::GET, V4_CHAPTER_MEMORY_ROUTE),
+            (Method::GET, V4_MEMORY_STATUS_ROUTE),
+            (Method::GET, V4_CATCHUP_STATUS_ROUTE),
+        ] {
+            let response = client
+                .request(method.clone(), format!("{base_url}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            assert_ne!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path}"
+            );
+        }
+
+        // All V4 POST routes should respond (not 404)
+        for (method, path) in [
+            (Method::POST, V4_MEMORY_RESET_ROUTE),
+            (Method::POST, V4_ENABLED_ROUTE),
+            (Method::POST, V4_CHAPTER_GENERATE_ROUTE),
+            (Method::POST, V4_CATCHUP_START_ROUTE),
+            (Method::POST, V4_CATCHUP_CANCEL_ROUTE),
+        ] {
+            let response = client
+                .request(method.clone(), format!("{base_url}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            assert_ne!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path}"
+            );
+        }
+
+        // Wrong method checks
+        let wrong_method_memory = client
+            .request(Method::POST, format!("{base_url}{V4_MEMORY_ROUTE}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_method_memory.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let wrong_method_reset = client
+            .request(Method::GET, format!("{base_url}{V4_MEMORY_RESET_ROUTE}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_method_reset.status(), StatusCode::METHOD_NOT_ALLOWED);
 
         server.abort();
         let _ = tokio::fs::remove_dir_all(dir).await;

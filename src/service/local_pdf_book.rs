@@ -270,7 +270,9 @@ fn extract_pdf_text(bytes: &[u8]) -> Result<(String, String, Vec<String>), AppEr
     extract_pdf_text_from_document(&doc)
 }
 
-fn extract_pdf_text_from_document(doc: &Document) -> Result<(String, String, Vec<String>), AppError> {
+fn extract_pdf_text_from_document(
+    doc: &Document,
+) -> Result<(String, String, Vec<String>), AppError> {
     let pages_map = doc.get_pages();
 
     let mut title = String::new();
@@ -326,9 +328,9 @@ fn extract_pdf_text_from_document(doc: &Document) -> Result<(String, String, Vec
 
 fn extract_pdf_page_text_lossy(doc: &Document, page_num: u32) -> Result<(String, bool), AppError> {
     let pages = doc.get_pages();
-    let page_id = *pages
-        .get(&page_num)
-        .ok_or_else(|| AppError::BadRequest(format!("PDF 文本提取失败: 找不到第 {} 页", page_num)))?;
+    let page_id = *pages.get(&page_num).ok_or_else(|| {
+        AppError::BadRequest(format!("PDF 文本提取失败: 找不到第 {} 页", page_num))
+    })?;
 
     let fonts = doc
         .get_page_fonts(page_id)
@@ -376,7 +378,9 @@ fn extract_pdf_page_text_lossy(doc: &Document, page_num: u32) -> Result<(String,
             }
             "Tj" | "TJ" => {
                 if let Some(encoding) = current_encoding {
-                    if let Err(err) = collect_pdf_operation_text(&mut text, encoding, &operation.operands) {
+                    if let Err(err) =
+                        collect_pdf_operation_text(&mut text, encoding, &operation.operands)
+                    {
                         had_lossy_decode = true;
                         tracing::warn!(
                             page = page_num,
@@ -520,15 +524,15 @@ end";
         })
     }
 
-    fn build_pdf_document_with_pages(
-        page_specs: Vec<(&'static [u8], Vec<u8>)>,
-    ) -> Document {
+    fn build_pdf_document_with_pages(page_specs: Vec<(&'static [u8], Vec<u8>)>) -> Document {
         let mut doc = Document::new();
         let pages_id = doc.new_object_id();
         let page_count = page_specs.len() as i64;
         let page_ids: Vec<_> = page_specs
             .into_iter()
-            .map(|(cmap_bytes, encoded_text)| build_type0_page(&mut doc, pages_id, cmap_bytes, encoded_text))
+            .map(|(cmap_bytes, encoded_text)| {
+                build_type0_page(&mut doc, pages_id, cmap_bytes, encoded_text)
+            })
             .collect();
 
         let pages = dictionary! {
@@ -599,10 +603,8 @@ end";
 
     #[test]
     fn extract_pdf_text_rejects_pdf_when_all_pages_are_unreadable() {
-        let doc = build_pdf_document_with_pages(vec![(
-            b"begincmap\nthis is broken\n",
-            vec![0x00, 0x5F],
-        )]);
+        let doc =
+            build_pdf_document_with_pages(vec![(b"begincmap\nthis is broken\n", vec![0x00, 0x5F])]);
 
         let err = extract_pdf_text_from_document(&doc).expect_err("all-broken PDF should fail");
         match err {

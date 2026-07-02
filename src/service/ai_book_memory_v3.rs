@@ -1219,7 +1219,10 @@ fn relation_to_view(relation: &AiBookCharacterRelationV3) -> AiBookRelationView 
             meta.as_ref()
                 .and_then(|item| item.history.first().map(|history| history.chapter_index))
         } else {
-            relation.history.first().map(|history| history.chapter_index)
+            relation
+                .history
+                .first()
+                .map(|history| history.chapter_index)
         },
         last_updated_chapter_index: if relation.history.is_empty() {
             meta.as_ref()
@@ -2679,7 +2682,10 @@ mod tests {
         memory = merge_ai_book_memory_v3(memory, normalized);
 
         let stored = &memory.character_relations[0];
-        assert_eq!(stored.id, "relation:character:张羽:character:白真真:Companion:undirected");
+        assert_eq!(
+            stored.id,
+            "relation:character:张羽:character:白真真:Companion:undirected"
+        );
         assert_eq!(stored.label, "并肩");
         assert_eq!(stored.direction, "undirected");
         assert_eq!(stored.summary, "两人并肩行动");

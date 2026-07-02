@@ -1,4 +1,5 @@
 pub mod repo;
+pub mod v4;
 
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},

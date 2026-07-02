@@ -169,11 +169,7 @@ impl LocalEpubBookService {
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
 
-        let total_chars: usize = epub_data
-            .chapters
-            .iter()
-            .map(|ch| ch.content.len())
-            .sum();
+        let total_chars: usize = epub_data.chapters.iter().map(|ch| ch.content.len()).sum();
 
         Ok(Book {
             name: index.name.clone(),
@@ -259,16 +255,9 @@ impl LocalEpubBookService {
             .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))
     }
 
-    pub async fn get_cover(
-        &self,
-        user_ns: &str,
-        book_url: &str,
-    ) -> Result<Vec<u8>, AppError> {
+    pub async fn get_cover(&self, user_ns: &str, book_url: &str) -> Result<Vec<u8>, AppError> {
         let hash = epub_hash_from_url(book_url)?;
-        let cover_path = self
-            .local_root(user_ns)
-            .join(hash)
-            .join("cover.jpg");
+        let cover_path = self.local_root(user_ns).join(hash).join("cover.jpg");
         fs::read(&cover_path)
             .await
             .map_err(|e| AppError::Internal(e.into()))
@@ -295,11 +284,7 @@ impl LocalEpubBookService {
         Ok(self.local_root(user_ns).join(hash))
     }
 
-    async fn read_index(
-        &self,
-        user_ns: &str,
-        book_url: &str,
-    ) -> Result<StoredEpubIndex, AppError> {
+    async fn read_index(&self, user_ns: &str, book_url: &str) -> Result<StoredEpubIndex, AppError> {
         let path = self.book_dir(user_ns, book_url)?.join("chapters.json");
         let data = fs::read_to_string(path)
             .await
@@ -361,8 +346,7 @@ fn local_name(name: quick_xml::name::QName) -> String {
 
 fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
     let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("EPUB 解析失败: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("EPUB 解析失败: {}", e))?;
 
     let mut title = String::new();
     let mut author = String::new();
@@ -381,8 +365,7 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                 if ln == "rootfile" {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"full-path" {
-                            rootfile_path =
-                                Some(String::from_utf8_lossy(&attr.value).into_owned());
+                            rootfile_path = Some(String::from_utf8_lossy(&attr.value).into_owned());
                         }
                     }
                 }
@@ -412,7 +395,9 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
 
         loop {
             match opf_reader.read_event() {
-                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match local_name(e.name()).as_str() {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match local_name(e.name())
+                    .as_str()
+                {
                     "metadata" => in_metadata = true,
                     "manifest" => in_manifest = true,
                     "spine" => in_spine = true,
@@ -422,8 +407,7 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
                                 b"id" => id = String::from_utf8_lossy(&attr.value).into_owned(),
-                                b"href" => href =
-                                    String::from_utf8_lossy(&attr.value).into_owned(),
+                                b"href" => href = String::from_utf8_lossy(&attr.value).into_owned(),
                                 _ => {}
                             }
                         }
@@ -434,8 +418,7 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                     "itemref" if in_spine => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"idref" {
-                                let idref =
-                                    String::from_utf8_lossy(&attr.value).into_owned();
+                                let idref = String::from_utf8_lossy(&attr.value).into_owned();
                                 if let Some(href) = manifest_items.get(&idref) {
                                     spine_hrefs.push(href.clone());
                                 }
@@ -459,9 +442,7 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                         let mut content = String::new();
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
-                                b"name" => {
-                                    name = String::from_utf8_lossy(&attr.value).into_owned()
-                                }
+                                b"name" => name = String::from_utf8_lossy(&attr.value).into_owned(),
                                 b"content" => {
                                     content = String::from_utf8_lossy(&attr.value).into_owned()
                                 }
@@ -471,8 +452,7 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                         if name == "cover" {
                             if let Some(href) = manifest_items.get(&content) {
                                 let full_path = format!("{}{}", opf_dir, href);
-                                if let Ok(buf) = read_zip_entry_to_bytes(&mut archive, &full_path)
-                                {
+                                if let Ok(buf) = read_zip_entry_to_bytes(&mut archive, &full_path) {
                                     if !buf.is_empty() {
                                         cover = Some(buf);
                                     }
@@ -512,13 +492,12 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
         let full_path = format!("{}{}", opf_dir, href);
         let html_str = read_zip_entry_to_string(&mut archive, &full_path).unwrap_or_default();
         let content = strip_html_tags(&html_str);
-        let chapter_title = extract_title_from_html_str(&html_str)
-            .or_else(|| {
-                chapters
-                    .len()
-                    .checked_add(1)
-                    .map(|i| format!("第 {} 章", i))
-            });
+        let chapter_title = extract_title_from_html_str(&html_str).or_else(|| {
+            chapters
+                .len()
+                .checked_add(1)
+                .map(|i| format!("第 {} 章", i))
+        });
         let title_str = chapter_title.unwrap_or_else(|| "正文".to_string());
         chapters.push(EpubChapter {
             title: title_str,
@@ -640,9 +619,7 @@ fn extract_nav_titles(nav: &str) -> Vec<String> {
 fn epub_hash_from_url(book_url: &str) -> Result<&str, AppError> {
     book_url
         .strip_prefix("local-epub:")
-        .filter(|v| {
-            v.len() == LOCAL_EPUB_HASH_LEN && v.chars().all(|ch| ch.is_ascii_hexdigit())
-        })
+        .filter(|v| v.len() == LOCAL_EPUB_HASH_LEN && v.chars().all(|ch| ch.is_ascii_hexdigit()))
         .ok_or_else(|| AppError::BadRequest("本地 EPUB 地址无效".to_string()))
 }
 

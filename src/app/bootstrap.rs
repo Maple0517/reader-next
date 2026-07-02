@@ -36,6 +36,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     let pool = db::init_pool(&cfg.database_url).await?;
     println!("DEBUG: db pool initialized");
+    db::v4::init_v4(&pool).await?;
+    println!("DEBUG: v4 schema initialized");
     let repo = db::repo::BookSourceRepo::new(pool.clone());
 
     let http = HttpClient::new(cfg.request_timeout_secs, None)?;
@@ -92,6 +94,7 @@ pub async fn run() -> anyhow::Result<()> {
         ai_model_service,
         chapter_summary_service,
         update_service,
+        pool,
     };
 
     let app: Router = api::router::build_router(state);

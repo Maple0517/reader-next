@@ -872,6 +872,7 @@ mod tests {
             ai_model_service,
             chapter_summary_service,
             update_service,
+            pool,
         };
         (state, dir)
     }

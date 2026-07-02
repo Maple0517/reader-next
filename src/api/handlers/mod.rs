@@ -10,6 +10,7 @@ mod replace_rule;
 mod rss;
 mod update;
 mod user;
+mod v4;
 mod webdav;
 
 pub use ai_book::*;
@@ -36,6 +37,7 @@ pub use user::{
     add_user, change_password, delete_file, delete_users, get_user_config, get_user_info,
     get_user_list, login, logout, reset_password, save_user_config, update_user, upload_file,
 };
+pub use v4::*;
 pub use webdav::{
     delete_webdav_file, delete_webdav_file_list, get_webdav_file, get_webdav_file_list,
     upload_file_to_webdav, webdav_handler,

@@ -165,28 +165,50 @@
         </section>
 
         <section v-else-if="activeTab === 'characters'" class="stack-panel">
-          <article v-for="character in displayCharacters" :key="character.id" class="list-item">
-            <div class="item-title">
-              <h3>{{ character.name }}</h3>
-              <span>{{ character.importance || 'unknown' }}</span>
-            </div>
-            <p>{{ character.currentStatus || character.description || '暂无状态' }}</p>
-            <div class="meta-line">
-              <span v-if="character.aliases.length">别名：{{ character.aliases.join('、') }}</span>
-              <span v-if="character.lastSeenChapter">最近：{{ character.lastSeenChapter }}</span>
-            </div>
-            <details v-if="hasEvidence(character.evidence)" class="evidence-block">
-              <summary>来源</summary>
-              <ul>
-                <li v-for="item in visibleEvidence(character.evidence)" :key="evidenceKey(item)">
-                  <strong>{{ evidenceChapterLabel(item) }}</strong>
-                  <span>{{ item.note }}</span>
-                  <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
-                </li>
-              </ul>
-            </details>
-          </article>
-          <EmptyState v-if="!displayCharacters.length" text="暂无角色资料" />
+          <div class="characters-toolbar">
+            <button class="secondary-btn" :class="{ active: v4Mode }" @click="toggleV4Mode">
+              {{ v4Mode ? 'V4 角色' : 'V3 角色' }}
+            </button>
+          </div>
+          <template v-if="v4Mode">
+            <article v-for="character in displayV4Characters" :key="character.id" class="list-item">
+              <div class="item-title">
+                <h3>{{ character.name }}</h3>
+                <span>{{ character.importance }}</span>
+              </div>
+              <p v-if="character.summary">{{ character.summary }}</p>
+              <div class="meta-line">
+                <span v-if="character.aliases.length">别名：{{ character.aliases.join('、') }}</span>
+                <span v-if="character.lastSeenChapter">最近：{{ character.lastSeenChapter }}</span>
+                <span v-if="character.firstSeenChapter">首次：{{ character.firstSeenChapter }}</span>
+              </div>
+            </article>
+            <EmptyState v-if="!displayV4Characters.length" text="暂无 V4 角色资料" />
+          </template>
+          <template v-else>
+            <article v-for="character in displayCharacters" :key="character.id" class="list-item">
+              <div class="item-title">
+                <h3>{{ character.name }}</h3>
+                <span>{{ character.importance || 'unknown' }}</span>
+              </div>
+              <p>{{ character.currentStatus || character.description || '暂无状态' }}</p>
+              <div class="meta-line">
+                <span v-if="character.aliases.length">别名：{{ character.aliases.join('、') }}</span>
+                <span v-if="character.lastSeenChapter">最近：{{ character.lastSeenChapter }}</span>
+              </div>
+              <details v-if="hasEvidence(character.evidence)" class="evidence-block">
+                <summary>来源</summary>
+                <ul>
+                  <li v-for="item in visibleEvidence(character.evidence)" :key="evidenceKey(item)">
+                    <strong>{{ evidenceChapterLabel(item) }}</strong>
+                    <span>{{ item.note }}</span>
+                    <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
+                  </li>
+                </ul>
+              </details>
+            </article>
+            <EmptyState v-if="!displayCharacters.length" text="暂无角色资料" />
+          </template>
         </section>
 
         <section v-else-if="activeTab === 'relationships'" class="stack-panel">
@@ -292,11 +314,13 @@
 import { computed, defineComponent, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getShelfBook } from '../api/bookshelf'
+import { getV4Characters } from '../api/v4/book'
 import AiBookMapPanel from '../components/reader/AiBookMapPanel.vue'
 import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
 import { useReaderStore } from '../stores/reader'
 import type { AiBookCatchupStatus, AiBookCatchupTaskStatus, AiBookEvidence, Book } from '../types'
+import type { V4CharacterListItem } from '../types/v4'
 import { describeCatchupDetail, describeCatchupProgress } from '../utils/aiBookCatchupStatus'
 import { collapseWhitespace, summarizeDisplayError } from '../utils/httpError'
 
@@ -338,6 +362,17 @@ type DisplayLocation = {
   evidence: AiBookEvidence[]
 }
 
+type V4DisplayCharacter = {
+  id: string
+  name: string
+  aliases: string[]
+  importance: string
+  summary: string
+  firstSeenChapter: string
+  lastSeenChapter: string
+  visibilityScore: number
+}
+
 const EmptyState = defineComponent({
   props: { text: { type: String, required: true } },
   setup(props) {
@@ -358,6 +393,8 @@ const catchupStatus = ref<AiBookCatchupStatus | null>(null)
 const catchupActionPending = ref(false)
 let catchupPollTimer: number | null = null
 let catchupDisposed = false
+const v4Characters = ref<V4CharacterListItem[]>([])
+const v4Mode = ref(false)
 
 const tabs: Array<{ key: AiTab; label: string }> = [
   { key: 'overview', label: '总览' },
@@ -459,6 +496,16 @@ const worldviewGroups = computed(() => {
 })
 const generateDisabled = computed(() => aiStore.isBusy || !book.value)
 const generateButtonLabel = computed(() => aiStore.phase === 'text' ? '生成中...' : '生成当前章节')
+const displayV4Characters = computed<V4DisplayCharacter[]>(() => v4Characters.value.map((item) => ({
+  id: item.id,
+  name: item.name,
+  aliases: item.aliases || [],
+  importance: formatImportance(item.importance),
+  summary: item.summary || '',
+  firstSeenChapter: formatChapter(item.firstSeenChapter),
+  lastSeenChapter: formatChapter(item.lastSeenChapter),
+  visibilityScore: item.visibilityScore,
+})))
 const pollingStatuses = new Set<AiBookCatchupTaskStatus>(['running', 'canceling', 'pausing'])
 const terminalStatuses = new Set<AiBookCatchupTaskStatus>(['paused', 'canceled', 'completed', 'failed'])
 const isCatchupRunning = computed(() => catchupStatus.value ? pollingStatuses.has(catchupStatus.value.status) : false)
@@ -713,6 +760,29 @@ function describeCatchupStatus(status: AiBookCatchupTaskStatus) {
 function formatChapter(index?: number | null) {
   if (typeof index !== 'number') return '当前章节'
   return `第 ${index + 1} 章`
+}
+
+function formatImportance(value: number) {
+  if (value >= 0.8) return 'high'
+  if (value >= 0.5) return 'medium'
+  return 'low'
+}
+
+async function loadV4Characters() {
+  if (!book.value) return
+  try {
+    const response = await getV4Characters(book.value.bookUrl)
+    v4Characters.value = response.characters || []
+  } catch {
+    v4Characters.value = []
+  }
+}
+
+function toggleV4Mode() {
+  v4Mode.value = !v4Mode.value
+  if (v4Mode.value && !v4Characters.value.length) {
+    void loadV4Characters()
+  }
 }
 
 function formatTime(value: number | string) {
@@ -1116,6 +1186,18 @@ button:disabled {
   overflow: hidden;
   border: 1px solid var(--color-border-light);
   background: #1f2522;
+}
+
+.characters-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.characters-toolbar .secondary-btn.active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
 }
 
 .map-frame img {
