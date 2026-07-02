@@ -1326,7 +1326,7 @@ fn build_model_body(path: &str, model: &str, prompt: String) -> Value {
     })
 }
 
-fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> {
+pub fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> {
     if is_gemini_generate_content_path(path) {
         let text = value
             .get("candidates")
@@ -1395,19 +1395,19 @@ fn extract_model_content(path: &str, value: &Value) -> Result<String, AppError> 
         .ok_or_else(|| AppError::BadRequest("AI资料生成返回内容为空".to_string()))
 }
 
-fn is_gemini_generate_content_path(path: &str) -> bool {
+pub fn is_gemini_generate_content_path(path: &str) -> bool {
     path.split('?').next().is_some_and(|path| {
         path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent")
     })
 }
 
-fn is_anthropic_messages_path(path: &str) -> bool {
+pub fn is_anthropic_messages_path(path: &str) -> bool {
     path.split('?')
         .next()
         .is_some_and(|path| path.ends_with("/v1/messages") || path.ends_with("/messages"))
 }
 
-fn is_responses_path(path: &str) -> bool {
+pub fn is_responses_path(path: &str) -> bool {
     path.split('?')
         .next()
         .is_some_and(|path| path.ends_with("/v1/responses") || path.ends_with("/responses"))

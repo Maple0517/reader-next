@@ -403,7 +403,7 @@ pub async fn post_v4_chapter_generate(
     };
 
     // Run pipeline
-    let extractor = crate::service::v4::extractor::AiExtractor::new();
+    let extractor = crate::service::v4::extractor::RealAiExtractor::new(state.ai_model_service.clone());
     crate::service::v4::pipeline::process_chapter(
         &ctx.book_id,
         chapter_index,
@@ -469,8 +469,9 @@ pub async fn post_v4_catchup_start(
     // Spawn background worker
     let pool = state.pool.clone();
     let book_id = ctx.book_id.clone();
+    let ai_model_service = state.ai_model_service.clone();
     tokio::spawn(async move {
-        run_catchup_worker(&book_id, target_chapter, &pool).await;
+        run_catchup_worker(&book_id, target_chapter, &pool, ai_model_service).await;
     });
 
     Ok(Json(ApiResponse::ok(serde_json::json!({
@@ -670,11 +671,11 @@ async fn ensure_v4_enabled(state: &AppState, book_id: &str) -> Result<(), AppErr
 
 /// Background worker that processes chapters sequentially.
 /// Checks `processing_progress.status` for cooperative cancellation.
-async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::SqlitePool) {
+async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::SqlitePool, ai_model_service: std::sync::Arc<crate::service::ai_model_service::AiModelService>) {
     let progress_repo = ProgressRepo::new(pool.clone());
     let chapter_repo =
         crate::storage::db::v4::chapter_repo::ChapterRepo::new(pool.clone());
-    let extractor = crate::service::v4::extractor::AiExtractor::new();
+    let extractor = crate::service::v4::extractor::RealAiExtractor::new(ai_model_service);
 
     // Get current progress
     let start_chapter = match progress_repo.get_progress(book_id).await {
