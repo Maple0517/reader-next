@@ -1,5 +1,56 @@
 /// Observation types extracted from text by the AI extractor.
 
+/// Trait for extracting observations from chapter context.
+///
+/// Implementations:
+/// - `MockExtractor`: returns pre-configured observations for testing
+/// - `AiExtractor`: placeholder for real AI extraction (TODO)
+#[axum::async_trait]
+pub trait Extractor: Send + Sync {
+    async fn extract(&self, context: &str, span_ids: &[String]) -> anyhow::Result<Vec<Observation>>;
+}
+
+/// Mock extractor that returns pre-configured observations.
+/// Used for testing the pipeline end-to-end without AI calls.
+pub struct MockExtractor {
+    observations: Vec<Observation>,
+}
+
+impl MockExtractor {
+    pub fn new(observations: Vec<Observation>) -> Self {
+        Self { observations }
+    }
+}
+
+#[axum::async_trait]
+impl Extractor for MockExtractor {
+    async fn extract(&self, _context: &str, span_ids: &[String]) -> anyhow::Result<Vec<Observation>> {
+        // Inject real span_ids into observations that have evidence spans
+        Ok(self
+            .observations
+            .iter()
+            .map(|obs| obs.clone().with_evidence_span_ids(span_ids.to_vec()))
+            .collect())
+    }
+}
+
+/// Placeholder AI extractor. Returns empty observations until AI service is integrated.
+pub struct AiExtractor;
+
+impl AiExtractor {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[axum::async_trait]
+impl Extractor for AiExtractor {
+    async fn extract(&self, _context: &str, _span_ids: &[String]) -> anyhow::Result<Vec<Observation>> {
+        // TODO: Integrate actual AI extraction when AI service is available.
+        Ok(Vec::new())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Observation {
     EntityIntroduction {
@@ -73,6 +124,27 @@ impl Observation {
             } => evidence_span_ids,
             Observation::Summary { .. } => &[],
         }
+    }
+
+    /// Replace evidence span IDs with the given ones. Used by MockExtractor
+    /// to inject real span IDs from the pipeline into pre-configured observations.
+    pub fn with_evidence_span_ids(mut self, span_ids: Vec<String>) -> Self {
+        match &mut self {
+            Observation::EntityIntroduction {
+                evidence_span_ids, ..
+            }
+            | Observation::Alias {
+                evidence_span_ids, ..
+            }
+            | Observation::PropertyUpdate {
+                evidence_span_ids, ..
+            }
+            | Observation::MinorEvent {
+                evidence_span_ids, ..
+            } => *evidence_span_ids = span_ids,
+            Observation::Summary { .. } => {}
+        }
+        self
     }
 }
 

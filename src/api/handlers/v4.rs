@@ -403,11 +403,13 @@ pub async fn post_v4_chapter_generate(
     };
 
     // Run pipeline
+    let extractor = crate::service::v4::extractor::AiExtractor::new();
     crate::service::v4::pipeline::process_chapter(
         &ctx.book_id,
         chapter_index,
         &raw_text,
         &state.pool,
+        &extractor,
     )
     .await
     .map_err(|e| AppError::Internal(e.into()))?;
@@ -672,6 +674,7 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
     let progress_repo = ProgressRepo::new(pool.clone());
     let chapter_repo =
         crate::storage::db::v4::chapter_repo::ChapterRepo::new(pool.clone());
+    let extractor = crate::service::v4::extractor::AiExtractor::new();
 
     // Get current progress
     let start_chapter = match progress_repo.get_progress(book_id).await {
@@ -755,6 +758,7 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
             chapter_index,
             &chapter.raw_text,
             pool,
+            &extractor,
         )
         .await
         {

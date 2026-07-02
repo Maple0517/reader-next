@@ -105,8 +105,8 @@ async fn reduce_entity_introduction(
         result.entities_updated.push(e.id.clone());
         e
     } else {
-        // Create new entity
-        let entity = EntityRepo::create_entity_with_conn(
+        // Create new entity; catch UNIQUE violation and return existing entity
+        match EntityRepo::create_entity_with_conn(
             conn,
             book_id,
             "character", // Default to character for now
@@ -116,23 +116,43 @@ async fn reduce_entity_introduction(
             claim.confidence,
             claim.chapter_index,
         )
-        .await?;
+        .await
+        {
+            Ok(entity) => {
+                // Create alias for the canonical name itself
+                EntityRepo::create_alias_with_conn(
+                    conn,
+                    book_id,
+                    &entity.id,
+                    subject_mention,
+                    "canonical",
+                    claim.chapter_index,
+                    claim.confidence,
+                    Some(&claim.id),
+                )
+                .await?;
 
-        // Create alias for the canonical name itself
-        EntityRepo::create_alias_with_conn(
-            conn,
-            book_id,
-            &entity.id,
-            subject_mention,
-            "canonical",
-            claim.chapter_index,
-            claim.confidence,
-            Some(&claim.id),
-        )
-        .await?;
-
-        result.entities_created.push(entity.id.clone());
-        entity
+                result.entities_created.push(entity.id.clone());
+                entity
+            }
+            Err(_) => {
+                // UNIQUE violation: entity already exists by canonical name.
+                // Find and return it.
+                let existing = EntityRepo::get_by_canonical_name_with_conn(
+                    conn,
+                    book_id,
+                    subject_mention,
+                )
+                .await?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Entity creation failed and lookup by canonical name returned nothing for '{}'",
+                    subject_mention
+                ))?;
+                EntityRepo::update_last_seen_with_conn(conn, &existing.id, claim.chapter_index).await?;
+                result.entities_updated.push(existing.id.clone());
+                existing
+            }
+        }
     };
 
     // Create additional aliases from value_json

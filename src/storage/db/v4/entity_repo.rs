@@ -406,6 +406,23 @@ impl EntityRepo {
 
         Ok(row.map(|r| r.into()))
     }
+
+    pub async fn get_by_canonical_name_with_conn(
+        conn: &mut sqlx::SqliteConnection,
+        book_id: &str,
+        canonical_name: &str,
+    ) -> anyhow::Result<Option<EntityRecord>> {
+        let normalized = normalize_name(canonical_name);
+        let row = sqlx::query_as::<_, EntityRow>(
+            "SELECT id, book_id, entity_type, canonical_name, display_name, short_summary, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at FROM entities WHERE book_id = ? AND canonical_name = ?"
+        )
+        .bind(book_id)
+        .bind(&normalized)
+        .fetch_optional(conn)
+        .await?;
+
+        Ok(row.map(|r| r.into()))
+    }
 }
 
 /// Normalize canonical name: trim + full-width to half-width + lowercase.

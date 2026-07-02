@@ -1,6 +1,6 @@
 use crate::service::v4::claim_writer;
 use crate::service::v4::context_builder::ContextBuilder;
-use crate::service::v4::extractor::Observation;
+use crate::service::v4::extractor::Extractor;
 use crate::service::v4::projection;
 use crate::service::v4::reducer;
 use crate::service::v4::resolver;
@@ -32,6 +32,7 @@ pub async fn process_chapter(
     chapter_index: i64,
     raw_text: &str,
     pool: &SqlitePool,
+    extractor: &dyn Extractor,
 ) -> anyhow::Result<()> {
     let chapter_repo = ChapterRepo::new(pool.clone());
     let progress_repo = ProgressRepo::new(pool.clone());
@@ -134,8 +135,8 @@ pub async fn process_chapter(
             .build_context(book_id, chapter_index, segment_text)
             .await?;
 
-        // c. Extract observations (placeholder - returns empty for now)
-        let observations = extract_observations(&context, span_ids);
+        // c. Extract observations via trait
+        let observations = extractor.extract(&context, span_ids).await?;
 
         // d. Resolve observations against entities
         let resolved = resolver::resolve(&observations, &entity_repo, book_id).await?;
@@ -182,17 +183,10 @@ pub async fn process_chapter(
     Ok(())
 }
 
-/// Placeholder extractor: returns empty observations for now.
-/// TODO: Integrate actual AI extraction when AI service is available.
-fn extract_observations(context: &str, span_ids: &[String]) -> Vec<Observation> {
-    let _ = context; // Used for future AI call
-    let _ = span_ids; // Will be referenced in observations
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::v4::extractor::MockExtractor;
     use crate::storage::db;
 
     async fn setup_pool() -> SqlitePool {
@@ -204,6 +198,10 @@ mod tests {
         pool
     }
 
+    fn empty_extractor() -> MockExtractor {
+        MockExtractor::new(vec![])
+    }
+
     #[tokio::test]
     async fn process_chapter_creates_source_spans_and_ai_runs() {
         let pool = setup_pool().await;
@@ -211,8 +209,9 @@ mod tests {
         progress_repo.init_progress("b1").await.unwrap();
 
         let raw_text = "张三走进了大殿，看到了李四。两人互相行礼。";
+        let extractor = empty_extractor();
 
-        process_chapter("b1", 1, raw_text, &pool).await.unwrap();
+        process_chapter("b1", 1, raw_text, &pool, &extractor).await.unwrap();
 
         // Verify chapter exists
         let chapter_repo = ChapterRepo::new(pool.clone());
@@ -244,9 +243,10 @@ mod tests {
         progress_repo.init_progress("b1").await.unwrap();
 
         let raw_text = "第一章内容。";
+        let extractor = empty_extractor();
 
         // First run
-        process_chapter("b1", 1, raw_text, &pool).await.unwrap();
+        process_chapter("b1", 1, raw_text, &pool, &extractor).await.unwrap();
 
         // Get chapter to count runs
         let chapter_repo = ChapterRepo::new(pool.clone());
@@ -255,7 +255,7 @@ mod tests {
         let runs_before = ai_run_repo.list_runs_by_chapter("b1", &chapter.id).await.unwrap();
 
         // Second run (same text → same hash → should skip)
-        process_chapter("b1", 1, raw_text, &pool).await.unwrap();
+        process_chapter("b1", 1, raw_text, &pool, &extractor).await.unwrap();
         let runs_after = ai_run_repo.list_runs_by_chapter("b1", &chapter.id).await.unwrap();
 
         assert_eq!(
@@ -270,15 +270,16 @@ mod tests {
         let pool = setup_pool().await;
         let progress_repo = ProgressRepo::new(pool.clone());
         progress_repo.init_progress("b1").await.unwrap();
+        let extractor = empty_extractor();
 
-        process_chapter("b1", 1, "第一章内容。", &pool)
+        process_chapter("b1", 1, "第一章内容。", &pool, &extractor)
             .await
             .unwrap();
 
         let progress = progress_repo.get_progress("b1").await.unwrap().unwrap();
         assert_eq!(progress.max_processed_chapter, 1);
 
-        process_chapter("b1", 2, "第二章内容。", &pool)
+        process_chapter("b1", 2, "第二章内容。", &pool, &extractor)
             .await
             .unwrap();
 
@@ -291,8 +292,9 @@ mod tests {
         let pool = setup_pool().await;
         let progress_repo = ProgressRepo::new(pool.clone());
         progress_repo.init_progress("b1").await.unwrap();
+        let extractor = empty_extractor();
 
-        process_chapter("b1", 1, "测试内容。", &pool)
+        process_chapter("b1", 1, "测试内容。", &pool, &extractor)
             .await
             .unwrap();
 
@@ -311,12 +313,263 @@ mod tests {
         let pool = setup_pool().await;
         let progress_repo = ProgressRepo::new(pool.clone());
         progress_repo.init_progress("b1").await.unwrap();
+        let extractor = empty_extractor();
 
         // Empty text should still succeed (produces 1 segment with empty span)
-        let result = process_chapter("b1", 1, "", &pool).await;
+        let result = process_chapter("b1", 1, "", &pool, &extractor).await;
         assert!(result.is_ok(), "empty text should succeed");
 
         let progress = progress_repo.get_progress("b1").await.unwrap().unwrap();
         assert_eq!(progress.max_processed_chapter, 1);
+    }
+
+    #[tokio::test]
+    async fn e2e_mock_extractor_full_pipeline() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let raw_text = "张三走进了大殿。张真人乃是主角，如今已突破到金丹境界。";
+
+        let extractor = MockExtractor::new(vec![
+            // 1. EntityIntroduction: "张三"
+            crate::service::v4::extractor::Observation::EntityIntroduction {
+                subject_mention: "张三".to_string(),
+                entity_type: "character".to_string(),
+                aliases: vec!["张真人".to_string()],
+                short_summary: "主角".to_string(),
+                evidence_span_ids: vec![],
+                confidence: 0.95,
+            },
+            // 2. Alias: "小张"
+            crate::service::v4::extractor::Observation::Alias {
+                subject_mention: "张三".to_string(),
+                alias: "小张".to_string(),
+                alias_type: "nickname".to_string(),
+                evidence_span_ids: vec![],
+                confidence: 0.85,
+            },
+            // 3. PropertyUpdate: realm = 金丹
+            crate::service::v4::extractor::Observation::PropertyUpdate {
+                subject_mention: "张三".to_string(),
+                dimension_key: "realm".to_string(),
+                value_text: Some("金丹".to_string()),
+                value_json: None,
+                evidence_span_ids: vec![],
+                confidence: 0.9,
+            },
+            // 4. Summary
+            crate::service::v4::extractor::Observation::Summary {
+                summary: "本章介绍张三突破金丹".to_string(),
+                key_points: vec!["张三".to_string(), "金丹".to_string()],
+                has_important_changes: true,
+            },
+        ]);
+
+        process_chapter("b1", 1, raw_text, &pool, &extractor)
+            .await
+            .unwrap();
+
+        // --- Verify entities ---
+        let entity_repo = EntityRepo::new(pool.clone());
+        let entity = entity_repo
+            .find_entity_by_alias("b1", "张三")
+            .await
+            .unwrap();
+        assert!(entity.is_some(), "entity '张三' should exist");
+        let entity = entity.unwrap();
+        assert_eq!(entity.canonical_name, "张三");
+        assert_eq!(entity.short_summary.as_deref(), Some("主角"));
+
+        // --- Verify entity_aliases ---
+        let aliases = entity_repo
+            .list_aliases_by_entity(&entity.id)
+            .await
+            .unwrap();
+        let alias_texts: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
+        assert!(
+            alias_texts.contains(&"小张"),
+            "alias '小张' should exist, got {:?}",
+            alias_texts
+        );
+        assert!(
+            alias_texts.contains(&"张真人"),
+            "alias '张真人' (from EntityIntroduction) should exist, got {:?}",
+            alias_texts
+        );
+
+        // --- Verify entity_properties and entity_current_properties ---
+        let property_repo =
+            crate::storage::db::v4::property_repo::PropertyRepo::new(pool.clone());
+        let current = property_repo
+            .get_current_property("b1", &entity.id, "realm")
+            .await
+            .unwrap();
+        assert!(current.is_some(), "current property 'realm' should exist");
+        assert_eq!(
+            current.unwrap().value_text.as_deref(),
+            Some("金丹"),
+            "current realm should be '金丹'"
+        );
+
+        // --- Verify chapter_summaries ---
+        let chapter_repo = ChapterRepo::new(pool.clone());
+        let summary = chapter_repo
+            .get_chapter_summary("b1", 1)
+            .await
+            .unwrap();
+        assert!(summary.is_some(), "chapter summary should exist");
+        assert_eq!(
+            summary.unwrap().summary,
+            "本章介绍张三突破金丹"
+        );
+
+        // --- Verify claims ---
+        let claim_repo = ClaimRepo::new(pool.clone());
+        let claims = claim_repo
+            .list_claims_by_chapter("b1", 1)
+            .await
+            .unwrap();
+        let claim_types: Vec<&str> = claims.iter().map(|c| c.claim_type.as_str()).collect();
+        assert!(
+            claim_types.contains(&"entity_introduction"),
+            "should have entity_introduction claim, got {:?}",
+            claim_types
+        );
+        assert!(
+            claim_types.contains(&"alias"),
+            "should have alias claim, got {:?}",
+            claim_types
+        );
+        assert!(
+            claim_types.contains(&"property_update"),
+            "should have property_update claim, got {:?}",
+            claim_types
+        );
+        // Summary should NOT create a claim
+        assert!(
+            !claim_types.contains(&"summary"),
+            "Summary should not create a claim, got {:?}",
+            claim_types
+        );
+
+        // Verify accepted claims (low/medium risk ones)
+        let accepted: Vec<&crate::storage::db::v4::claim_repo::ClaimRecord> = claims
+            .iter()
+            .filter(|c| c.status == "accepted")
+            .collect();
+        assert_eq!(
+            accepted.len(),
+            3,
+            "entity_introduction, alias, property_update should all be accepted"
+        );
+
+        // --- Verify view_model_cache ---
+        let cache_repo =
+            crate::storage::db::v4::cache_repo::CacheRepo::new(pool.clone());
+        let character_list_cache = cache_repo
+            .get_cached("b1", "character_list", "__book__", 1)
+            .await
+            .unwrap();
+        assert!(
+            character_list_cache.is_some(),
+            "character_list cache should be populated"
+        );
+        let list: Vec<crate::service::v4::projection::CharacterListItem> =
+            serde_json::from_str(&character_list_cache.unwrap()).unwrap();
+        assert_eq!(list.len(), 1, "should have 1 character in list");
+        assert_eq!(list[0].name, "张三");
+        assert_eq!(list[0].summary.as_deref(), Some("主角"));
+
+        // character_card is populated on-demand by API, not by pipeline.
+        // Verify it can be projected correctly:
+        let card = crate::service::v4::projection::project_character_card(
+            &entity.id, "b1", 1, &pool,
+        )
+        .await
+        .unwrap();
+        assert_eq!(card.name, "张三");
+        assert!(card.current_states.contains_key("realm"));
+        assert_eq!(card.current_states["realm"].value, "金丹");
+    }
+
+    #[tokio::test]
+    async fn e2e_high_risk_property_quarantined() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let raw_text = "张三登场。张三被击杀，当场死亡。";
+
+        let extractor = MockExtractor::new(vec![
+            // 1. Low-risk: entity introduction
+            crate::service::v4::extractor::Observation::EntityIntroduction {
+                subject_mention: "张三".to_string(),
+                entity_type: "character".to_string(),
+                aliases: vec![],
+                short_summary: "悲剧角色".to_string(),
+                evidence_span_ids: vec![],
+                confidence: 0.9,
+            },
+            // 2. High-risk: death
+            crate::service::v4::extractor::Observation::PropertyUpdate {
+                subject_mention: "张三".to_string(),
+                dimension_key: "life_status".to_string(),
+                value_text: Some("死亡".to_string()),
+                value_json: None,
+                evidence_span_ids: vec![],
+                confidence: 0.95,
+            },
+        ]);
+
+        process_chapter("b1", 1, raw_text, &pool, &extractor)
+            .await
+            .unwrap();
+
+        // --- Verify entity was created (from low-risk entity_introduction) ---
+        let entity_repo = EntityRepo::new(pool.clone());
+        let entity = entity_repo
+            .find_entity_by_alias("b1", "张三")
+            .await
+            .unwrap();
+        assert!(entity.is_some(), "entity should be created from low-risk introduction");
+        let entity = entity.unwrap();
+
+        // --- Verify claims ---
+        let claim_repo = ClaimRepo::new(pool.clone());
+        let claims = claim_repo
+            .list_claims_by_chapter("b1", 1)
+            .await
+            .unwrap();
+
+        // entity_introduction should be accepted (low risk)
+        let intro_claim = claims
+            .iter()
+            .find(|c| c.claim_type == "entity_introduction")
+            .unwrap();
+        assert_eq!(intro_claim.status, "accepted");
+
+        // property_update (death) should be quarantined (high risk)
+        let death_claim = claims
+            .iter()
+            .find(|c| c.claim_type == "property_update")
+            .unwrap();
+        assert_eq!(
+            death_claim.status, "quarantined",
+            "death claim should be quarantined, got {}",
+            death_claim.status
+        );
+
+        // --- Verify no canonical state written for life_status ---
+        let property_repo =
+            crate::storage::db::v4::property_repo::PropertyRepo::new(pool.clone());
+        let current = property_repo
+            .get_current_property("b1", &entity.id, "life_status")
+            .await
+            .unwrap();
+        assert!(
+            current.is_none(),
+            "quarantined claim should NOT write to canonical state (entity_current_properties)"
+        );
     }
 }
