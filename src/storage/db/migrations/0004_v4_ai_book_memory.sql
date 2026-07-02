@@ -137,7 +137,8 @@ CREATE TABLE IF NOT EXISTS entities (
   last_seen_chapter INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  UNIQUE(book_id, entity_type, canonical_name)
 );
 
 CREATE TABLE IF NOT EXISTS entity_aliases (

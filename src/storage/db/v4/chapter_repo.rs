@@ -19,6 +19,8 @@ pub struct SegmentRecord {
     pub chapter_hash: String,
     pub segment_index: i64,
     pub segment_type: String,
+    pub start_span_id: Option<String>,
+    pub end_span_id: Option<String>,
     pub start_offset: Option<i64>,
     pub end_offset: Option<i64>,
     pub text_hash: Option<String>,
@@ -113,6 +115,8 @@ impl ChapterRepo {
         chapter_hash: &str,
         segment_index: i64,
         segment_type: &str,
+        start_span_id: Option<&str>,
+        end_span_id: Option<&str>,
         start_offset: Option<i64>,
         end_offset: Option<i64>,
         text_hash: Option<&str>,
@@ -121,8 +125,8 @@ impl ChapterRepo {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, segment_type, start_offset, end_offset, text_hash, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)"
+            "INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, segment_type, start_span_id, end_span_id, start_offset, end_offset, text_hash, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)"
         )
         .bind(&id)
         .bind(book_id)
@@ -130,6 +134,8 @@ impl ChapterRepo {
         .bind(chapter_hash)
         .bind(segment_index)
         .bind(segment_type)
+        .bind(start_span_id)
+        .bind(end_span_id)
         .bind(start_offset)
         .bind(end_offset)
         .bind(text_hash)
@@ -144,6 +150,8 @@ impl ChapterRepo {
             chapter_hash: chapter_hash.to_string(),
             segment_index,
             segment_type: segment_type.to_string(),
+            start_span_id: start_span_id.map(|s| s.to_string()),
+            end_span_id: end_span_id.map(|s| s.to_string()),
             start_offset,
             end_offset,
             text_hash: text_hash.map(|s| s.to_string()),
@@ -154,7 +162,7 @@ impl ChapterRepo {
 
     pub async fn get_segment(&self, segment_id: &str) -> anyhow::Result<Option<SegmentRecord>> {
         let row = sqlx::query_as::<_, SegmentRow>(
-            "SELECT id, book_id, chapter_id, chapter_hash, segment_index, segment_type, start_offset, end_offset, text_hash, status, created_at
+            "SELECT id, book_id, chapter_id, chapter_hash, segment_index, segment_type, start_span_id, end_span_id, start_offset, end_offset, text_hash, status, created_at
              FROM chapter_segments WHERE id = ?"
         )
         .bind(segment_id)
@@ -169,7 +177,7 @@ impl ChapterRepo {
         chapter_id: &str,
     ) -> anyhow::Result<Vec<SegmentRecord>> {
         let rows = sqlx::query_as::<_, SegmentRow>(
-            "SELECT id, book_id, chapter_id, chapter_hash, segment_index, segment_type, start_offset, end_offset, text_hash, status, created_at
+            "SELECT id, book_id, chapter_id, chapter_hash, segment_index, segment_type, start_span_id, end_span_id, start_offset, end_offset, text_hash, status, created_at
              FROM chapter_segments WHERE chapter_id = ? AND status = 'active' ORDER BY segment_index ASC"
         )
         .bind(chapter_id)
@@ -303,6 +311,8 @@ struct SegmentRow {
     chapter_hash: String,
     segment_index: i64,
     segment_type: String,
+    start_span_id: Option<String>,
+    end_span_id: Option<String>,
     start_offset: Option<i64>,
     end_offset: Option<i64>,
     text_hash: Option<String>,
@@ -319,6 +329,8 @@ impl From<SegmentRow> for SegmentRecord {
             chapter_hash: r.chapter_hash,
             segment_index: r.segment_index,
             segment_type: r.segment_type,
+            start_span_id: r.start_span_id,
+            end_span_id: r.end_span_id,
             start_offset: r.start_offset,
             end_offset: r.end_offset,
             text_hash: r.text_hash,
@@ -371,6 +383,7 @@ pub fn segment_chapter(
     raw_text: &str,
 ) -> Vec<(SegmentRecord, Vec<(i64, i64, String)>)> {
     let char_count = raw_text.chars().count();
+    let text_len = raw_text.len() as i64;
 
     if char_count < 3000 {
         // Short chapter: single segment, single span
@@ -381,13 +394,15 @@ pub fn segment_chapter(
             chapter_hash: chapter_hash.to_string(),
             segment_index: 0,
             segment_type: "default".to_string(),
+            start_span_id: None,
+            end_span_id: None,
             start_offset: Some(0),
-            end_offset: Some(raw_text.len() as i64),
+            end_offset: Some(text_len),
             text_hash: Some(chapter_hash.to_string()),
             status: "active".to_string(),
             created_at: String::new(),
         };
-        let spans = vec![(0, raw_text.len() as i64, raw_text.to_string())];
+        let spans = vec![(0, text_len, raw_text.to_string())];
         return vec![(segment, spans)];
     }
 
@@ -418,6 +433,8 @@ pub fn segment_chapter(
                 chapter_hash: chapter_hash.to_string(),
                 segment_index: seg_index,
                 segment_type: "default".to_string(),
+                start_span_id: None,
+                end_span_id: None,
                 start_offset: Some(segment_start),
                 end_offset: Some(current_offset),
                 text_hash: Some(chapter_hash.to_string()),
@@ -441,8 +458,10 @@ pub fn segment_chapter(
             chapter_hash: chapter_hash.to_string(),
             segment_index: seg_index,
             segment_type: "default".to_string(),
+            start_span_id: None,
+            end_span_id: None,
             start_offset: Some(segment_start),
-            end_offset: Some(current_offset),
+            end_offset: Some(text_len), // Use actual text length, not offset with trailing separator
             text_hash: Some(chapter_hash.to_string()),
             status: "active".to_string(),
             created_at: String::new(),
@@ -508,6 +527,8 @@ mod tests {
             "h",
             0,
             "default",
+            None,
+            None,
             Some(0),
             Some(100),
             Some("h"),
@@ -520,6 +541,8 @@ mod tests {
             "h",
             1,
             "dialogue",
+            None,
+            None,
             Some(100),
             Some(200),
             Some("h"),
@@ -540,7 +563,7 @@ mod tests {
             .upsert_chapter("b1", 1, None, "text", "h")
             .await
             .unwrap();
-        repo.create_segment("b1", &ch.id, "h", 0, "default", None, None, None)
+        repo.create_segment("b1", &ch.id, "h", 0, "default", None, None, None, None, None)
             .await
             .unwrap();
 
@@ -563,7 +586,7 @@ mod tests {
 
         assert!(!repo.has_active_segments(&ch.id, "h").await.unwrap());
 
-        repo.create_segment("b1", &ch.id, "h", 0, "default", None, None, None)
+        repo.create_segment("b1", &ch.id, "h", 0, "default", None, None, None, None, None)
             .await
             .unwrap();
 

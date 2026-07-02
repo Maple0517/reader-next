@@ -270,7 +270,7 @@ impl PropertyRepo {
             .get_active_properties(&mut *tx, entity_id, dimension_key)
             .await?;
         for prop in &existing {
-            self.supersede_property(&mut *tx, &prop.id, valid_from_chapter)
+            self.supersede_property(&mut *tx, &prop.id, valid_from_chapter - 1)
                 .await?;
         }
 
@@ -458,18 +458,19 @@ impl PropertyRepo {
 
         for prop in &active {
             sqlx::query("UPDATE entity_properties SET status = 'superseded', valid_to_chapter = ? WHERE id = ?")
-                .bind(valid_from_chapter)
+                .bind(valid_from_chapter - 1)
                 .bind(&prop.id)
                 .execute(&mut *conn)
                 .await?;
         }
 
-        // Insert new property
+        // Insert new property (with supersedes_property_id for audit trail)
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
+        let supersedes_id = active.first().map(|p| p.id.as_str());
         sqlx::query(
-            "INSERT INTO entity_properties (id, book_id, entity_id, dimension_key, value_text, value_json, valid_from_chapter, source_claim_id, confidence, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)"
+            "INSERT INTO entity_properties (id, book_id, entity_id, dimension_key, value_text, value_json, valid_from_chapter, source_claim_id, confidence, status, supersedes_property_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)"
         )
         .bind(&id)
         .bind(book_id)
@@ -480,6 +481,7 @@ impl PropertyRepo {
         .bind(valid_from_chapter)
         .bind(source_claim_id)
         .bind(confidence)
+        .bind(supersedes_id)
         .bind(&now)
         .execute(&mut *conn)
         .await?;
