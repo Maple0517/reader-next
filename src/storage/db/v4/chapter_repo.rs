@@ -620,6 +620,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn segmenter_last_segment_end_offset_equals_text_len() {
+        let para = "这是一段文字内容。".repeat(200);
+        let text = format!("{}\n\n{}\n\n{}", para, para, para);
+        let text_len = text.len() as i64;
+        let segments = segment_chapter("b1", "ch1", "hash1", &text);
+        let last = segments.last().unwrap();
+        assert_eq!(
+            last.0.end_offset,
+            Some(text_len),
+            "last segment end_offset must equal raw_text.len()"
+        );
+    }
+
+    #[test]
+    fn segmenter_short_chapter_end_offset() {
+        let text = "短章节内容";
+        let segments = segment_chapter("b1", "ch1", "hash1", text);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].0.end_offset, Some(text.len() as i64));
+    }
+
     #[tokio::test]
     async fn upsert_chapter_summary_creates() {
         let (_pool, repo) = setup().await;

@@ -642,4 +642,32 @@ mod tests {
         assert_eq!(normalize_name("ＺＨＡＮＧ"), "zhang");
         assert_eq!(normalize_name("　全角空格"), "全角空格"); // ideographic space
     }
+
+    #[tokio::test]
+    async fn duplicate_entity_rejected_by_unique_constraint() {
+        let (_pool, repo) = setup().await;
+        repo.create_entity("book1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+
+        // Second insert with same (book_id, entity_type, canonical_name) should fail
+        let result = repo
+            .create_entity("book1", "character", "张三", "张三改", None, 0.5, 2)
+            .await;
+        assert!(result.is_err(), "duplicate entity should be rejected by UNIQUE constraint");
+    }
+
+    #[tokio::test]
+    async fn same_name_different_entity_type_allowed() {
+        let (_pool, repo) = setup().await;
+        repo.create_entity("book1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+
+        // Same canonical_name but different entity_type should succeed
+        let result = repo
+            .create_entity("book1", "location", "张三", "张三城", None, 0.3, 1)
+            .await;
+        assert!(result.is_ok(), "same name different type should be allowed");
+    }
 }
