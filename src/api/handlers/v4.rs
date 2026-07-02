@@ -384,12 +384,38 @@ pub async fn post_v4_chapter_generate(
     // Verify V4 is enabled
     ensure_v4_enabled(&state, &ctx.book_id).await?;
 
-    // TODO: trigger actual single-chapter processing via v4 pipeline
-    // For now, return acknowledgement
+    // Get raw_text from chapters table
+    let chapter_repo =
+        crate::storage::db::v4::chapter_repo::ChapterRepo::new(state.pool.clone());
+    let chapter = chapter_repo
+        .get_chapter(&ctx.book_id, chapter_index)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    let raw_text = match chapter {
+        Some(ch) => ch.raw_text,
+        None => {
+            return Err(AppError::BadRequest(format!(
+                "Chapter {} not found. Ensure reading progress is up to date.",
+                chapter_index
+            )));
+        }
+    };
+
+    // Run pipeline
+    crate::service::v4::pipeline::process_chapter(
+        &ctx.book_id,
+        chapter_index,
+        &raw_text,
+        &state.pool,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
     Ok(Json(ApiResponse::ok(serde_json::json!({
         "ok": true,
         "chapter_index": chapter_index,
-        "message": "Chapter processing triggered (pipeline not yet implemented)"
+        "message": "Chapter processed successfully"
     }))))
 }
 
@@ -644,6 +670,8 @@ async fn ensure_v4_enabled(state: &AppState, book_id: &str) -> Result<(), AppErr
 /// Checks `processing_progress.status` for cooperative cancellation.
 async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::SqlitePool) {
     let progress_repo = ProgressRepo::new(pool.clone());
+    let chapter_repo =
+        crate::storage::db::v4::chapter_repo::ChapterRepo::new(pool.clone());
 
     // Get current progress
     let start_chapter = match progress_repo.get_progress(book_id).await {
@@ -689,11 +717,74 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
             )
             .await;
 
-        // TODO: actual chapter processing via V4 pipeline
-        // For now, just advance the progress marker
-        let _ = progress_repo
-            .advance_processed_chapter(book_id, chapter_index)
-            .await;
+        // Get raw_text from chapters table
+        let chapter = match chapter_repo.get_chapter(book_id, chapter_index).await {
+            Ok(Some(ch)) => ch,
+            Ok(None) => {
+                tracing::warn!(
+                    "Chapter {} not found for book {}, skipping",
+                    chapter_index,
+                    book_id
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to fetch chapter {} for {}: {}",
+                    chapter_index,
+                    book_id,
+                    e
+                );
+                let _ = progress_repo
+                    .set_status(
+                        book_id,
+                        "failed",
+                        None,
+                        None,
+                        None,
+                        Some(&format!("Chapter fetch failed: {}", e)),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        // Process chapter through pipeline
+        match crate::service::v4::pipeline::process_chapter(
+            book_id,
+            chapter_index,
+            &chapter.raw_text,
+            pool,
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    "Processed chapter {} for book {}",
+                    chapter_index,
+                    book_id
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to process chapter {} for {}: {}",
+                    chapter_index,
+                    book_id,
+                    e
+                );
+                let _ = progress_repo
+                    .set_status(
+                        book_id,
+                        "failed",
+                        None,
+                        None,
+                        None,
+                        Some(&format!("Pipeline failed at chapter {}: {}", chapter_index, e)),
+                    )
+                    .await;
+                return;
+            }
+        }
     }
 
     let _ = progress_repo
