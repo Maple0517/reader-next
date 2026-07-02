@@ -63,54 +63,79 @@ pub async fn process_chapter(
     // 4. Segment chapter
     let segments_data = chapter_repo::segment_chapter(book_id, &chapter.id, &text_hash, raw_text);
 
-    // Mark old segments/spans stale if they exist (hash changed)
-    chapter_repo.mark_segments_stale(&chapter.id).await?;
-    chapter_repo.mark_spans_stale(&chapter.id).await?;
+    // Check if segments already exist for this chapter (active or stale with same hash)
+    let existing_segments = chapter_repo.list_active_segments(&chapter.id).await?;
+    let has_matching_segments = !existing_segments.is_empty()
+        && existing_segments.iter().any(|s| s.chapter_hash == text_hash);
+
+    if !has_matching_segments {
+        // Clean up any stale segments with the same hash (e.g., after reset)
+        // Delete spans first (FK dependency on segments)
+        chapter_repo.delete_stale_spans(&chapter.id).await?;
+        chapter_repo.delete_stale_segments(&chapter.id).await?;
+        // Mark remaining active segments/spans as stale (hash changed)
+        chapter_repo.mark_spans_stale(&chapter.id).await?;
+        chapter_repo.mark_segments_stale(&chapter.id).await?;
+    }
 
     // 5. Upsert segments + source_spans, collect (segment_id, segment_text, span_ids) for processing
     let mut segment_info: Vec<(String, String, Vec<String>)> = Vec::new();
 
-    for (seg_template, spans_data) in &segments_data {
-        let segment = chapter_repo
-            .create_segment(
-                book_id,
-                &chapter.id,
-                &text_hash,
-                seg_template.segment_index,
-                &seg_template.segment_type,
-                None,
-                None,
-                seg_template.start_offset,
-                seg_template.end_offset,
-                seg_template.text_hash.as_deref(),
-            )
-            .await?;
-
-        let mut span_ids = Vec::new();
-        for (span_index, (start, end, excerpt)) in spans_data.iter().enumerate() {
-            let span = claim_repo
-                .create_span(
+    if has_matching_segments {
+        // Reuse existing segments and spans
+        for segment in &existing_segments {
+            if segment.chapter_hash != text_hash {
+                continue;
+            }
+            let spans = claim_repo.list_spans_by_segment(&segment.id).await?;
+            let span_ids: Vec<String> = spans.iter().map(|s| s.id.clone()).collect();
+            let segment_text: String = spans.iter().map(|s| s.text_excerpt.as_str()).collect::<Vec<_>>().join("\n\n");
+            segment_info.push((segment.id.clone(), segment_text, span_ids));
+        }
+    } else {
+        // Create new segments and spans
+        for (seg_template, spans_data) in &segments_data {
+            let segment = chapter_repo
+                .create_segment(
                     book_id,
                     &chapter.id,
                     &text_hash,
-                    &segment.id,
-                    span_index as i64,
-                    *start,
-                    *end,
-                    excerpt,
+                    seg_template.segment_index,
+                    &seg_template.segment_type,
+                    None,
+                    None,
+                    seg_template.start_offset,
+                    seg_template.end_offset,
+                    seg_template.text_hash.as_deref(),
                 )
                 .await?;
-            span_ids.push(span.id);
-        }
 
-        // Reconstruct segment text from spans
-        let segment_text: String = spans_data
-            .iter()
-            .map(|(_, _, text)| text.as_str())
+            let mut span_ids = Vec::new();
+            for (span_index, (start, end, excerpt)) in spans_data.iter().enumerate() {
+                let span = claim_repo
+                    .create_span(
+                        book_id,
+                        &chapter.id,
+                        &text_hash,
+                        &segment.id,
+                        span_index as i64,
+                        *start,
+                        *end,
+                        excerpt,
+                    )
+                    .await?;
+                span_ids.push(span.id);
+            }
+
+            // Reconstruct segment text from spans
+            let segment_text: String = spans_data
+                .iter()
+                .map(|(_, _, text)| text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        segment_info.push((segment.id, segment_text, span_ids));
+            segment_info.push((segment.id, segment_text, span_ids));
+        }
     }
 
     // 6. For each segment: context → extract → resolve → claim_writer → reducer

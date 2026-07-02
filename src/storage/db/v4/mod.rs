@@ -152,8 +152,8 @@ pub async fn reset_v4(pool: &SqlitePool, book_id: &str) -> anyhow::Result<()> {
         .bind(book_id)
         .execute(&mut *tx)
         .await?;
-    // Reset processing_progress to idle
-    sqlx::query("UPDATE processing_progress SET status = 'idle', target_chapter = NULL, current_chapter = NULL, current_segment_id = NULL, last_error = NULL, updated_at = datetime('now') WHERE book_id = ?")
+    // Reset processing_progress to idle with max_processed_chapter = 0
+    sqlx::query("UPDATE processing_progress SET status = 'idle', max_processed_chapter = 0, target_chapter = NULL, current_chapter = NULL, current_segment_id = NULL, last_error = NULL, updated_at = datetime('now') WHERE book_id = ?")
         .bind(book_id)
         .execute(&mut *tx)
         .await?;

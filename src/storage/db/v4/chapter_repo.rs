@@ -209,6 +209,24 @@ impl ChapterRepo {
         Ok(())
     }
 
+    /// Delete stale segments for a chapter (cleanup after reset).
+    pub async fn delete_stale_segments(&self, chapter_id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM chapter_segments WHERE chapter_id = ? AND status = 'stale'")
+            .bind(chapter_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Delete stale spans for a chapter (cleanup after reset).
+    pub async fn delete_stale_spans(&self, chapter_id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM source_spans WHERE chapter_id = ? AND status = 'stale'")
+            .bind(chapter_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Check if active segments already exist for this chapter_hash.
     pub async fn has_active_segments(
         &self,

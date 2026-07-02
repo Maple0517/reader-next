@@ -400,8 +400,28 @@ fn build_v4_model_body(path: &str, model: &str, prompt: &str) -> serde_json::Val
 /// Handles markdown fences, validates evidence_span_ids, dimension_key, confidence.
 pub fn parse_observations_from_json(raw: &str, valid_span_ids: &[String]) -> anyhow::Result<Vec<Observation>> {
     let cleaned = strip_markdown_fences(raw);
+
+    // Try parsing as array first, then as object with "observations" key
     let arr: Vec<serde_json::Value> = serde_json::from_str(&cleaned)
         .or_else(|_| {
+            // Try extracting array from wrapper object
+            let obj: serde_json::Value = serde_json::from_str(&cleaned)?;
+            if let Some(arr) = obj.get("observations").and_then(|v| v.as_array()) {
+                Ok(arr.clone())
+            } else if let Some(arr) = obj.get("data").and_then(|v| v.as_array()) {
+                Ok(arr.clone())
+            } else if let Some(arr) = obj.get("results").and_then(|v| v.as_array()) {
+                Ok(arr.clone())
+            } else {
+                // Single object → wrap in array
+                if obj.is_object() {
+                    Ok(vec![obj])
+                } else {
+                    Err(serde_json::from_str::<serde_json::Value>("").unwrap_err())
+                }
+            }
+        })
+        .or_else(|_: serde_json::Error| {
             // Try to repair truncated JSON by finding the last complete object
             let trimmed = cleaned.trim_end();
             if let Some(pos) = trimmed.rfind('}') {
@@ -417,7 +437,16 @@ pub fn parse_observations_from_json(raw: &str, valid_span_ids: &[String]) -> any
 
     for item in &arr {
         let obs_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match obs_type {
+        // Normalize type: accept both snake_case and PascalCase
+        let normalized_type = match obs_type {
+            "entity_introduction" | "EntityIntroduction" | "entityIntroduction" => "entity_introduction",
+            "alias" | "Alias" => "alias",
+            "property_update" | "PropertyUpdate" | "propertyUpdate" => "property_update",
+            "minor_event" | "MinorEvent" | "minorEvent" => "minor_event",
+            "summary" | "Summary" => "summary",
+            other => other,
+        };
+        match normalized_type {
             "entity_introduction" => {
                 let subject_mention = required_str(item, "subject_mention")?;
                 let entity_type = optional_str(item, "entity_type").unwrap_or("character");
