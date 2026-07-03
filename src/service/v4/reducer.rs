@@ -57,7 +57,10 @@ pub async fn reduce_claims(
             "property_update" => {
                 reduce_property_update(claim, book_id, &mut *tx, &mut result).await?;
             }
-            // minor_event and others: skip
+            // minor_event: ledger-only, intentionally not reduced.
+            // proposed status does not mean pending canonical work.
+            // These claims are preserved in the claims table for audit
+            // but do not block processing_progress or trigger retry.
             _ => {
                 result.claims_skipped.push(claim.id.clone());
             }
@@ -203,6 +206,9 @@ async fn reduce_alias(
     };
 
     if let Some(e) = entity {
+        // Update last_seen_chapter for any accepted claim mentioning this entity
+        EntityRepo::update_last_seen_with_conn(conn, &e.id, claim.chapter_index).await?;
+
         let alias_result = EntityRepo::create_alias_with_conn(
             conn,
             book_id,
@@ -257,6 +263,9 @@ async fn reduce_property_update(
         Some(e) => e,
         None => return Ok(()), // Entity not found, skip
     };
+
+    // Update last_seen_chapter for any accepted claim mentioning this entity
+    EntityRepo::update_last_seen_with_conn(conn, &entity.id, claim.chapter_index).await?;
 
     // Determine merge strategy from validated dimension
     let merge_strategy = dimension
@@ -635,6 +644,62 @@ mod tests {
             .unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, entity.id);
+
+        // Verify last_seen_chapter was updated
+        let updated_entity = entity_repo.get_by_id(&entity.id).await.unwrap().unwrap();
+        assert_eq!(updated_entity.last_seen_chapter, 1);
+    }
+
+    #[tokio::test]
+    async fn reduce_alias_updates_last_seen_chapter() {
+        let (pool, claim_repo, entity_repo, _property_repo) = setup().await;
+
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // Create entity at chapter 1
+        let entity = entity_repo
+            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+        assert_eq!(entity.last_seen_chapter, 1);
+
+        // Alias claim at chapter 5
+        let claim = claim_repo
+            .create_claim(
+                "b1",
+                5,
+                "alias",
+                Some("张三"),
+                Some("张真人"),
+                Some(&entity.id),
+                None,
+                "also known as 张真人",
+                None,
+                None,
+                &span_id.0,
+                &run_id.0,
+                0.9,
+                "low",
+            )
+            .await
+            .unwrap();
+
+        let claims = vec![claim];
+        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
+        assert_eq!(result.claims_accepted.len(), 1);
+
+        // Verify last_seen_chapter updated to 5
+        let updated = entity_repo.get_by_id(&entity.id).await.unwrap().unwrap();
+        assert_eq!(updated.last_seen_chapter, 5, "last_seen_chapter should be updated by alias claim");
     }
 
     #[tokio::test]

@@ -18,7 +18,8 @@ pub struct ClaimWriteResult {
 ///
 /// Rules:
 /// - Summary → write chapter_summaries, no claim
-/// - MinorEvent → claim with status='proposed', but reducer won't consume
+/// - MinorEvent → claim with status='proposed' (ledger-only, intentionally not reduced;
+///   does not mean pending canonical work; does not block processing_progress)
 /// - High risk → claim with status='quarantined' or 'uncertain', not entering reducer
 /// - Low/Medium risk → claim with status='proposed', enters reducer
 pub async fn write_claims(

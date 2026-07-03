@@ -13,7 +13,7 @@ use sqlx::SqlitePool;
 
 const PROMPT_VERSION: &str = "v1";
 const SCHEMA_VERSION: i64 = 1;
-const MODEL: &str = "placeholder";
+const DEFAULT_MODEL: &str = "unknown";
 
 /// Process a single chapter through the full V4 pipeline.
 ///
@@ -33,7 +33,9 @@ pub async fn process_chapter(
     raw_text: &str,
     pool: &SqlitePool,
     extractor: &dyn Extractor,
+    model_name: Option<&str>,
 ) -> anyhow::Result<()> {
+    let model = model_name.unwrap_or(DEFAULT_MODEL);
     let chapter_repo = ChapterRepo::new(pool.clone());
     let progress_repo = ProgressRepo::new(pool.clone());
     let claim_repo = ClaimRepo::new(pool.clone());
@@ -148,7 +150,7 @@ pub async fn process_chapter(
                 &chapter.id,
                 Some(segment_id),
                 "extract",
-                MODEL,
+                model,
                 PROMPT_VERSION,
                 SCHEMA_VERSION,
                 &input_hash,
@@ -162,6 +164,9 @@ pub async fn process_chapter(
 
         // c. Extract observations via trait
         let observations = extractor.extract(&context, span_ids).await?;
+
+        // Store observations as output_json in ai_run
+        let output_json = serde_json::to_string(&observations).ok();
 
         // d. Resolve observations against entities
         let resolved = resolver::resolve(&observations, &entity_repo, book_id).await?;
@@ -185,9 +190,9 @@ pub async fn process_chapter(
         )
         .await?;
 
-        // g. Mark AI run as success
+        // g. Mark AI run as success with output_json
         ai_run_repo
-            .update_run_status(&ai_run.id, "success", None, None)
+            .update_run_status(&ai_run.id, "success", output_json.as_deref(), None)
             .await?;
     }
 
@@ -236,7 +241,7 @@ mod tests {
         let raw_text = "张三走进了大殿，看到了李四。两人互相行礼。";
         let extractor = empty_extractor();
 
-        process_chapter("b1", 1, raw_text, &pool, &extractor).await.unwrap();
+        process_chapter("b1", 1, raw_text, &pool, &extractor, None).await.unwrap();
 
         // Verify chapter exists
         let chapter_repo = ChapterRepo::new(pool.clone());
@@ -259,6 +264,12 @@ mod tests {
         let runs = ai_run_repo.list_runs_by_chapter("b1", &chapter.id).await.unwrap();
         assert!(!runs.is_empty(), "should have ai_runs");
         assert_eq!(runs[0].status, "success", "ai_run should be success");
+        // Verify segment_id is populated
+        assert!(runs[0].segment_id.is_some(), "ai_run.segment_id should be populated");
+        // Verify segment_id points to a valid segment
+        let seg_id = runs[0].segment_id.as_ref().unwrap();
+        let seg = chapter_repo.get_segment(seg_id).await.unwrap();
+        assert!(seg.is_some(), "ai_run.segment_id should point to a valid segment");
     }
 
     #[tokio::test]
@@ -271,7 +282,7 @@ mod tests {
         let extractor = empty_extractor();
 
         // First run
-        process_chapter("b1", 1, raw_text, &pool, &extractor).await.unwrap();
+        process_chapter("b1", 1, raw_text, &pool, &extractor, None).await.unwrap();
 
         // Get chapter to count runs
         let chapter_repo = ChapterRepo::new(pool.clone());
@@ -280,7 +291,7 @@ mod tests {
         let runs_before = ai_run_repo.list_runs_by_chapter("b1", &chapter.id).await.unwrap();
 
         // Second run (same text → same hash → should skip)
-        process_chapter("b1", 1, raw_text, &pool, &extractor).await.unwrap();
+        process_chapter("b1", 1, raw_text, &pool, &extractor, None).await.unwrap();
         let runs_after = ai_run_repo.list_runs_by_chapter("b1", &chapter.id).await.unwrap();
 
         assert_eq!(
@@ -297,14 +308,14 @@ mod tests {
         progress_repo.init_progress("b1").await.unwrap();
         let extractor = empty_extractor();
 
-        process_chapter("b1", 1, "第一章内容。", &pool, &extractor)
+        process_chapter("b1", 1, "第一章内容。", &pool, &extractor, None)
             .await
             .unwrap();
 
         let progress = progress_repo.get_progress("b1").await.unwrap().unwrap();
         assert_eq!(progress.max_processed_chapter, 1);
 
-        process_chapter("b1", 2, "第二章内容。", &pool, &extractor)
+        process_chapter("b1", 2, "第二章内容。", &pool, &extractor, None)
             .await
             .unwrap();
 
@@ -319,7 +330,7 @@ mod tests {
         progress_repo.init_progress("b1").await.unwrap();
         let extractor = empty_extractor();
 
-        process_chapter("b1", 1, "测试内容。", &pool, &extractor)
+        process_chapter("b1", 1, "测试内容。", &pool, &extractor, None)
             .await
             .unwrap();
 
@@ -341,7 +352,7 @@ mod tests {
         let extractor = empty_extractor();
 
         // Empty text should still succeed (produces 1 segment with empty span)
-        let result = process_chapter("b1", 1, "", &pool, &extractor).await;
+        let result = process_chapter("b1", 1, "", &pool, &extractor, None).await;
         assert!(result.is_ok(), "empty text should succeed");
 
         let progress = progress_repo.get_progress("b1").await.unwrap().unwrap();
@@ -391,7 +402,7 @@ mod tests {
             },
         ]);
 
-        process_chapter("b1", 1, raw_text, &pool, &extractor)
+        process_chapter("b1", 1, raw_text, &pool, &extractor, None)
             .await
             .unwrap();
 
@@ -547,7 +558,7 @@ mod tests {
             },
         ]);
 
-        process_chapter("b1", 1, raw_text, &pool, &extractor)
+        process_chapter("b1", 1, raw_text, &pool, &extractor, None)
             .await
             .unwrap();
 

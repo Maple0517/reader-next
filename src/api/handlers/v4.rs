@@ -404,12 +404,15 @@ pub async fn post_v4_chapter_generate(
 
     // Run pipeline
     let extractor = crate::service::v4::extractor::RealAiExtractor::new(state.ai_model_service.clone());
+    let model_config = state.ai_model_service.get().await.map_err(|e| AppError::Internal(e.into()))?;
+    let model_name = model_config.text.model.clone();
     crate::service::v4::pipeline::process_chapter(
         &ctx.book_id,
         chapter_index,
         &raw_text,
         &state.pool,
         &extractor,
+        Some(&model_name),
     )
     .await
     .map_err(|e| AppError::Internal(e.into()))?;
@@ -675,7 +678,8 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
     let progress_repo = ProgressRepo::new(pool.clone());
     let chapter_repo =
         crate::storage::db::v4::chapter_repo::ChapterRepo::new(pool.clone());
-    let extractor = crate::service::v4::extractor::RealAiExtractor::new(ai_model_service);
+    let extractor = crate::service::v4::extractor::RealAiExtractor::new(ai_model_service.clone());
+    let model_name = ai_model_service.get().await.map(|c| c.text.model).unwrap_or_default();
 
     // Get current progress
     let start_chapter = match progress_repo.get_progress(book_id).await {
@@ -760,6 +764,7 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
             &chapter.raw_text,
             pool,
             &extractor,
+            Some(&model_name),
         )
         .await
         {
