@@ -6,6 +6,8 @@ import type {
   V4CatchupStatusResponse,
   V4MemoryResponse,
   V4MemoryStatusResponse,
+  V4RelationshipGraphView,
+  V4CharacterRelationshipsResponse,
 } from '../../types/v4'
 
 export function getV4Memory(bookUrl: string) {
@@ -50,4 +52,12 @@ export function getV4CatchupStatus(bookUrl: string) {
 
 export function cancelV4Catchup(bookUrl: string) {
   return v4Http.post<{ ok: boolean }>('/catchup/cancel', { bookUrl }).then((r) => r.data)
+}
+
+export function getV4Relationships(bookUrl: string, params?: { group?: string; minImportance?: number }) {
+  return v4Http.get<V4RelationshipGraphView>('/relationships', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function getV4CharacterRelationships(bookUrl: string, characterId: string) {
+  return v4Http.get<V4CharacterRelationshipsResponse>(`/characters/${encodeURIComponent(characterId)}/relationships`, { params: { bookUrl } }).then((r) => r.data)
 }

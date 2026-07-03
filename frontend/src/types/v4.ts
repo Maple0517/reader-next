@@ -100,3 +100,46 @@ export interface V4CatchupStatusResponse {
   maxProcessedChapter: number
   lastError: string | null
 }
+
+// ─── Relationship Types (Phase 2) ───
+
+export interface V4RelationshipNode {
+  id: string
+  name: string
+  aliases: string[]
+  importance: number
+  firstSeenChapter: number
+  lastSeenChapter: number
+}
+
+export interface V4RelationshipEdge {
+  id: string
+  sourceId: string
+  targetId: string
+  group: string
+  label: string
+  directionality: string
+  currentState?: string
+  strength: number
+  polarity: string
+  confidence: number
+  importanceScore: number
+  firstSeenChapter: number
+  lastChangedChapter: number
+  lastSeenChapter: number
+  eventCount: number
+  latestSourceClaimId: string
+  evidenceAvailable: boolean
+}
+
+export interface V4RelationshipGraphView {
+  nodes: V4RelationshipNode[]
+  edges: V4RelationshipEdge[]
+  groups: string[]
+  total: number
+}
+
+export interface V4CharacterRelationshipsResponse {
+  relationships: V4RelationshipEdge[]
+  total: number
+}

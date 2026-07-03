@@ -68,16 +68,21 @@ pub async fn write_claims(
                     .unwrap_or_default();
 
                 // Determine status based on risk level and claim type
-                let status = match obs.risk_level {
-                    RiskLevel::High => {
-                        // High risk: quarantine or mark uncertain
-                        if is_critical_high_risk(&obs.observation) {
-                            "quarantined"
-                        } else {
-                            "uncertain"
+                let status = match &obs.observation {
+                    // RelationshipUpdate always enters Relationship Judge (status="proposed"),
+                    // never quarantined or uncertain — it's a Phase 2 special high-risk path.
+                    Observation::RelationshipUpdate { .. } => "proposed",
+                    _ => match obs.risk_level {
+                        RiskLevel::High => {
+                            // High risk: quarantine or mark uncertain
+                            if is_critical_high_risk(&obs.observation) {
+                                "quarantined"
+                            } else {
+                                "uncertain"
+                            }
                         }
-                    }
-                    RiskLevel::Low | RiskLevel::Medium => "proposed",
+                        RiskLevel::Low | RiskLevel::Medium => "proposed",
+                    },
                 };
 
                 let claim = claim_repo
@@ -133,6 +138,7 @@ fn get_claim_type(obs: &Observation) -> String {
         Observation::EntityIntroduction { .. } => "entity_introduction".to_string(),
         Observation::Alias { .. } => "alias".to_string(),
         Observation::PropertyUpdate { .. } => "property_update".to_string(),
+        Observation::RelationshipUpdate { .. } => "relationship_update".to_string(),
         Observation::MinorEvent { .. } => "minor_event".to_string(),
         Observation::Summary { .. } => unreachable!("Summary should not create claims"),
     }
@@ -144,6 +150,7 @@ fn get_confidence(obs: &Observation) -> f64 {
         Observation::EntityIntroduction { confidence, .. }
         | Observation::Alias { confidence, .. }
         | Observation::PropertyUpdate { confidence, .. }
+        | Observation::RelationshipUpdate { confidence, .. }
         | Observation::MinorEvent { confidence, .. } => *confidence,
         Observation::Summary { .. } => 0.0,
     }
@@ -153,6 +160,7 @@ fn get_confidence(obs: &Observation) -> f64 {
 fn get_object_mention(obs: &Observation) -> Option<String> {
     match obs {
         Observation::Alias { alias, .. } => Some(alias.clone()),
+        Observation::RelationshipUpdate { object_mention, .. } => Some(object_mention.clone()),
         _ => None,
     }
 }
@@ -180,6 +188,17 @@ fn build_predicate(obs: &Observation) -> String {
             let value = value_text.as_deref().unwrap_or("unknown");
             format!("{} = {}", dimension_key, value)
         }
+        Observation::RelationshipUpdate {
+            subject_mention,
+            object_mention,
+            relation_label,
+            ..
+        } => {
+            format!(
+                "{} and {} — {}",
+                subject_mention, object_mention, relation_label
+            )
+        }
         Observation::MinorEvent { description, .. } => description.clone(),
         Observation::Summary { .. } => unreachable!(),
     }
@@ -200,15 +219,36 @@ fn get_value_fields(obs: &Observation) -> (Option<String>, Option<String>) {
             (vtext, vjson)
         }
         Observation::EntityIntroduction {
+            entity_type,
             short_summary,
             aliases,
             ..
         } => {
             let json = serde_json::json!({
+                "entity_type": entity_type,
                 "short_summary": short_summary,
                 "aliases": aliases,
             });
             (Some(short_summary.clone()), Some(json.to_string()))
+        }
+        Observation::RelationshipUpdate {
+            relation_hint,
+            relation_group,
+            relation_label,
+            directionality,
+            importance_hint,
+            is_long_term_or_significant_hint,
+            ..
+        } => {
+            let json = serde_json::json!({
+                "relation_hint": relation_hint,
+                "relation_group": relation_group,
+                "relation_label": relation_label,
+                "directionality": directionality,
+                "importance_hint": importance_hint,
+                "is_long_term_or_significant_hint": is_long_term_or_significant_hint,
+            });
+            (None, Some(json.to_string()))
         }
         _ => (None, None),
     }
@@ -575,5 +615,155 @@ mod tests {
         let span_ids: Vec<&str> = spans.iter().map(|s| s.id.as_str()).collect();
         assert!(span_ids.contains(&span_id.0.as_str()));
         assert!(span_ids.contains(&span_id_2.as_str()));
+    }
+
+    #[tokio::test]
+    async fn relationship_update_has_correct_object_mention() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::RelationshipUpdate {
+                subject_mention: "张三".to_string(),
+                object_mention: "李四".to_string(),
+                relation_hint: "师徒".to_string(),
+                relation_group: "mentorship".to_string(),
+                relation_label: "师父".to_string(),
+                directionality: "directed".to_string(),
+                evidence_span_ids: vec![span_id.0.clone()],
+                confidence: 0.9,
+                importance_hint: 0.8,
+                is_long_term_or_significant_hint: true,
+            },
+            subject_entity_id: Some("entity-1".to_string()),
+            object_entity_id: Some("entity-2".to_string()),
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::MatchExisting {
+                entity_id: "entity-1".to_string(),
+            },
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        assert_eq!(
+            result.claims_created[0].object_mention.as_deref(),
+            Some("李四")
+        );
+    }
+
+    #[tokio::test]
+    async fn relationship_update_has_correct_value_json() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::RelationshipUpdate {
+                subject_mention: "张三".to_string(),
+                object_mention: "李四".to_string(),
+                relation_hint: "宿敌".to_string(),
+                relation_group: "rivalry".to_string(),
+                relation_label: "对手".to_string(),
+                directionality: "undirected".to_string(),
+                evidence_span_ids: vec![span_id.0.clone()],
+                confidence: 0.85,
+                importance_hint: 0.7,
+                is_long_term_or_significant_hint: true,
+            },
+            subject_entity_id: Some("entity-1".to_string()),
+            object_entity_id: Some("entity-2".to_string()),
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::MatchExisting {
+                entity_id: "entity-1".to_string(),
+            },
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        let vj = result.claims_created[0]
+            .value_json
+            .as_ref()
+            .expect("value_json should be present");
+        let parsed: serde_json::Value = serde_json::from_str(vj).unwrap();
+        assert_eq!(parsed["relation_hint"], "宿敌");
+        assert_eq!(parsed["relation_group"], "rivalry");
+        assert_eq!(parsed["relation_label"], "对手");
+        assert_eq!(parsed["directionality"], "undirected");
+        assert_eq!(parsed["importance_hint"], 0.7);
+        assert_eq!(parsed["is_long_term_or_significant_hint"], true);
+    }
+
+    #[tokio::test]
+    async fn relationship_update_always_status_proposed() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // RelationshipUpdate with High risk — must be "proposed", not "uncertain" or "quarantined"
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::RelationshipUpdate {
+                subject_mention: "张三".to_string(),
+                object_mention: "李四".to_string(),
+                relation_hint: "敌对".to_string(),
+                relation_group: "hostility".to_string(),
+                relation_label: "宿敌".to_string(),
+                directionality: "undirected".to_string(),
+                evidence_span_ids: vec![span_id.0.clone()],
+                confidence: 0.95,
+                importance_hint: 0.9,
+                is_long_term_or_significant_hint: true,
+            },
+            subject_entity_id: Some("entity-1".to_string()),
+            object_entity_id: Some("entity-2".to_string()),
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::MatchExisting {
+                entity_id: "entity-1".to_string(),
+            },
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        assert_eq!(result.claims_created[0].status, "proposed");
+        assert_eq!(result.claims_created[0].claim_type, "relationship_update");
     }
 }

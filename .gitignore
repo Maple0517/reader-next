@@ -51,4 +51,4 @@ AGENTS.md.bak
 
 # Production environment secrets
 .env.prod
-storage
+/storage

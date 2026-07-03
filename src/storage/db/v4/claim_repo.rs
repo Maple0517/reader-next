@@ -253,6 +253,23 @@ impl ClaimRepo {
         Ok(())
     }
 
+    /// Update a claim's value_json (e.g., to write back AI judge normalized fields).
+    pub async fn update_claim_value_json(
+        &self,
+        claim_id: &str,
+        value_json: &str,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("UPDATE claims SET value_json = ?, updated_at = ? WHERE id = ?")
+            .bind(value_json)
+            .bind(&now)
+            .bind(claim_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn batch_update_claim_status(
         &self,
         claim_ids: &[String],

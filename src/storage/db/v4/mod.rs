@@ -5,6 +5,7 @@ pub mod claim_repo;
 pub mod entity_repo;
 pub mod progress_repo;
 pub mod property_repo;
+pub mod relationship_repo;
 
 use sqlx::SqlitePool;
 
@@ -121,6 +122,16 @@ pub async fn reset_v4(pool: &SqlitePool, book_id: &str) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM chapter_summaries WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    // FK-safe: relationship_events references claims + relationships
+    sqlx::query("DELETE FROM relationship_events WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    // FK-safe: relationships references entities
+    sqlx::query("DELETE FROM relationships WHERE book_id = ?")
         .bind(book_id)
         .execute(&mut *tx)
         .await?;
@@ -339,5 +350,169 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(dim_count.0, 14, "property_dimensions should be preserved");
+    }
+
+    #[tokio::test]
+    async fn v4_relationship_tables_exist() {
+        let pool = setup_test_db().await;
+
+        for table in &["relationships", "relationship_events"] {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+            )
+            .bind(*table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Table '{}' should exist", table);
+        }
+    }
+
+    #[tokio::test]
+    async fn v4_relationship_indexes_exist() {
+        let pool = setup_test_db().await;
+
+        let indexes = vec![
+            "idx_relationships_subject",
+            "idx_relationships_object",
+            "idx_relationships_group",
+            "idx_relationship_events_rel",
+        ];
+
+        for index in indexes {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Index '{}' should exist", index);
+        }
+    }
+
+    #[tokio::test]
+    async fn relationship_check_constraint() {
+        let pool = setup_test_db().await;
+
+        // Insert a valid entity first
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e1', 'b1', 'character', 'Test', 'Test', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        // Inserting a relationship where subject == object should fail
+        let result = sqlx::query(
+            "INSERT INTO relationships (id, book_id, subject_character_id, object_character_id, relation_group, relation_label, first_seen_chapter, last_changed_chapter, last_seen_chapter, created_at, updated_at)
+             VALUES ('r1', 'b1', 'e1', 'e1', 'ally', 'test', 1, 1, 1, datetime('now'), datetime('now'))"
+        )
+        .execute(&pool)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "CHECK constraint should reject subject_character_id == object_character_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn relationship_fk_constraint() {
+        let pool = setup_test_db().await;
+
+        // Inserting a relationship with nonexistent entity_id should fail
+        let result = sqlx::query(
+            "INSERT INTO relationships (id, book_id, subject_character_id, object_character_id, relation_group, relation_label, first_seen_chapter, last_changed_chapter, last_seen_chapter, created_at, updated_at)
+             VALUES ('r1', 'b1', 'nonexistent', 'also-nonexistent', 'ally', 'test', 1, 1, 1, datetime('now'), datetime('now'))"
+        )
+        .execute(&pool)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "FK constraint should reject nonexistent entity IDs"
+        );
+    }
+
+    #[tokio::test]
+    async fn relationship_event_unique_source_claim() {
+        let pool = setup_test_db().await;
+
+        // Setup: chapter + source_span + ai_run + claim + entities + relationship
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        // Need a segment for the FK on source_spans
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'relationship_update', 'test', 'ss1', 'run1', 0.9, 'low', 'proposed', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        // Two entities + relationship
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e1', 'b1', 'character', 'A', 'A', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e2', 'b1', 'character', 'B', 'B', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO relationships (id, book_id, subject_character_id, object_character_id, relation_group, relation_label, first_seen_chapter, last_changed_chapter, last_seen_chapter, created_at, updated_at) VALUES ('r1', 'b1', 'e1', 'e2', 'ally', 'allies', 1, 1, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        // First event should succeed
+        sqlx::query("INSERT INTO relationship_events (id, book_id, relationship_id, event_type, relation_group, relation_label, chapter_index, source_claim_id, confidence, created_at) VALUES ('ev1', 'b1', 'r1', 'established', 'ally', 'allies', 1, 'c1', 0.9, datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        // Second event with same source_claim_id should fail (UNIQUE)
+        let result = sqlx::query("INSERT INTO relationship_events (id, book_id, relationship_id, event_type, relation_group, relation_label, chapter_index, source_claim_id, confidence, created_at) VALUES ('ev2', 'b1', 'r1', 'updated', 'ally', 'allies', 1, 'c1', 0.8, datetime('now'))")
+            .execute(&pool)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "UNIQUE constraint should reject duplicate source_claim_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_v4_clears_relationships() {
+        let pool = setup_test_db().await;
+        init_v4(&pool).await.unwrap();
+
+        // Setup prerequisite data
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'relationship_update', 'test', 'ss1', 'run1', 0.9, 'low', 'proposed', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e1', 'b1', 'character', 'A', 'A', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e2', 'b1', 'character', 'B', 'B', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO relationships (id, book_id, subject_character_id, object_character_id, relation_group, relation_label, first_seen_chapter, last_changed_chapter, last_seen_chapter, created_at, updated_at) VALUES ('r1', 'b1', 'e1', 'e2', 'ally', 'allies', 1, 1, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO relationship_events (id, book_id, relationship_id, event_type, relation_group, relation_label, chapter_index, source_claim_id, confidence, created_at) VALUES ('ev1', 'b1', 'r1', 'established', 'ally', 'allies', 1, 'c1', 0.9, datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        reset_v4(&pool, "b1").await.unwrap();
+
+        // Verify relationships cleared
+        let rel_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM relationships WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rel_count.0, 0, "relationships should be cleared");
+
+        // Verify relationship_events cleared
+        let ev_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM relationship_events WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(ev_count.0, 0, "relationship_events should be cleared");
     }
 }

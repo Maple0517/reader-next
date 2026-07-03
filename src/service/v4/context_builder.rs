@@ -54,6 +54,12 @@ impl ContextBuilder {
             parts.push(format!("## Active Character States\n{}", states_context));
         }
 
+        // 6. Existing relationships
+        let rels_context = self.get_relationships_context(book_id).await?;
+        if !rels_context.is_empty() {
+            parts.push(format!("## Existing Relationships\n{}", rels_context));
+        }
+
         Ok(parts.join("\n\n"))
     }
 
@@ -129,6 +135,32 @@ impl ContextBuilder {
 
         Ok(lines.join("\n"))
     }
+
+    async fn get_relationships_context(&self, book_id: &str) -> anyhow::Result<String> {
+        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT e1.canonical_name, e2.canonical_name, r.relation_group, r.relation_label, COALESCE(r.current_state, '')
+             FROM relationships r
+             JOIN entities e1 ON e1.id = r.subject_character_id
+             JOIN entities e2 ON e2.id = r.object_character_id
+             WHERE r.book_id = ? AND r.status = 'active'
+             ORDER BY r.importance_score DESC"
+        )
+        .bind(book_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut lines = Vec::new();
+        for (subj, obj, group, label, state) in &rows {
+            let state_str = if state.is_empty() { String::new() } else { format!(" — {}", state) };
+            lines.push(format!("- {} ↔ {} [{}] {}{}", subj, obj, group, label, state_str));
+        }
+
+        Ok(lines.join("\n"))
+    }
 }
 
 const SCHEMA_BRIEF: &str = r#"## Extraction Schema
@@ -145,10 +177,17 @@ You are extracting structured observations from a novel chapter segment. Output 
    - subject_mention, dimension_key, value_text, evidence_span_ids, confidence
    - dimension_key must be one of: identity, life_status, affiliation, rank, occupation, realm, ability, equipment, location, mental_state, goal, injury, appearance, background
 
-4. **MinorEvent** — A noteworthy event that doesn't change entity state
+4. **relationship_update** — A significant character-to-character relationship is established, changed, or revealed
+   - type: "relationship_update"
+   - subject_mention, object_mention, relation_hint, relation_group, relation_label, directionality, evidence_span_ids, confidence, importance_hint, is_long_term_or_significant_hint
+   - relation_group must be one of: family, romance, friendship, mentorship, hierarchy, alliance, rivalry, hostility, debt_obligation, contract, acquaintance, other_social, unknown_significant
+   - Only extract CHARACTER-to-CHARACTER relationships. Do NOT extract person-place, person-ability, person-equipment, or person-realm relationships.
+   - Only extract long-term or significant relationships. Skip fleeting interactions.
+
+5. **MinorEvent** — A noteworthy event that doesn't change entity state
    - description, involved_mentions, evidence_span_ids, confidence
 
-5. **Summary** — Chapter summary (only one per chapter)
+6. **Summary** — Chapter summary (only one per chapter)
    - summary, key_points, has_important_changes
 
 Rules:
@@ -191,6 +230,10 @@ mod tests {
         assert!(
             ctx.contains("dimension_key"),
             "should mention dimension_key"
+        );
+        assert!(
+            ctx.contains("relationship_update"),
+            "schema brief should include relationship_update type"
         );
     }
 
@@ -342,5 +385,53 @@ mod tests {
             !ctx.contains("Active Character States"),
             "empty book should have no states section"
         );
+    }
+
+    #[tokio::test]
+    async fn build_context_contains_relationships_when_present() {
+        use crate::storage::db::v4::entity_repo::EntityRepo;
+        use crate::storage::db::v4::relationship_repo::RelationshipRepo;
+
+        let (pool, builder) = setup().await;
+
+        // Seed two character entities
+        let entity_repo = EntityRepo::new(pool.clone());
+        let e1 = entity_repo
+            .create_entity("book1", "character", "张三", "张三", None, 0.8, 1)
+            .await
+            .unwrap();
+        let e2 = entity_repo
+            .create_entity("book1", "character", "李四", "李四", None, 0.7, 1)
+            .await
+            .unwrap();
+
+        // Seed a relationship directly
+        let rel_repo = RelationshipRepo::new(pool.clone());
+        rel_repo
+            .create_relationship(
+                "book1",
+                &e1.id,
+                &e2.id,
+                "friendship",
+                "朋友",
+                "undirected",
+                Some("close friends"),
+                0.7,
+                "positive",
+                0.9,
+                0.8,
+                1,
+            )
+            .await
+            .unwrap();
+
+        let ctx = builder.build_context("book1", 1, "text").await.unwrap();
+        assert!(
+            ctx.contains("Existing Relationships"),
+            "should have relationships section"
+        );
+        assert!(ctx.contains("张三"), "should contain subject name");
+        assert!(ctx.contains("李四"), "should contain object name");
+        assert!(ctx.contains("friendship"), "should contain relation group");
     }
 }

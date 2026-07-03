@@ -82,6 +82,18 @@ pub enum Observation {
         evidence_span_ids: Vec<String>,
         confidence: f64,
     },
+    RelationshipUpdate {
+        subject_mention: String,
+        object_mention: String,
+        relation_hint: String,
+        relation_group: String,
+        relation_label: String,
+        directionality: String,
+        evidence_span_ids: Vec<String>,
+        confidence: f64,
+        importance_hint: f64,
+        is_long_term_or_significant_hint: bool,
+    },
     Summary {
         summary: String,
         key_points: Vec<String>,
@@ -100,6 +112,9 @@ impl Observation {
                 subject_mention, ..
             } => Some(subject_mention),
             Observation::PropertyUpdate {
+                subject_mention, ..
+            } => Some(subject_mention),
+            Observation::RelationshipUpdate {
                 subject_mention, ..
             } => Some(subject_mention),
             Observation::MinorEvent { .. } => None,
@@ -122,6 +137,9 @@ impl Observation {
             Observation::MinorEvent {
                 evidence_span_ids, ..
             } => evidence_span_ids,
+            Observation::RelationshipUpdate {
+                evidence_span_ids, ..
+            } => evidence_span_ids,
             Observation::Summary { .. } => &[],
         }
     }
@@ -140,6 +158,9 @@ impl Observation {
                 evidence_span_ids, ..
             }
             | Observation::MinorEvent {
+                evidence_span_ids, ..
+            }
+            | Observation::RelationshipUpdate {
                 evidence_span_ids, ..
             } => *evidence_span_ids = span_ids,
             Observation::Summary { .. } => {}
@@ -193,6 +214,7 @@ pub fn classify_risk(observation: &Observation) -> RiskLevel {
         }
         Observation::Alias { .. } => RiskLevel::Low,
         Observation::MinorEvent { .. } => RiskLevel::Low,
+        Observation::RelationshipUpdate { .. } => RiskLevel::High,
         Observation::Summary { .. } => RiskLevel::Low,
     }
 }
@@ -276,6 +298,16 @@ const VALID_DIMENSION_KEYS: &[&str] = &[
     "appearance", "background",
 ];
 
+pub const VALID_RELATION_GROUPS: &[&str] = &[
+    "family", "romance", "friendship", "mentorship", "hierarchy",
+    "alliance", "rivalry", "hostility", "debt_obligation", "contract",
+    "acquaintance", "other_social", "unknown_significant",
+];
+
+pub const VALID_DIRECTIONALITIES: &[&str] = &["directed", "undirected"];
+
+pub const VALID_POLARITIES: &[&str] = &["positive", "negative", "mixed", "neutral", "unknown"];
+
 /// Real AI extractor that calls the configured LLM provider.
 pub struct RealAiExtractor {
     ai_model_service: std::sync::Arc<crate::service::ai_model_service::AiModelService>,
@@ -310,12 +342,15 @@ impl Extractor for RealAiExtractor {
              - alias: 已知人物的新称呼（subject_mention, alias, alias_type, evidence_span_ids, confidence）\n\
              - property_update: 人物属性变化（subject_mention, dimension_key, value_text, evidence_span_ids, confidence）\n\
              - minor_event: 值得注意的事件（description, involved_mentions, evidence_span_ids, confidence）\n\
+             - relationship_update: 重要人物关系（subject_mention, object_mention, relation_hint, relation_group, relation_label, directionality, evidence_span_ids, confidence, importance_hint, is_long_term_or_significant_hint）\n\
              - summary: 章节摘要（summary, key_points, has_important_changes）\n\n\
              dimension_key 必须是以下之一：{}\n\n\
+             relation_group 必须是以下之一：{}\n\n\
              evidence_span_ids 必须使用以下可用 span IDs：{}\n\n\
              输出严格 JSON 数组，每个元素包含 \"type\" 字段。",
             context,
             VALID_DIMENSION_KEYS.join(", "),
+            VALID_RELATION_GROUPS.join(", "),
             span_ids_json
         );
 
@@ -328,6 +363,7 @@ impl Extractor for RealAiExtractor {
         let target = build_ai_proxy_url(&endpoint.base_url, path, endpoint.use_full_url)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let body = build_v4_model_body(path, &endpoint.model, &user_prompt);
+        std::fs::write("/tmp/v4_debug_prompt.txt", format!("len={}", user_prompt.len())).ok();
         let client = reqwest::Client::builder().timeout(ai_proxy_timeout()).build()?;
         let use_gemini = crate::service::ai_book_generation_service::is_gemini_generate_content_path(path)
             && target.host_str() == Some("generativelanguage.googleapis.com");
@@ -388,7 +424,7 @@ fn build_v4_model_body(path: &str, model: &str, prompt: &str) -> serde_json::Val
         });
     }
     serde_json::json!({
-        "model": model, "temperature": 0.2, "response_format": { "type": "json_object" },
+        "model": model, "temperature": 0.2, "max_tokens": 8192,
         "messages": [
             { "role": "system", "content": V4_SYSTEM_PROMPT },
             { "role": "user", "content": prompt }
@@ -443,6 +479,7 @@ pub fn parse_observations_from_json(raw: &str, valid_span_ids: &[String]) -> any
             "alias" | "Alias" => "alias",
             "property_update" | "PropertyUpdate" | "propertyUpdate" => "property_update",
             "minor_event" | "MinorEvent" | "minorEvent" => "minor_event",
+            "relationship_update" | "RelationshipUpdate" | "relationshipUpdate" => "relationship_update",
             "summary" | "Summary" => "summary",
             other => other,
         };
@@ -506,6 +543,48 @@ pub fn parse_observations_from_json(raw: &str, valid_span_ids: &[String]) -> any
                     involved_mentions,
                     evidence_span_ids,
                     confidence,
+                });
+            }
+            "relationship_update" => {
+                let subject_mention = required_str(item, "subject_mention")?;
+                if subject_mention.trim().is_empty() {
+                    anyhow::bail!("subject_mention is empty");
+                }
+                let object_mention = required_str(item, "object_mention")?;
+                if object_mention.trim().is_empty() {
+                    anyhow::bail!("object_mention is empty");
+                }
+                let relation_hint = required_str(item, "relation_hint")?;
+                let relation_group = required_str(item, "relation_group")?;
+                // Lenient validation: fallback to "unknown_significant" if invalid
+                let relation_group = if VALID_RELATION_GROUPS.contains(&relation_group.as_str()) {
+                    relation_group
+                } else {
+                    "unknown_significant".to_string()
+                };
+                let relation_label = required_str(item, "relation_label")?;
+                let directionality = required_str(item, "directionality")?;
+                // Lenient validation: fallback to "directed" if invalid
+                let directionality = if VALID_DIRECTIONALITIES.contains(&directionality.as_str()) {
+                    directionality
+                } else {
+                    "directed".to_string()
+                };
+                let evidence_span_ids = validate_evidence_spans(item, &span_set)?;
+                let confidence = validate_confidence(item)?;
+                let importance_hint = item.get("importance_hint").and_then(|v| v.as_f64()).unwrap_or(0.5);
+                let is_long_term_or_significant_hint = item.get("is_long_term_or_significant_hint").and_then(|v| v.as_bool()).unwrap_or(true);
+                observations.push(Observation::RelationshipUpdate {
+                    subject_mention,
+                    object_mention,
+                    relation_hint,
+                    relation_group,
+                    relation_label,
+                    directionality,
+                    evidence_span_ids,
+                    confidence,
+                    importance_hint,
+                    is_long_term_or_significant_hint,
                 });
             }
             "summary" => {

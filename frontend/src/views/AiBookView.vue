@@ -212,6 +212,18 @@
         </section>
 
         <section v-else-if="activeTab === 'relationships'" class="stack-panel">
+          <div v-if="book" class="characters-toolbar">
+            <button class="secondary-btn" :class="{ active: v4RelationshipMode }" @click="toggleV4RelationshipMode">
+              {{ v4RelationshipMode ? 'V4 关系' : 'V3 关系' }}
+            </button>
+          </div>
+          <template v-if="v4RelationshipMode && book">
+            <V4RelationshipPanel
+              :book-url="book.bookUrl"
+              :body-style="{}"
+            />
+          </template>
+          <template v-else>
           <article v-for="relationship in displayRelationships" :key="relationship.id" class="list-item">
             <div class="item-title relation-head">
               <strong>{{ relationship.sourceName }}</strong>
@@ -251,6 +263,7 @@
             </ul>
           </article>
           <EmptyState v-if="!displayRelationships.length && !currentChapterRelations.length" text="暂无关系资料" />
+          </template>
         </section>
 
         <section v-else class="stack-panel">
@@ -316,6 +329,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { getShelfBook } from '../api/bookshelf'
 import { getV4Characters } from '../api/v4/book'
 import AiBookMapPanel from '../components/reader/AiBookMapPanel.vue'
+import V4RelationshipPanel from '../components/reader/V4RelationshipPanel.vue'
 import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
 import { useReaderStore } from '../stores/reader'
@@ -395,6 +409,7 @@ let catchupPollTimer: number | null = null
 let catchupDisposed = false
 const v4Characters = ref<V4CharacterListItem[]>([])
 const v4Mode = ref(false)
+const v4RelationshipMode = ref(false)
 
 const tabs: Array<{ key: AiTab; label: string }> = [
   { key: 'overview', label: '总览' },
@@ -783,6 +798,10 @@ function toggleV4Mode() {
   if (v4Mode.value && !v4Characters.value.length) {
     void loadV4Characters()
   }
+}
+
+function toggleV4RelationshipMode() {
+  v4RelationshipMode.value = !v4RelationshipMode.value
 }
 
 function formatTime(value: number | string) {

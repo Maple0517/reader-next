@@ -38,6 +38,8 @@ const V4_CHAPTER_GENERATE_ROUTE: &str = "/api/books/v4/chapter-memory/generate";
 const V4_CATCHUP_START_ROUTE: &str = "/api/books/v4/catchup/start";
 const V4_CATCHUP_STATUS_ROUTE: &str = "/api/books/v4/catchup/status";
 const V4_CATCHUP_CANCEL_ROUTE: &str = "/api/books/v4/catchup/cancel";
+const V4_RELATIONSHIPS_ROUTE: &str = "/api/books/v4/relationships";
+const V4_CHARACTER_RELATIONSHIPS_ROUTE: &str = "/api/books/v4/characters/:character_id/relationships";
 
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
@@ -298,6 +300,8 @@ pub fn build_router(state: AppState) -> Router {
         .route(V4_CATCHUP_START_ROUTE, post(handlers::post_v4_catchup_start))
         .route(V4_CATCHUP_STATUS_ROUTE, get(handlers::get_v4_catchup_status))
         .route(V4_CATCHUP_CANCEL_ROUTE, post(handlers::post_v4_catchup_cancel))
+        .route(V4_RELATIONSHIPS_ROUTE, get(handlers::get_v4_relationships))
+        .route(V4_CHARACTER_RELATIONSHIPS_ROUTE, get(handlers::get_v4_character_relationships))
         .route("/reader3/getReplaceRules", get(handlers::get_replace_rules))
         .route(
             "/reader3/saveReplaceRule",
@@ -568,12 +572,15 @@ mod tests {
         let base_url = format!("http://{}", addr);
 
         // All V4 GET routes should respond (not 404)
+        // Note: parameterized routes use concrete values in the URL
         for (method, path) in [
-            (Method::GET, V4_MEMORY_ROUTE),
-            (Method::GET, V4_CHARACTERS_ROUTE),
-            (Method::GET, V4_CHAPTER_MEMORY_ROUTE),
-            (Method::GET, V4_MEMORY_STATUS_ROUTE),
-            (Method::GET, V4_CATCHUP_STATUS_ROUTE),
+            (Method::GET, V4_MEMORY_ROUTE.to_string()),
+            (Method::GET, V4_CHARACTERS_ROUTE.to_string()),
+            (Method::GET, V4_CHAPTER_MEMORY_ROUTE.to_string()),
+            (Method::GET, V4_MEMORY_STATUS_ROUTE.to_string()),
+            (Method::GET, V4_CATCHUP_STATUS_ROUTE.to_string()),
+            (Method::GET, V4_RELATIONSHIPS_ROUTE.to_string()),
+            (Method::GET, V4_CHARACTER_RELATIONSHIPS_ROUTE.replace(":character_id", "test-char")),
         ] {
             let response = client
                 .request(method.clone(), format!("{base_url}{path}"))

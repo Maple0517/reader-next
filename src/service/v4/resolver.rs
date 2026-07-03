@@ -150,7 +150,37 @@ pub async fn resolve(
                 }
             }
 
-            Observation::MinorEvent { .. } | Observation::Summary { .. } => ResolvedObservation {
+            Observation::RelationshipUpdate {
+                subject_mention,
+                object_mention,
+                ..
+            } => {
+                // Subject: best-effort resolve to character entity
+                let subject_entity =
+                    find_entity_for_mention(entity_repo, book_id, subject_mention).await;
+
+                // Object: best-effort resolve to any entity (character or non-character)
+                // object_entity_id can be Some(character), Some(non-character), or None
+                let object_entity =
+                    find_entity_for_mention(entity_repo, book_id, object_mention).await;
+
+                let (subject_id, resolution) = match subject_entity {
+                    Some(e) => (Some(e.id.clone()), Resolution::MatchExisting { entity_id: e.id }),
+                    None => (None, Resolution::CreateNew),
+                };
+
+                ResolvedObservation {
+                    observation: obs.clone(),
+                    subject_entity_id: subject_id,
+                    object_entity_id: object_entity.map(|e| e.id),
+                    resolved_dimension_key: None,
+                    risk_level,
+                    resolution,
+                }
+            }
+
+            Observation::MinorEvent { .. }
+            | Observation::Summary { .. } => ResolvedObservation {
                 observation: obs.clone(),
                 subject_entity_id: None,
                 object_entity_id: None,
@@ -426,5 +456,111 @@ mod tests {
                 entity_id: "entity-1".to_string()
             }
         );
+    }
+
+    // --- RelationshipUpdate resolution tests ---
+
+    fn make_relationship_obs(subject: &str, object: &str) -> Observation {
+        Observation::RelationshipUpdate {
+            subject_mention: subject.to_string(),
+            object_mention: object.to_string(),
+            relation_hint: "师徒".to_string(),
+            relation_group: "mentorship".to_string(),
+            relation_label: "师父".to_string(),
+            directionality: "directed".to_string(),
+            evidence_span_ids: vec!["s1".to_string()],
+            confidence: 0.8,
+            importance_hint: 0.7,
+            is_long_term_or_significant_hint: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn relationship_update_subject_resolves_to_character() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        let subject = entity_repo
+            .create_entity("book1", "character", "张三", "张三", None, 0.8, 1)
+            .await
+            .unwrap();
+
+        let obs = make_relationship_obs("张三", "李四");
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.subject_entity_id, Some(subject.id.clone()));
+        assert_eq!(r.resolution, Resolution::MatchExisting { entity_id: subject.id });
+    }
+
+    #[tokio::test]
+    async fn relationship_update_object_resolves_to_character() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        entity_repo
+            .create_entity("book1", "character", "张三", "张三", None, 0.8, 1)
+            .await
+            .unwrap();
+        let object = entity_repo
+            .create_entity("book1", "character", "李四", "李四", None, 0.7, 1)
+            .await
+            .unwrap();
+
+        let obs = make_relationship_obs("张三", "李四");
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        let r = &results[0];
+        assert_eq!(r.object_entity_id, Some(object.id));
+    }
+
+    #[tokio::test]
+    async fn relationship_update_object_resolves_to_non_character() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        entity_repo
+            .create_entity("book1", "character", "张三", "张三", None, 0.8, 1)
+            .await
+            .unwrap();
+        let place = entity_repo
+            .create_entity("book1", "place", "华山", "华山", None, 0.5, 1)
+            .await
+            .unwrap();
+
+        let obs = make_relationship_obs("张三", "华山");
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        let r = &results[0];
+        // Object resolved to a non-character entity — still succeeds
+        assert_eq!(r.object_entity_id, Some(place.id));
+    }
+
+    #[tokio::test]
+    async fn relationship_update_object_unresolved_is_ok() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        entity_repo
+            .create_entity("book1", "character", "张三", "张三", None, 0.8, 1)
+            .await
+            .unwrap();
+
+        let obs = make_relationship_obs("张三", "路人甲");
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        let r = &results[0];
+        // Object unresolved — object_entity_id is None, but this is OK
+        assert_eq!(r.object_entity_id, None);
+        // Subject should still be resolved
+        assert!(r.subject_entity_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn relationship_update_subject_unresolved_is_create_new() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        // No entities exist — subject cannot be resolved
+        let obs = make_relationship_obs("新角色", "路人甲");
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        let r = &results[0];
+        assert_eq!(r.subject_entity_id, None);
+        assert_eq!(r.resolution, Resolution::CreateNew);
+    }
+
+    #[tokio::test]
+    async fn relationship_update_risk_level_is_high() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        let obs = make_relationship_obs("张三", "李四");
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        assert_eq!(results[0].risk_level, RiskLevel::High);
     }
 }

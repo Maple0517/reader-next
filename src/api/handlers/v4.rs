@@ -5,11 +5,15 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 use crate::api::{auth::AuthContext, AppState};
 use crate::error::error::{ApiResponse, AppError};
 use crate::service::v4::projection;
+use crate::service::v4::relationship_projection;
+use crate::storage::db::v4::entity_repo::EntityRepo;
 use crate::storage::db::v4::progress_repo::ProgressRepo;
+use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
 use crate::storage::db::v4::reset_v4;
 use crate::util::text::repair_encoded_url;
 
@@ -46,6 +50,16 @@ pub struct V4CatchupStartRequest {
     #[serde(rename = "bookUrl", alias = "url")]
     pub book_url: Option<String>,
     pub target_chapter_index: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct V4RelationshipsRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+    pub group: Option<String>,
+    #[serde(rename = "minImportance", alias = "min_importance")]
+    pub min_importance: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +104,7 @@ pub struct V4ChapterMemoryResponse {
     pub summary: Option<String>,
     pub key_points: Vec<String>,
     pub characters_in_chapter: Vec<projection::CharacterListItem>,
+    pub relationships_in_chapter: Vec<relationship_projection::RelationshipEdge>,
     pub relationship_count: i64,
     pub knowledge_count: i64,
 }
@@ -111,6 +126,13 @@ pub struct V4CatchupStatusResponse {
     pub current_chapter: Option<i64>,
     pub max_processed_chapter: i64,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4CharacterRelationshipsResponse {
+    pub relationships: Vec<relationship_projection::RelationshipEdge>,
+    pub total: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +172,12 @@ pub async fn get_v4_memory(
 
     let character_count = characters.len() as i64;
 
+    let relationship_repo = RelationshipRepo::new(state.pool.clone());
+    let relationship_count = relationship_repo
+        .count_active_by_book(&ctx.book_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(V4MemoryResponse {
             book_url,
@@ -159,7 +187,7 @@ pub async fn get_v4_memory(
             max_processed_chapter: max_processed,
             processing,
             character_count,
-            relationship_count: 0, // Phase 2
+            relationship_count,
             knowledge_count: 0,    // Phase 4
         })
         .unwrap_or_default(),
@@ -211,10 +239,17 @@ pub async fn get_v4_character_card(
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
 
+    let relationship_repo = RelationshipRepo::new(state.pool.clone());
+    let character_relationships = relationship_repo
+        .list_by_character(&ctx.book_id, &character_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let relationship_count = character_relationships.len() as i64;
+
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(V4CharacterResponse {
             character,
-            relationship_count: 0, // Phase 2
+            relationship_count,
             recent_changes: vec![], // Phase 6: populated from claim history
             evidence_available: false, // Phase 6: populated when evidence drawer is ready
         })
@@ -269,6 +304,22 @@ pub async fn get_v4_chapter_memory(
         (None, vec![])
     };
 
+    // Fetch relationships that occurred in this chapter
+    let relationship_repo = RelationshipRepo::new(state.pool.clone());
+    let relationship_pairs = relationship_repo
+        .list_relationships_by_chapter(&ctx.book_id, chapter_index)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let event_repo = RelationshipEventRepo::new(state.pool.clone());
+    let mut relationships_in_chapter = Vec::new();
+    for (_ev, rel) in &relationship_pairs {
+        let edge = relationship_projection::build_edge_for_relationship(rel, &event_repo)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        relationships_in_chapter.push(edge);
+    }
+    let relationship_count = relationships_in_chapter.len() as i64;
+
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(V4ChapterMemoryResponse {
             chapter_index,
@@ -276,7 +327,8 @@ pub async fn get_v4_chapter_memory(
             summary,
             key_points,
             characters_in_chapter: characters,
-            relationship_count: 0, // Phase 2
+            relationships_in_chapter,
+            relationship_count,
             knowledge_count: 0,    // Phase 4
         })
         .unwrap_or_default(),
@@ -413,6 +465,7 @@ pub async fn post_v4_chapter_generate(
         &state.pool,
         &extractor,
         Some(&model_name),
+        None, // TODO: wire real AI judge when AiModelService integration is ready
     )
     .await
     .map_err(|e| AppError::Internal(e.into()))?;
@@ -555,6 +608,116 @@ pub async fn post_v4_catchup_cancel(
             "No running catchup to cancel".to_string(),
         )),
     }
+}
+
+/// GET /v4/relationships — book-level relationship graph
+pub async fn get_v4_relationships(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4RelationshipsRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req: V4RelationshipsRequest = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+
+    let rel_repo = RelationshipRepo::new(state.pool.clone());
+    let relationships = rel_repo
+        .list_by_book(
+            &ctx.book_id,
+            req.group.as_deref(),
+            req.min_importance,
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    // Collect unique entity IDs from relationships
+    let mut entity_ids: HashSet<String> = HashSet::new();
+    for rel in &relationships {
+        entity_ids.insert(rel.subject_character_id.clone());
+        entity_ids.insert(rel.object_character_id.clone());
+    }
+
+    // Build nodes from entities
+    let entity_repo = EntityRepo::new(state.pool.clone());
+    let mut nodes = Vec::new();
+    for eid in &entity_ids {
+        if let Some(entity) = entity_repo.get_by_id(eid).await.map_err(|e| AppError::Internal(e.into()))? {
+            let aliases = entity_repo
+                .list_aliases_by_entity(eid)
+                .await
+                .map_err(|e| AppError::Internal(e.into()))?;
+            nodes.push(relationship_projection::RelationshipNode {
+                id: entity.id,
+                name: entity.display_name,
+                aliases: aliases.into_iter().map(|a| a.alias).collect(),
+                importance: entity.importance_score,
+                first_seen_chapter: entity.first_seen_chapter,
+                last_seen_chapter: entity.last_seen_chapter,
+            });
+        }
+    }
+
+    // Build edges
+    let event_repo = RelationshipEventRepo::new(state.pool.clone());
+    let mut edges = Vec::new();
+    let mut groups_set: HashSet<String> = HashSet::new();
+    for rel in &relationships {
+        groups_set.insert(rel.relation_group.clone());
+        let edge = relationship_projection::build_edge_for_relationship(rel, &event_repo)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        edges.push(edge);
+    }
+
+    let mut groups: Vec<String> = groups_set.into_iter().collect();
+    groups.sort();
+
+    let view = relationship_projection::RelationshipGraphView {
+        nodes,
+        edges,
+        groups,
+        total: relationships.len(),
+    };
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/characters/:character_id/relationships — relationships for a specific character
+pub async fn get_v4_character_relationships(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(character_id): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+
+    let rel_repo = RelationshipRepo::new(state.pool.clone());
+    let relationships = rel_repo
+        .list_by_character(&ctx.book_id, &character_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    let event_repo = RelationshipEventRepo::new(state.pool.clone());
+    let mut edges = Vec::new();
+    for rel in &relationships {
+        let edge = relationship_projection::build_edge_for_relationship(rel, &event_repo)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        edges.push(edge);
+    }
+    let total = edges.len();
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(V4CharacterRelationshipsResponse {
+            relationships: edges,
+            total,
+        })
+        .unwrap_or_default(),
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -765,6 +928,7 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
             pool,
             &extractor,
             Some(&model_name),
+            None, // TODO: wire real AI judge
         )
         .await
         {
@@ -1151,6 +1315,7 @@ mod tests {
             summary: Some("Summary text".to_string()),
             key_points: vec!["point 1".to_string(), "point 2".to_string()],
             characters_in_chapter: vec![],
+            relationships_in_chapter: vec![],
             relationship_count: 0,
             knowledge_count: 0,
         };
@@ -1161,5 +1326,52 @@ mod tests {
         assert!(json["keyPoints"].is_array());
         assert_eq!(json["keyPoints"].as_array().unwrap().len(), 2);
         assert!(json["charactersInChapter"].is_array());
+        assert!(json["relationshipsInChapter"].is_array());
+    }
+
+    #[test]
+    fn v4_relationships_request_deserializes_with_filters() {
+        // With all filters
+        let req: V4RelationshipsRequest =
+            serde_json::from_str(r#"{"bookUrl":"http://example.com/book.txt","group":"friendship","minImportance":0.5}"#)
+                .unwrap();
+        assert_eq!(req.book_url.as_deref(), Some("http://example.com/book.txt"));
+        assert_eq!(req.group.as_deref(), Some("friendship"));
+        assert!((req.min_importance.unwrap() - 0.5).abs() < f64::EPSILON);
+
+        // With only bookUrl
+        let req: V4RelationshipsRequest =
+            serde_json::from_str(r#"{"bookUrl":"http://example.com/book.txt"}"#).unwrap();
+        assert_eq!(req.book_url.as_deref(), Some("http://example.com/book.txt"));
+        assert!(req.group.is_none());
+        assert!(req.min_importance.is_none());
+
+        // Empty/default
+        let req = V4RelationshipsRequest::default();
+        assert!(req.book_url.is_none());
+        assert!(req.group.is_none());
+        assert!(req.min_importance.is_none());
+    }
+
+    #[test]
+    fn v4_character_relationships_response_serialization() {
+        let resp = V4CharacterRelationshipsResponse {
+            relationships: vec![],
+            total: 0,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["relationships"].is_array());
+        assert_eq!(json["relationships"].as_array().unwrap().len(), 0);
+        assert_eq!(json["total"], 0);
+    }
+
+    #[test]
+    fn v4_relationships_request_deserializes_with_url_alias() {
+        // Test the `url` alias for bookUrl
+        let req: V4RelationshipsRequest =
+            serde_json::from_str(r#"{"url":"http://example.com/book.txt","group":"rivalry"}"#)
+                .unwrap();
+        assert_eq!(req.book_url.as_deref(), Some("http://example.com/book.txt"));
+        assert_eq!(req.group.as_deref(), Some("rivalry"));
     }
 }
