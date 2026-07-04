@@ -981,7 +981,9 @@ mod tests {
         assert_eq!(overview["data"]["activeEdgeCount"], 1);
 
         let places: serde_json::Value = client
-            .get(format!("{base_url}/api/books/v4/map/places?bookUrl={book_url}"))
+            .get(format!(
+                "{base_url}/api/books/v4/map/places?bookUrl={book_url}"
+            ))
             .send()
             .await
             .unwrap()
@@ -1011,7 +1013,9 @@ mod tests {
         assert_eq!(detail["data"]["name"], "青云城");
 
         let graph: serde_json::Value = client
-            .get(format!("{base_url}/api/books/v4/map/graph?bookUrl={book_url}"))
+            .get(format!(
+                "{base_url}/api/books/v4/map/graph?bookUrl={book_url}"
+            ))
             .send()
             .await
             .unwrap()
@@ -1021,7 +1025,9 @@ mod tests {
         assert_eq!(graph["data"]["edges"][0]["edgeType"], "route_to");
 
         let layout: serde_json::Value = client
-            .get(format!("{base_url}/api/books/v4/map/layout?bookUrl={book_url}"))
+            .get(format!(
+                "{base_url}/api/books/v4/map/layout?bookUrl={book_url}"
+            ))
             .send()
             .await
             .unwrap()
@@ -1031,7 +1037,9 @@ mod tests {
         assert_eq!(layout["data"]["nodes"].as_array().unwrap().len(), 13);
 
         let conflicts: serde_json::Value = client
-            .get(format!("{base_url}/api/books/v4/map/conflicts?bookUrl={book_url}"))
+            .get(format!(
+                "{base_url}/api/books/v4/map/conflicts?bookUrl={book_url}"
+            ))
             .send()
             .await
             .unwrap()

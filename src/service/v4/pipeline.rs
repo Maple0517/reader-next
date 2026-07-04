@@ -11,11 +11,11 @@ use crate::service::v4::map_conflict_judge::{
 use crate::service::v4::map_gate::{self, MapGateContext, MapGateResult};
 use crate::service::v4::place_resolver::{PlaceResolutionAction, PlaceResolver};
 use crate::service::v4::projection;
-use crate::service::v4::{place_reducer, reducer};
 use crate::service::v4::relationship_judge::{self, GateResult, JudgeDecision, JudgeOutput};
 use crate::service::v4::relationship_projection;
 use crate::service::v4::resolver;
 use crate::service::v4::topic_resolver::{TopicCandidateMatch, TopicResolver};
+use crate::service::v4::{place_reducer, reducer};
 use crate::storage::db::v4::ai_run_repo::AiRunRepo;
 use crate::storage::db::v4::chapter_repo::{self, ChapterRepo};
 use crate::storage::db::v4::claim_repo::{ClaimRecord, ClaimRepo, SourceSpanRecord};
@@ -1028,16 +1028,27 @@ async fn prepare_location_edge_claim(
 ) -> anyhow::Result<Option<ClaimRecord>> {
     let mut value = parse_value_json_object(claim.value_json.as_deref());
     let Some(from_mention) = claim.subject_mention.as_deref() else {
-        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        claim_repo
+            .update_claim_status(&claim.id, "uncertain")
+            .await?;
         return Ok(None);
     };
     let Some(to_mention) = claim.object_mention.as_deref() else {
-        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        claim_repo
+            .update_claim_status(&claim.id, "uncertain")
+            .await?;
         return Ok(None);
     };
 
     let from_resolution = place_resolver
-        .resolve_place(book_id, from_mention, "unknown", None, &[], claim.confidence)
+        .resolve_place(
+            book_id,
+            from_mention,
+            "unknown",
+            None,
+            &[],
+            claim.confidence,
+        )
         .await?;
     let to_resolution = place_resolver
         .resolve_place(book_id, to_mention, "unknown", None, &[], claim.confidence)
@@ -1046,7 +1057,9 @@ async fn prepare_location_edge_claim(
         from_resolution.place_entity_id.clone(),
         to_resolution.place_entity_id.clone(),
     ) else {
-        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        claim_repo
+            .update_claim_status(&claim.id, "uncertain")
+            .await?;
         return Ok(None);
     };
 
@@ -1092,7 +1105,9 @@ async fn prepare_location_edge_claim(
             claim_repo
                 .update_claim_value_json(&claim.id, &updated_json)
                 .await?;
-            claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+            claim_repo
+                .update_claim_status(&claim.id, "uncertain")
+                .await?;
             return Ok(None);
         }
     }
@@ -1123,7 +1138,9 @@ async fn prepare_location_edge_claim(
     prepared.value_json = Some(updated_json);
 
     if judge_output.decision == MapConflictDecision::Uncertain {
-        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        claim_repo
+            .update_claim_status(&claim.id, "uncertain")
+            .await?;
         return Ok(None);
     }
 
@@ -1189,7 +1206,10 @@ fn insert_claim_evidence_span_ids(
         .into_iter()
         .map(serde_json::Value::String)
         .collect::<Vec<_>>();
-    value.insert("evidence_span_ids".to_string(), serde_json::Value::Array(ids));
+    value.insert(
+        "evidence_span_ids".to_string(),
+        serde_json::Value::Array(ids),
+    );
 }
 
 fn claim_evidence_span_ids(claim: &ClaimRecord) -> Vec<String> {
@@ -1265,10 +1285,7 @@ fn merge_map_judge_output(
                 .ok_or_else(|| anyhow::anyhow!("invalid map judge confidence"))?,
         ),
     );
-    value.insert(
-        "judge_output".to_string(),
-        serde_json::to_value(output)?,
-    );
+    value.insert("judge_output".to_string(), serde_json::to_value(output)?);
     Ok(())
 }
 
@@ -2084,11 +2101,12 @@ mod tests {
         .await
         .unwrap();
 
-        let map_edge_claims: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM claims WHERE book_id = 'b1' AND claim_type = 'location_edge'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let map_edge_claims: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM claims WHERE book_id = 'b1' AND claim_type = 'location_edge'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         let active_edges: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM place_edges WHERE book_id = 'b1'")
                 .fetch_one(&pool)
@@ -4115,7 +4133,8 @@ mod tests {
         async fn judge(
             &self,
             input: &crate::service::v4::map_conflict_judge::MapConflictJudgeInput,
-        ) -> anyhow::Result<crate::service::v4::map_conflict_judge::MapConflictJudgeOutput> {
+        ) -> anyhow::Result<crate::service::v4::map_conflict_judge::MapConflictJudgeOutput>
+        {
             let call_index = self
                 .real_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4266,7 +4285,21 @@ mod tests {
                     make_location_edge_obs("丹房", "青云门", "north_of"),
                 ]),
             ),
+            (
+                3,
+                "黑水渡在青云门以东。后来又有人说青云门在黑水渡以西，这是同一条方向关系的反向说法，不应生成重复边。伪书记载青云门包含东域，会造成东域包含青云门后的层级循环，应拒绝。后山古道仍是命名路线。",
+                MockExtractor::new(vec![
+                    make_location_edge_obs("黑水渡", "青云门", "east_of"),
+                    make_location_edge_obs("青云门", "黑水渡", "west_of"),
+                    make_location_edge_obs("青云门", "东域", "contains"),
+                ]),
+            ),
         ];
+        assert_eq!(
+            chapters.len(),
+            3,
+            "Phase 5 map smoke must cover a 3-chapter fixture"
+        );
 
         for (chapter_index, raw_text, extractor) in &chapters {
             process_chapter_with_map_conflict_judge(
@@ -4282,7 +4315,9 @@ mod tests {
                 Some(&map_judge),
             )
             .await
-            .unwrap_or_else(|err| panic!("Phase 5 map smoke chapter {chapter_index} failed: {err}"));
+            .unwrap_or_else(|err| {
+                panic!("Phase 5 map smoke chapter {chapter_index} failed: {err}")
+            });
         }
 
         let overview = crate::service::v4::place_projection::project_map_overview(book_id, &pool)
@@ -4294,9 +4329,10 @@ mod tests {
         let graph = crate::service::v4::place_projection::project_map_graph(book_id, &pool)
             .await
             .unwrap();
-        let layout = crate::service::v4::place_projection::rebuild_layout_snapshot(book_id, 2, &pool)
-            .await
-            .unwrap();
+        let layout =
+            crate::service::v4::place_projection::rebuild_layout_snapshot(book_id, 3, &pool)
+                .await
+                .unwrap();
         let conflicts: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM place_edge_conflicts WHERE book_id = ? AND status = 'open'",
         )
@@ -4334,6 +4370,32 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let edge_sources: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM place_edge_sources WHERE book_id = ?")
+                .bind(book_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let aliases_created: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM entity_aliases WHERE book_id = ?")
+                .bind(book_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let inverse_duplicate_edges: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM place_edges WHERE book_id = ? AND edge_type = 'east_of' AND status = 'active'",
+        )
+        .bind(book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let rejected_cycle_claims: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM claims WHERE book_id = ? AND claim_type = 'location_edge' AND status = 'rejected'",
+        )
+        .bind(book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         let character_cards: Vec<_> = EntityRepo::new(pool.clone())
             .list_by_book(book_id)
             .await
@@ -4364,7 +4426,7 @@ mod tests {
             );
         }
         println!(
-            "[MAP_SMOKE] places={} active_edges={} conflicts={} layout_nodes={} layout_edges={} real_calls={} scripted_conflicts={} relationships={} org_place_links={} false_positive_edges={}",
+            "[MAP_SMOKE] places={} active_edges={} conflicts={} layout_nodes={} layout_edges={} real_calls={} scripted_conflicts={} relationships={} org_place_links={} aliases={} edge_sources={} inverse_duplicate_edges={} rejected_cycle_claims={} false_positive_edges={}",
             overview.place_count,
             overview.active_edge_count,
             conflicts.0,
@@ -4374,6 +4436,10 @@ mod tests {
             scripted_conflicts.load(std::sync::atomic::Ordering::SeqCst),
             relationship_count,
             org_place_links.0,
+            aliases_created.0,
+            edge_sources.0,
+            inverse_duplicate_edges.0,
+            rejected_cycle_claims.0,
             false_positive_edges.0
         );
         for place in &places {
@@ -4399,9 +4465,18 @@ mod tests {
             map_judge_runs.0, 1,
             "RealAiMapConflictJudge should record a successful ai_run"
         );
-        assert_eq!(overview.place_count, 5, "distractors must not create extra places");
-        assert_eq!(overview.active_edge_count, 3, "conflicting edge must not become active");
-        assert_eq!(conflicts.0, 1, "conflicting map statement should be recorded");
+        assert_eq!(
+            overview.place_count, 5,
+            "distractors must not create extra places"
+        );
+        assert_eq!(
+            overview.active_edge_count, 4,
+            "inverse duplicate should dedupe into one extra active direction edge"
+        );
+        assert_eq!(
+            conflicts.0, 1,
+            "conflicting map statement should be recorded"
+        );
         assert!(
             real_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "smoke wrapper should call the real map judge"
@@ -4411,12 +4486,43 @@ mod tests {
             1,
             "fixture should exercise deterministic conflict path"
         );
-        assert_eq!(false_positive_edges.0, 0, "character movement distractor must not enter map");
-        assert_eq!(relationship_count, 1, "Phase 2 relationship regression should still pass");
-        assert_eq!(org_place_links.0, 1, "organization/place same-name link should be active");
-        assert!(first_card_ok, "Phase 1 character card projection should still work");
-        assert!(!layout.nodes.is_empty(), "layout snapshot should include place nodes");
-        assert!(!layout.edges.is_empty(), "layout snapshot should include active edges");
+        assert_eq!(
+            false_positive_edges.0, 0,
+            "character movement distractor must not enter map"
+        );
+        assert_eq!(
+            relationship_count, 1,
+            "Phase 2 relationship regression should still pass"
+        );
+        assert_eq!(
+            org_place_links.0, 1,
+            "organization/place same-name link should be active"
+        );
+        assert!(aliases_created.0 >= 1, "place alias should be persisted");
+        assert_eq!(
+            edge_sources.0, 5,
+            "inverse duplicate should preserve source evidence without duplicate active edge"
+        );
+        assert_eq!(
+            inverse_duplicate_edges.0, 1,
+            "east/west inverse pair should canonicalize to one east_of edge"
+        );
+        assert_eq!(
+            rejected_cycle_claims.0, 1,
+            "hierarchy cycle attempt should be rejected"
+        );
+        assert!(
+            first_card_ok,
+            "Phase 1 character card projection should still work"
+        );
+        assert!(
+            !layout.nodes.is_empty(),
+            "layout snapshot should include place nodes"
+        );
+        assert!(
+            !layout.edges.is_empty(),
+            "layout snapshot should include active edges"
+        );
     }
 
     #[tokio::test]

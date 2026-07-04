@@ -1,8 +1,8 @@
 use crate::storage::db::v4::entity_repo::EntityRepo;
 use crate::storage::db::v4::place_repo::PlaceRepo;
 use crate::util::hash::md5_hex;
-use std::collections::{BTreeMap, BTreeSet};
 use sqlx::SqlitePool;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,10 +254,7 @@ pub async fn project_place_hierarchy(
     Ok(build(None, &by_parent))
 }
 
-pub async fn project_map_graph(
-    book_id: &str,
-    pool: &SqlitePool,
-) -> anyhow::Result<MapGraphView> {
+pub async fn project_map_graph(book_id: &str, pool: &SqlitePool) -> anyhow::Result<MapGraphView> {
     let nodes = load_place_rows(book_id, pool)
         .await?
         .into_iter()
@@ -676,15 +673,7 @@ mod tests {
         let claim_id = create_claim(&claim_repo, &span_id, &run_id).await;
         let edge = place_repo
             .find_or_create_edge(
-                "b1",
-                &from_id,
-                &to_id,
-                "route_to",
-                None,
-                None,
-                0.8,
-                &claim_id,
-                1,
+                "b1", &from_id, &to_id, "route_to", None, None, 0.8, &claim_id, 1,
             )
             .await
             .unwrap();
@@ -710,15 +699,7 @@ mod tests {
         let claim_id = create_claim(&claim_repo, &span_id, &run_id).await;
         place_repo
             .find_or_create_edge(
-                "b1",
-                &from_id,
-                &to_id,
-                "route_to",
-                None,
-                None,
-                0.8,
-                &claim_id,
-                1,
+                "b1", &from_id, &to_id, "route_to", None, None, 0.8, &claim_id, 1,
             )
             .await
             .unwrap();

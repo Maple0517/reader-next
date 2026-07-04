@@ -17,8 +17,8 @@ use crate::storage::db::v4::entity_repo::EntityRepo;
 use crate::storage::db::v4::identity_repo::{
     IdentityLinkRecord, IdentityRepo, MergeOperationRecord,
 };
-use crate::storage::db::v4::progress_repo::ProgressRepo;
 use crate::storage::db::v4::place_repo::{PlaceEdgeConflictRecord, PlaceRepo};
+use crate::storage::db::v4::progress_repo::ProgressRepo;
 use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
 use crate::storage::db::v4::reset_v4;
 use crate::util::text::repair_encoded_url;

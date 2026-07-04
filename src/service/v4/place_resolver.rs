@@ -176,7 +176,10 @@ mod tests {
     }
 
     fn resolver(pool: &SqlitePool) -> PlaceResolver {
-        PlaceResolver::new(EntityRepo::new(pool.clone()), IdentityRepo::new(pool.clone()))
+        PlaceResolver::new(
+            EntityRepo::new(pool.clone()),
+            IdentityRepo::new(pool.clone()),
+        )
     }
 
     async fn setup_source_infra(pool: &SqlitePool, book_id: &str) -> (String, String) {
@@ -288,15 +291,7 @@ mod tests {
         let pool = setup_test_db().await;
         let entity_repo = EntityRepo::new(pool.clone());
         let organization = entity_repo
-            .create_entity(
-                "book1",
-                "organization",
-                "青云门",
-                "青云门",
-                None,
-                0.8,
-                1,
-            )
+            .create_entity("book1", "organization", "青云门", "青云门", None, 0.8, 1)
             .await
             .unwrap();
 

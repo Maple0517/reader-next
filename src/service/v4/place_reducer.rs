@@ -91,7 +91,10 @@ async fn reduce_location_introduction(
         .get("importance_score")
         .and_then(Value::as_f64)
         .unwrap_or(claim.confidence.clamp(0.0, 1.0));
-    let scale_level = value.get("scale_level").and_then(Value::as_i64).unwrap_or(0);
+    let scale_level = value
+        .get("scale_level")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let map_visible = value
         .get("map_visible_hint")
         .or_else(|| value.get("map_visible"))
@@ -113,6 +116,13 @@ async fn reduce_location_introduction(
     if let Some(parent_id) = parent_place_id {
         if would_create_parent_cycle(conn, &place.id, parent_id).await? {
             result.claims_rejected.push(claim.id.clone());
+            return Ok(());
+        }
+        let existing_detail = PlaceRepo::get_place_detail_with_conn(conn, &place.id).await?;
+        if has_conflicting_parent(existing_detail.as_ref(), parent_id)
+            && !has_explicit_accept_decision(&value)
+        {
+            result.claims_skipped.push(claim.id.clone());
             return Ok(());
         }
     }
@@ -226,15 +236,35 @@ async fn reduce_location_edge(
         return Ok(());
     }
 
+    let (normalized_from_place_id, normalized_to_place_id, normalized_edge_type) =
+        PlaceRepo::normalize_edge_identity(from_place_id, to_place_id, edge_type);
+    if normalized_edge_type == "contains" {
+        if would_create_parent_cycle(conn, &normalized_to_place_id, &normalized_from_place_id)
+            .await?
+        {
+            result.claims_rejected.push(claim.id.clone());
+            return Ok(());
+        }
+        let child_detail =
+            PlaceRepo::get_place_detail_with_conn(conn, &normalized_to_place_id).await?;
+        if has_conflicting_parent(child_detail.as_ref(), &normalized_from_place_id)
+            && !has_explicit_accept_decision(&value)
+        {
+            result.claims_skipped.push(claim.id.clone());
+            return Ok(());
+        }
+    }
+
     let edge = PlaceRepo::find_or_create_edge_with_conn(
         conn,
         book_id,
-        from_place_id,
-        to_place_id,
-        edge_type,
+        &normalized_from_place_id,
+        &normalized_to_place_id,
+        &normalized_edge_type,
         str_field(&value, "normalized_direction_hint")
             .or_else(|| str_field(&value, "direction_hint")),
-        str_field(&value, "normalized_distance_hint").or_else(|| str_field(&value, "distance_hint")),
+        str_field(&value, "normalized_distance_hint")
+            .or_else(|| str_field(&value, "distance_hint")),
         value
             .get("judge_confidence")
             .or_else(|| value.get("confidence"))
@@ -244,6 +274,16 @@ async fn reduce_location_edge(
         claim.chapter_index,
     )
     .await?;
+    if normalized_edge_type == "contains" {
+        upsert_contains_parent_detail(
+            conn,
+            book_id,
+            &normalized_from_place_id,
+            &normalized_to_place_id,
+            claim,
+        )
+        .await?;
+    }
     push_unique(&mut result.edges_touched, edge.id);
     result.claims_accepted.push(claim.id.clone());
     Ok(())
@@ -263,13 +303,19 @@ async fn get_or_create_place_entity(
             .await?
             .ok_or_else(|| anyhow::anyhow!("place entity not found: {entity_id}"))?;
         if entity.entity_type != "place" {
-            anyhow::bail!("entity {} is {}, expected place", entity.id, entity.entity_type);
+            anyhow::bail!(
+                "entity {} is {}, expected place",
+                entity.id,
+                entity.entity_type
+            );
         }
         EntityRepo::update_last_seen_with_conn(conn, &entity.id, chapter_index).await?;
         return Ok(entity);
     }
 
-    if let Some(entity) = find_place_by_canonical_name_with_conn(conn, book_id, display_name).await? {
+    if let Some(entity) =
+        find_place_by_canonical_name_with_conn(conn, book_id, display_name).await?
+    {
         EntityRepo::update_last_seen_with_conn(conn, &entity.id, chapter_index).await?;
         return Ok(entity);
     }
@@ -334,11 +380,16 @@ fn claim_value(claim: &ClaimRecord) -> anyhow::Result<Value> {
     let Some(raw) = claim.value_json.as_deref() else {
         return Ok(Value::Object(Default::default()));
     };
-    serde_json::from_str(raw).map_err(|err| anyhow::anyhow!("invalid location claim value_json: {err}"))
+    serde_json::from_str(raw)
+        .map_err(|err| anyhow::anyhow!("invalid location claim value_json: {err}"))
 }
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 fn validate_place_type(place_type: &str) -> anyhow::Result<()> {
@@ -367,6 +418,69 @@ fn normalize_conflict_type(conflict_type: &str) -> &'static str {
         "duplicate_conflicting_direction" => "duplicate_conflicting_direction",
         _ => "none",
     }
+}
+
+fn has_explicit_accept_decision(value: &Value) -> bool {
+    matches!(
+        str_field(value, "judge_decision").or_else(|| str_field(value, "decision")),
+        Some("accept")
+    )
+}
+
+fn has_conflicting_parent(existing_detail: Option<&PlaceDetailRecord>, parent_id: &str) -> bool {
+    existing_detail
+        .and_then(|detail| detail.parent_place_id.as_deref())
+        .is_some_and(|existing_parent| existing_parent != parent_id)
+}
+
+async fn upsert_contains_parent_detail(
+    conn: &mut SqliteConnection,
+    book_id: &str,
+    parent_place_id: &str,
+    child_place_id: &str,
+    claim: &ClaimRecord,
+) -> anyhow::Result<()> {
+    let existing = PlaceRepo::get_place_detail_with_conn(conn, child_place_id).await?;
+    let place_type = existing
+        .as_ref()
+        .map(|detail| detail.place_type.as_str())
+        .unwrap_or("unknown");
+    let scale_level = existing
+        .as_ref()
+        .map(|detail| detail.scale_level)
+        .unwrap_or(0);
+    let importance_score = existing
+        .as_ref()
+        .map(|detail| detail.importance_score)
+        .unwrap_or(claim.confidence.clamp(0.0, 1.0));
+    let map_visible = existing
+        .as_ref()
+        .map(|detail| detail.map_visible != 0)
+        .unwrap_or(true);
+    let first_seen_chapter = existing
+        .as_ref()
+        .map(|detail| detail.first_seen_chapter)
+        .unwrap_or(claim.chapter_index);
+    let status = existing
+        .as_ref()
+        .map(|detail| detail.status.as_str())
+        .unwrap_or("active");
+
+    PlaceRepo::upsert_place_detail_with_conn(
+        conn,
+        book_id,
+        child_place_id,
+        place_type,
+        Some(parent_place_id),
+        scale_level,
+        importance_score,
+        map_visible,
+        first_seen_chapter,
+        claim.chapter_index,
+        status,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn invalidate_map_cache_with_conn(
@@ -403,10 +517,8 @@ mod tests {
     use serde_json::json;
 
     async fn setup_test_db() -> (SqlitePool, ClaimRepo, EntityRepo, PlaceRepo, String, String) {
-        let dir = std::env::temp_dir().join(format!(
-            "reader-v4-place-reducer-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("reader-v4-place-reducer-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
         let pool = db::init_pool(&database_url).await.unwrap();
@@ -523,16 +635,7 @@ mod tests {
             .unwrap();
         place_repo
             .upsert_place_detail(
-                "b1",
-                &entity.id,
-                place_type,
-                None,
-                0,
-                0.6,
-                true,
-                1,
-                1,
-                "active",
+                "b1", &entity.id, place_type, None, 0, 0.6, true, 1, 1, "active",
             )
             .await
             .unwrap();
@@ -567,9 +670,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(place.entity_type, "place");
-        let detail = place_repo.get_place_detail(&place.id).await.unwrap().unwrap();
+        let detail = place_repo
+            .get_place_detail(&place.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(detail.place_type, "city");
-        assert_eq!(claim_repo.get_claim(&claim.id).await.unwrap().unwrap().status, "accepted");
+        assert_eq!(
+            claim_repo
+                .get_claim(&claim.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "accepted"
+        );
     }
 
     #[tokio::test]
@@ -655,7 +770,15 @@ mod tests {
                 .parent_place_id,
             None
         );
-        assert_eq!(claim_repo.get_claim(&claim.id).await.unwrap().unwrap().status, "rejected");
+        assert_eq!(
+            claim_repo
+                .get_claim(&claim.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "rejected"
+        );
     }
 
     #[tokio::test]
@@ -695,6 +818,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn place_reducer_inside_and_part_of_update_same_parent_and_dedupe_contains_edge() {
+        let (pool, claim_repo, entity_repo, place_repo, span_id, run_id) = setup_test_db().await;
+        let parent_id = create_place(&entity_repo, &place_repo, "青云门", "sect_site").await;
+        let child_id = create_place(&entity_repo, &place_repo, "丹房", "building").await;
+        let inside_claim = location_edge_claim(
+            &claim_repo,
+            &span_id,
+            &run_id,
+            &child_id,
+            &parent_id,
+            json!({
+                "edge_type": "inside",
+                "judge_decision": "accept"
+            }),
+        )
+        .await;
+        let part_of_claim = location_edge_claim(
+            &claim_repo,
+            &span_id,
+            &run_id,
+            &child_id,
+            &parent_id,
+            json!({
+                "edge_type": "part_of",
+                "judge_decision": "accept"
+            }),
+        )
+        .await;
+
+        let result =
+            reduce_location_claims(&[inside_claim.clone(), part_of_claim.clone()], "b1", &pool)
+                .await
+                .unwrap();
+
+        assert_eq!(result.claims_accepted.len(), 2);
+        assert_eq!(result.edges_touched.len(), 1);
+        let detail = place_repo
+            .get_place_detail(&child_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.parent_place_id.as_deref(), Some(parent_id.as_str()));
+        let edge = place_repo
+            .get_edge_by_id(&result.edges_touched[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(edge.edge_type, "contains");
+        assert_eq!(edge.from_place_id, parent_id);
+        assert_eq!(edge.to_place_id, child_id);
+        let sources = place_repo.list_edge_sources(&edge.id).await.unwrap();
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn location_introduction_parent_change_without_judge_does_not_overwrite_existing_parent()
+    {
+        let (pool, claim_repo, entity_repo, place_repo, span_id, run_id) = setup_test_db().await;
+        let original_parent_id = create_place(&entity_repo, &place_repo, "东域", "region").await;
+        let new_parent_id = create_place(&entity_repo, &place_repo, "西域", "region").await;
+        let child_id = create_place(&entity_repo, &place_repo, "青云城", "city").await;
+        place_repo
+            .upsert_place_detail(
+                "b1",
+                &child_id,
+                "city",
+                Some(&original_parent_id),
+                0,
+                0.6,
+                true,
+                1,
+                1,
+                "active",
+            )
+            .await
+            .unwrap();
+        let claim = location_intro_claim(
+            &claim_repo,
+            &span_id,
+            &run_id,
+            "青云城",
+            json!({
+                "place_type": "city",
+                "parent_place_id": new_parent_id,
+                "aliases": []
+            }),
+        )
+        .await;
+
+        let result = reduce_location_claims(&[claim.clone()], "b1", &pool)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_skipped, vec![claim.id.clone()]);
+        let detail = place_repo
+            .get_place_detail(&child_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            detail.parent_place_id.as_deref(),
+            Some(original_parent_id.as_str())
+        );
+        assert_eq!(
+            claim_repo
+                .get_claim(&claim.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "proposed"
+        );
+    }
+
+    #[tokio::test]
     async fn place_reducer_conflicting_edge_records_conflict_not_active() {
         let (pool, claim_repo, entity_repo, place_repo, span_id, run_id) = setup_test_db().await;
         let from_id = create_place(&entity_repo, &place_repo, "青云城", "city").await;
@@ -720,12 +958,20 @@ mod tests {
 
         assert_eq!(result.conflicts_recorded.len(), 1);
         assert_eq!(result.edges_touched.len(), 0);
-        assert_eq!(place_repo.list_conflicts("b1", Some("open")).await.unwrap().len(), 1);
-        let active_edges: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM place_edges WHERE book_id = 'b1' AND status = 'active'")
-                .fetch_one(&pool)
+        assert_eq!(
+            place_repo
+                .list_conflicts("b1", Some("open"))
                 .await
-                .unwrap();
+                .unwrap()
+                .len(),
+            1
+        );
+        let active_edges: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM place_edges WHERE book_id = 'b1' AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(active_edges.0, 0);
     }
 
@@ -823,12 +1069,21 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("invalid place_type"));
-        let place_count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM entities WHERE book_id = 'b1' AND entity_type = 'place'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let place_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM entities WHERE book_id = 'b1' AND entity_type = 'place'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(place_count.0, 0);
-        assert_eq!(claim_repo.get_claim(&good.id).await.unwrap().unwrap().status, "proposed");
+        assert_eq!(
+            claim_repo
+                .get_claim(&good.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "proposed"
+        );
     }
 }

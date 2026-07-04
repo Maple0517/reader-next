@@ -241,8 +241,8 @@ impl PlaceRepo {
         source_claim_id: &str,
         chapter_index: i64,
     ) -> anyhow::Result<PlaceEdgeRecord> {
-        let (from_place_id, to_place_id) =
-            canonicalize_edge_pair(from_place_id, to_place_id, edge_type);
+        let (from_place_id, to_place_id, edge_type) =
+            Self::normalize_edge_identity(from_place_id, to_place_id, edge_type);
         Self::ensure_place_entity_with_conn(conn, book_id, &from_place_id).await?;
         Self::ensure_place_entity_with_conn(conn, book_id, &to_place_id).await?;
 
@@ -251,7 +251,7 @@ impl PlaceRepo {
             book_id,
             &from_place_id,
             &to_place_id,
-            edge_type,
+            &edge_type,
             direction_hint,
         )
         .await?
@@ -300,7 +300,7 @@ impl PlaceRepo {
         .bind(book_id)
         .bind(&from_place_id)
         .bind(&to_place_id)
-        .bind(edge_type)
+        .bind(&edge_type)
         .bind(direction_hint)
         .bind(distance_hint)
         .bind(confidence)
@@ -740,6 +740,54 @@ impl PlaceRepo {
         stable_hash(&parts.join("\n"))
     }
 
+    pub fn normalize_edge_identity(
+        from_place_id: &str,
+        to_place_id: &str,
+        edge_type: &str,
+    ) -> (String, String, String) {
+        match edge_type {
+            "inside" | "part_of" => (
+                to_place_id.to_string(),
+                from_place_id.to_string(),
+                "contains".to_string(),
+            ),
+            "south_of" => (
+                to_place_id.to_string(),
+                from_place_id.to_string(),
+                "north_of".to_string(),
+            ),
+            "west_of" => (
+                to_place_id.to_string(),
+                from_place_id.to_string(),
+                "east_of".to_string(),
+            ),
+            "southwest_of" => (
+                to_place_id.to_string(),
+                from_place_id.to_string(),
+                "northeast_of".to_string(),
+            ),
+            "southeast_of" => (
+                to_place_id.to_string(),
+                from_place_id.to_string(),
+                "northwest_of".to_string(),
+            ),
+            "downstream_of" => (
+                to_place_id.to_string(),
+                from_place_id.to_string(),
+                "upstream_of".to_string(),
+            ),
+            _ if is_undirected_edge(edge_type) => {
+                let (from_place_id, to_place_id) = canonicalize_pair(from_place_id, to_place_id);
+                (from_place_id, to_place_id, edge_type.to_string())
+            }
+            _ => (
+                from_place_id.to_string(),
+                to_place_id.to_string(),
+                edge_type.to_string(),
+            ),
+        }
+    }
+
     async fn ensure_place_entity_with_conn(
         conn: &mut SqliteConnection,
         book_id: &str,
@@ -758,18 +806,6 @@ impl PlaceRepo {
             }
             None => anyhow::bail!("place entity not found: {}", entity_id),
         }
-    }
-}
-
-fn canonicalize_edge_pair(
-    from_place_id: &str,
-    to_place_id: &str,
-    edge_type: &str,
-) -> (String, String) {
-    if is_undirected_edge(edge_type) {
-        canonicalize_pair(from_place_id, to_place_id)
-    } else {
-        (from_place_id.to_string(), to_place_id.to_string())
     }
 }
 
@@ -928,6 +964,28 @@ mod tests {
 
         assert_eq!(edge.from_place_id, "p2");
         assert_eq!(edge.to_place_id, "p1");
+    }
+
+    #[tokio::test]
+    async fn inverse_direction_edge_canonicalizes_before_duplicate_detection() {
+        let pool = setup_test_db().await;
+        seed_base(&pool).await;
+        let repo = PlaceRepo::new(pool);
+
+        let first = repo
+            .find_or_create_edge("b1", "p2", "p1", "north_of", None, None, 0.7, "c1", 1)
+            .await
+            .unwrap();
+        let second = repo
+            .find_or_create_edge("b1", "p1", "p2", "south_of", None, None, 0.9, "c2", 2)
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.edge_type, "north_of");
+        assert_eq!(second.from_place_id, "p2");
+        assert_eq!(second.to_place_id, "p1");
+        assert_eq!(second.latest_source_claim_id.as_deref(), Some("c2"));
     }
 
     #[tokio::test]

@@ -202,8 +202,9 @@ impl MapConflictJudge for RealAiMapConflictJudge {
 
 pub fn parse_judge_output(raw: &str) -> anyhow::Result<MapConflictJudgeOutput> {
     let cleaned = strip_markdown_fences(raw);
-    let output: MapConflictJudgeOutput =
-        serde_json::from_str(&cleaned).map_err(|err| anyhow::anyhow!("JSON parse error: {}", err))?;
+    let mut output: MapConflictJudgeOutput = serde_json::from_str(&cleaned)
+        .map_err(|err| anyhow::anyhow!("JSON parse error: {}", err))?;
+    normalize_judge_output(&mut output);
     validate_judge_output(&output)?;
     Ok(output)
 }
@@ -213,11 +214,22 @@ pub fn parse_judge_output_with_repair(raw: &str) -> anyhow::Result<MapConflictJu
         Ok(output) => Ok(output),
         Err(_) => {
             let repaired = try_repair_json(&strip_markdown_fences(raw))?;
-            let output: MapConflictJudgeOutput = serde_json::from_str(&repaired)
+            let mut output: MapConflictJudgeOutput = serde_json::from_str(&repaired)
                 .map_err(|err| anyhow::anyhow!("JSON parse error after repair: {}", err))?;
+            normalize_judge_output(&mut output);
             validate_judge_output(&output)?;
             Ok(output)
         }
+    }
+}
+
+fn normalize_judge_output(output: &mut MapConflictJudgeOutput) {
+    if output
+        .conflict_type
+        .as_deref()
+        .is_some_and(|conflict_type| conflict_type.trim().is_empty())
+    {
+        output.conflict_type = None;
     }
 }
 
@@ -254,11 +266,7 @@ fn validate_judge_output(output: &MapConflictJudgeOutput) -> anyhow::Result<()> 
             }
         }
         MapConflictDecision::Conflict => {
-            let conflict_type = output
-                .conflict_type
-                .as_deref()
-                .unwrap_or_default()
-                .trim();
+            let conflict_type = output.conflict_type.as_deref().unwrap_or_default().trim();
             if conflict_type.is_empty() {
                 anyhow::bail!("conflict requires conflict_type");
             }
@@ -444,7 +452,9 @@ fn remove_trailing_commas_before_closers(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
     for (idx, ch) in chars.iter().enumerate() {
         if *ch == ',' {
-            let next_non_ws = chars[idx + 1..].iter().find(|candidate| !candidate.is_whitespace());
+            let next_non_ws = chars[idx + 1..]
+                .iter()
+                .find(|candidate| !candidate.is_whitespace());
             if matches!(next_non_ws, Some('}' | ']')) {
                 continue;
             }
@@ -545,6 +555,25 @@ mod tests {
     }
 
     #[test]
+    fn accept_treats_blank_conflict_type_as_none() {
+        let accept = r#"{
+          "decision":"accept",
+          "normalized_edge_type":"contains",
+          "normalized_direction_hint":null,
+          "normalized_distance_hint":null,
+          "conflict_type":"",
+          "reason_code":"no_conflict",
+          "confidence":0.76,
+          "explanation_for_log":"empty conflict type from model should be treated as none for accept"
+        }"#;
+
+        let output = parse_judge_output(accept).unwrap();
+
+        assert_eq!(output.decision, MapConflictDecision::Accept);
+        assert!(output.conflict_type.is_none());
+    }
+
+    #[test]
     fn invalid_map_conflict_output_repairs_once() {
         let malformed = r#"{
           "decision":"uncertain",
@@ -575,17 +604,16 @@ mod tests {
         let prompt = "return strict json for map conflict judge";
         let output = output(MapConflictDecision::Accept);
 
-        let run_id = record_map_conflict_judge_success(
-            &pool,
-            &input,
-            "test-model",
-            prompt,
-            &output,
-        )
-        .await
-        .unwrap();
+        let run_id =
+            record_map_conflict_judge_success(&pool, &input, "test-model", prompt, &output)
+                .await
+                .unwrap();
 
-        let run = AiRunRepo::new(pool).get_run(&run_id).await.unwrap().unwrap();
+        let run = AiRunRepo::new(pool)
+            .get_run(&run_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(run.run_type, "map_conflict_judge");
         assert_eq!(run.status, "success");
         assert_eq!(run.input_hash, md5_hex(prompt));
@@ -605,7 +633,10 @@ mod tests {
 
     #[tokio::test]
     async fn default_judge_returns_uncertain() {
-        let output = DefaultMapConflictJudge::new().judge(&input()).await.unwrap();
+        let output = DefaultMapConflictJudge::new()
+            .judge(&input())
+            .await
+            .unwrap();
 
         assert_eq!(output.decision, MapConflictDecision::Uncertain);
     }

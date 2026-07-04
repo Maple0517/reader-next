@@ -36,14 +36,13 @@ pub fn structural_gate(context: MapGateContext<'_>) -> MapGateResult {
     }
 
     if claim.confidence < EXTREMELY_LOW_CONFIDENCE_THRESHOLD {
-        return MapGateResult::Reject(format!(
-            "confidence {} is extremely low",
-            claim.confidence
-        ));
+        return MapGateResult::Reject(format!("confidence {} is extremely low", claim.confidence));
     }
 
     if has_knowledge_summary_shape(&value_json) {
-        return MapGateResult::Reject("knowledge summary is not canonical map topology".to_string());
+        return MapGateResult::Reject(
+            "knowledge summary is not canonical map topology".to_string(),
+        );
     }
 
     if claim.claim_type == "location_edge" {
@@ -62,10 +61,7 @@ pub fn structural_gate(context: MapGateContext<'_>) -> MapGateResult {
             return MapGateResult::Reject(format!("invalid edge_type: {}", edge_type));
         }
     } else if claim.claim_type != "location_introduction" {
-        return MapGateResult::Reject(format!(
-            "unsupported map claim_type: {}",
-            claim.claim_type
-        ));
+        return MapGateResult::Reject(format!("unsupported map claim_type: {}", claim.claim_type));
     }
 
     let Some(from_place) = context.from_place else {
@@ -310,7 +306,9 @@ mod tests {
 
         let result = gate(&claim, Some(&from), Some(&to), &[]);
 
-        assert!(matches!(result, MapGateResult::Reject(reason) if reason.contains("movement") || reason.contains("non-map")));
+        assert!(
+            matches!(result, MapGateResult::Reject(reason) if reason.contains("movement") || reason.contains("non-map"))
+        );
     }
 
     #[test]
@@ -389,7 +387,9 @@ mod tests {
 
         let result = gate(&claim, None, Some(&to), &[]);
 
-        assert!(matches!(result, MapGateResult::Uncertain(reason) if reason.contains("unresolved")));
+        assert!(
+            matches!(result, MapGateResult::Uncertain(reason) if reason.contains("unresolved"))
+        );
     }
 
     #[test]
@@ -405,6 +405,8 @@ mod tests {
 
         let result = gate(&claim, Some(&from), Some(&to), &[]);
 
-        assert!(matches!(result, MapGateResult::Uncertain(reason) if reason.contains("confidence")));
+        assert!(
+            matches!(result, MapGateResult::Uncertain(reason) if reason.contains("confidence"))
+        );
     }
 }
