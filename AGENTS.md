@@ -5,49 +5,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Development Workflow
 
-1. Follow the CodeGraph + LeanCTX routing rules below before choosing a discovery tool.
-2. Use `rg` for raw text confirmation when CodeGraph is not the right surface.
+
 3. Run the narrowest relevant local checks before pushing. Common checks:
    - Backend: `cargo test` or a focused `cargo test <name>`
    - Frontend: `cd frontend && npm test` / `npm run build` as relevant
    - Formatting/sanity: `git diff --check`
 
-## CodeGraph + LeanCTX Routing
-
-CodeGraph owns code-structure work in this repository. Use it first whenever the question is about source layout, symbols, relationships, or impact.
-
-Use CodeGraph for:
-
-- Repo / directory structure: `codegraph_files`.
-- Symbol lookup by name, type, component, route, method, or module: `codegraph_search`.
-- Feature, bug, or area orientation across multiple files: `codegraph_context`.
-- Function, method, component, or route callers: `codegraph_callers`.
-- Function, method, component, or route callees/dependencies: `codegraph_callees`.
-- Flow tracing between two code points or layers: `codegraph_trace`.
-- Impact radius / blast-radius analysis before edits: `codegraph_impact`.
-- Indexed node details when a search result is too terse: `codegraph_node`.
-- Index health before relying on structure answers: `codegraph_status`.
-
-Use LeanCTX for raw bytes and compressed evidence, not structural code exploration.
-
-Use LeanCTX for:
-
-- Latest on-disk file content, especially files about to be edited: `ctx_read` or native file reads when simpler.
-- Specific line ranges or exact text from docs/config/data files.
-- Plain-text / regex confirmation: `ctx_search` or `rg`.
-- Shell, test, build, lint, git, and log output: `ctx_shell` or `/Users/maple/.local/bin/lean-ctx -c "<cmd>"`.
-- Long outputs that need compression before they reach the model.
-- Session memory / project knowledge / URL or document reads when needed.
-
-Do not use LeanCTX structure/index tools for code exploration in this repo, even if available or mentioned by older docs:
-`ctx_graph`, `ctx_callgraph`, `ctx_impact`, `ctx_architecture`, `ctx_repomap`, `ctx_symbol`, `ctx_overview`, `ctx_tree`, `ctx_glob`.
-
-Fallback rule:
-
-- If CodeGraph is stale, degraded, missing a live file, or conflicts with current disk content, stop using CodeGraph for that file and read fresh bytes with `ctx_read(..., fresh=true)` or a native file read.
-- Do not query CodeGraph and LeanCTX for the same question by default. Pick the owner surface first; use the other only to verify freshness, exact bytes, or command output.
-
-## Commands
 
 ### Rust Backend
 ```bash
@@ -69,6 +32,13 @@ cargo test --lib <test_name> # Single test
 cd frontend && npm install && npm run dev    # Hot-reload frontend only; keep proxy aligned with SERVER_PORT
 cd frontend && npm run build                 # Builds to frontend/dist/
 ```
+
+## Release Workflow
+
+- Release by pushing the code, creating/pushing the version tag, and confirming the Docker publish workflow has been triggered.
+- After the Docker publish workflow is queued or running, do not wait for completion by default. Wait only when the user explicitly needs immediate deploy verification or the workflow has recently been unstable.
+- Release notes must summarize the actual service/product changes since the previous release. Inspect the diff, relevant files, and user-facing behavior; do not copy commit messages directly as release details.
+- When writing release notes, call out backend/API/schema/storage changes, frontend behavior changes, deployment or Docker-impacting changes, and known risks or follow-up checks.
 
 ## Configuration
 
@@ -104,22 +74,3 @@ If you're using Codex or another agent-capable tool, additional project-scoped h
 Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
 
 <!-- TRELLIS:END -->
-
-<!-- lean-ctx -->
-## lean-ctx
-
-Prefer lean-ctx MCP/CLI tools over native equivalents only for raw reads, regex/plain-text search, shell output, logs, tests, builds, and long-output compression.
-CodeGraph remains the owner for repo structure, symbol lookup, callers/callees, flow tracing, and impact analysis.
-Native Edit/Write/Glob stay as-is; use `ctx_edit` only when Edit needs an unavailable Read.
-Full rules: LEAN-CTX.md (open on demand — do not auto-load).
-<!-- /lean-ctx -->
-
-<!-- lean-ctx-compression -->
-OUTPUT STYLE: dense
-- Each statement = one atomic fact line
-- Use abbreviations: fn, cfg, impl, deps, req, res, ctx, err, ret
-- Diff lines only (+/-/~), never repeat unchanged code
-- Symbols: → (causes), + (adds), − (removes), ~ (modifies), ∴ (therefore)
-- No narration, no filler, no hedging
-- BUDGET: ≤200 tokens per response unless code block required
-<!-- /lean-ctx-compression -->
