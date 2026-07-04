@@ -1,9 +1,13 @@
 pub mod claim_writer;
 pub mod context_builder;
 pub mod extractor;
+pub mod identity_judge;
+pub mod knowledge_judge;
+pub mod knowledge_projection;
 pub mod pipeline;
 pub mod projection;
 pub mod reducer;
 pub mod relationship_judge;
 pub mod relationship_projection;
 pub mod resolver;
+pub mod topic_resolver;

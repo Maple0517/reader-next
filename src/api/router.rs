@@ -39,7 +39,14 @@ const V4_CATCHUP_START_ROUTE: &str = "/api/books/v4/catchup/start";
 const V4_CATCHUP_STATUS_ROUTE: &str = "/api/books/v4/catchup/status";
 const V4_CATCHUP_CANCEL_ROUTE: &str = "/api/books/v4/catchup/cancel";
 const V4_RELATIONSHIPS_ROUTE: &str = "/api/books/v4/relationships";
-const V4_CHARACTER_RELATIONSHIPS_ROUTE: &str = "/api/books/v4/characters/:character_id/relationships";
+const V4_CHARACTER_RELATIONSHIPS_ROUTE: &str =
+    "/api/books/v4/characters/:character_id/relationships";
+const V4_IDENTITY_LINKS_ROUTE: &str = "/api/books/v4/identity-links";
+const V4_CHARACTER_IDENTITY_ROUTE: &str = "/api/books/v4/characters/:character_id/identity";
+const V4_MERGE_OPERATIONS_ROUTE: &str = "/api/books/v4/merge-operations";
+const V4_KNOWLEDGE_ROUTE: &str = "/api/books/v4/knowledge";
+const V4_KNOWLEDGE_CARD_ROUTE: &str = "/api/books/v4/knowledge/cards/:card_id";
+const V4_KNOWLEDGE_CATEGORY_ROUTE: &str = "/api/books/v4/knowledge/categories/:category";
 
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
@@ -291,17 +298,59 @@ pub fn build_router(state: AppState) -> Router {
         // V4 API routes
         .route(V4_MEMORY_ROUTE, get(handlers::get_v4_memory))
         .route(V4_CHARACTERS_ROUTE, get(handlers::get_v4_characters))
-        .route(V4_CHARACTER_CARD_ROUTE, get(handlers::get_v4_character_card))
-        .route(V4_CHAPTER_MEMORY_ROUTE, get(handlers::get_v4_chapter_memory))
+        .route(
+            V4_CHARACTER_CARD_ROUTE,
+            get(handlers::get_v4_character_card),
+        )
+        .route(
+            V4_CHAPTER_MEMORY_ROUTE,
+            get(handlers::get_v4_chapter_memory),
+        )
         .route(V4_MEMORY_STATUS_ROUTE, get(handlers::get_v4_memory_status))
         .route(V4_MEMORY_RESET_ROUTE, post(handlers::post_v4_memory_reset))
         .route(V4_ENABLED_ROUTE, post(handlers::post_v4_enabled))
-        .route(V4_CHAPTER_GENERATE_ROUTE, post(handlers::post_v4_chapter_generate))
-        .route(V4_CATCHUP_START_ROUTE, post(handlers::post_v4_catchup_start))
-        .route(V4_CATCHUP_STATUS_ROUTE, get(handlers::get_v4_catchup_status))
-        .route(V4_CATCHUP_CANCEL_ROUTE, post(handlers::post_v4_catchup_cancel))
+        .route(
+            V4_CHAPTER_GENERATE_ROUTE,
+            post(handlers::post_v4_chapter_generate),
+        )
+        .route(
+            V4_CATCHUP_START_ROUTE,
+            post(handlers::post_v4_catchup_start),
+        )
+        .route(
+            V4_CATCHUP_STATUS_ROUTE,
+            get(handlers::get_v4_catchup_status),
+        )
+        .route(
+            V4_CATCHUP_CANCEL_ROUTE,
+            post(handlers::post_v4_catchup_cancel),
+        )
         .route(V4_RELATIONSHIPS_ROUTE, get(handlers::get_v4_relationships))
-        .route(V4_CHARACTER_RELATIONSHIPS_ROUTE, get(handlers::get_v4_character_relationships))
+        .route(
+            V4_CHARACTER_RELATIONSHIPS_ROUTE,
+            get(handlers::get_v4_character_relationships),
+        )
+        .route(
+            V4_IDENTITY_LINKS_ROUTE,
+            get(handlers::get_v4_identity_links),
+        )
+        .route(
+            V4_CHARACTER_IDENTITY_ROUTE,
+            get(handlers::get_v4_character_identity),
+        )
+        .route(
+            V4_MERGE_OPERATIONS_ROUTE,
+            get(handlers::get_v4_merge_operations),
+        )
+        .route(V4_KNOWLEDGE_ROUTE, get(handlers::get_v4_knowledge))
+        .route(
+            V4_KNOWLEDGE_CARD_ROUTE,
+            get(handlers::get_v4_knowledge_card),
+        )
+        .route(
+            V4_KNOWLEDGE_CATEGORY_ROUTE,
+            get(handlers::get_v4_knowledge_category),
+        )
         .route("/reader3/getReplaceRules", get(handlers::get_replace_rules))
         .route(
             "/reader3/saveReplaceRule",
@@ -580,7 +629,25 @@ mod tests {
             (Method::GET, V4_MEMORY_STATUS_ROUTE.to_string()),
             (Method::GET, V4_CATCHUP_STATUS_ROUTE.to_string()),
             (Method::GET, V4_RELATIONSHIPS_ROUTE.to_string()),
-            (Method::GET, V4_CHARACTER_RELATIONSHIPS_ROUTE.replace(":character_id", "test-char")),
+            (
+                Method::GET,
+                V4_CHARACTER_RELATIONSHIPS_ROUTE.replace(":character_id", "test-char"),
+            ),
+            (Method::GET, "/api/books/v4/identity-links".to_string()),
+            (
+                Method::GET,
+                "/api/books/v4/characters/test-char/identity".to_string(),
+            ),
+            (Method::GET, "/api/books/v4/merge-operations".to_string()),
+            (Method::GET, "/api/books/v4/knowledge".to_string()),
+            (
+                Method::GET,
+                "/api/books/v4/knowledge/cards/test-card".to_string(),
+            ),
+            (
+                Method::GET,
+                "/api/books/v4/knowledge/categories/history".to_string(),
+            ),
         ] {
             let response = client
                 .request(method.clone(), format!("{base_url}{path}"))
@@ -630,6 +697,153 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_method_reset.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn v4_knowledge_api_returns_overview_detail_category_and_memory_count() {
+        let (state, dir) = create_test_state().await;
+        db::v4::init_v4(&state.pool).await.unwrap();
+        let book_url = "knowledge-book";
+        let book_id = crate::util::hash::md5_hex(book_url);
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('chapter1', ?, 1, 'text', 'hash', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('segment1', ?, 'chapter1', 'hash', 0, datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('span1', ?, 'chapter1', 'hash', 'segment1', 0, 0, 10, 'evidence', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', ?, 'chapter1', 'extract', 'test', 'v1', 1, 'input', 'completed', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('claim1', ?, 1, 'knowledge_assertion', 'knowledge', 'span1', 'run1', 0.9, 'high', 'accepted', datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let knowledge_repo =
+            crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(state.pool.clone());
+        let card = knowledge_repo
+            .find_or_create_card(
+                &book_id,
+                "history",
+                "old-war",
+                "Old War",
+                Some("War summary"),
+                0.9,
+                0.8,
+                1,
+            )
+            .await
+            .unwrap();
+        knowledge_repo
+            .find_or_create_assertion(
+                &book_id,
+                &card.id,
+                "claim1",
+                "Old war happened.",
+                "active",
+                0.9,
+                0.8,
+                1,
+            )
+            .await
+            .unwrap();
+        knowledge_repo
+            .find_or_create_assertion(
+                &book_id,
+                &card.id,
+                "claim1",
+                "Old rumor.",
+                "rumor",
+                0.6,
+                0.4,
+                1,
+            )
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let client = Client::new();
+        let base_url = format!("http://{}", addr);
+
+        let overview: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/knowledge?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(overview["data"]["total"], 1);
+        assert_eq!(overview["data"]["cards"][0]["topicDisplay"], "Old War");
+
+        let category: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/knowledge/categories/history?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(category["data"]["category"], "history");
+        assert_eq!(category["data"]["total"], 1);
+
+        let detail: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/knowledge/cards/{}?bookUrl={book_url}",
+                card.id
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            detail["data"]["assertionsByStatus"]["active"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            detail["data"]["assertionsByStatus"]["rumor"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let memory: serde_json::Value = client
+            .get(format!("{base_url}/api/books/v4/memory?bookUrl={book_url}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(memory["data"]["knowledgeCount"], 1);
 
         server.abort();
         let _ = tokio::fs::remove_dir_all(dir).await;

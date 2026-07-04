@@ -581,9 +581,11 @@ mod tests {
             .upsert_chapter("b1", 1, None, "text", "h")
             .await
             .unwrap();
-        repo.create_segment("b1", &ch.id, "h", 0, "default", None, None, None, None, None)
-            .await
-            .unwrap();
+        repo.create_segment(
+            "b1", &ch.id, "h", 0, "default", None, None, None, None, None,
+        )
+        .await
+        .unwrap();
 
         repo.mark_segments_stale(&ch.id).await.unwrap();
 
@@ -604,9 +606,11 @@ mod tests {
 
         assert!(!repo.has_active_segments(&ch.id, "h").await.unwrap());
 
-        repo.create_segment("b1", &ch.id, "h", 0, "default", None, None, None, None, None)
-            .await
-            .unwrap();
+        repo.create_segment(
+            "b1", &ch.id, "h", 0, "default", None, None, None, None, None,
+        )
+        .await
+        .unwrap();
 
         assert!(repo.has_active_segments(&ch.id, "h").await.unwrap());
         assert!(!repo

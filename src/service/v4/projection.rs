@@ -1,5 +1,6 @@
 use crate::storage::db::v4::cache_repo::CacheRepo;
 use crate::storage::db::v4::entity_repo::EntityRepo;
+use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::property_repo::PropertyRepo;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -49,10 +50,15 @@ pub async fn project_character_card(
     pool: &SqlitePool,
 ) -> anyhow::Result<CharacterCardView> {
     let cache_repo = CacheRepo::new(pool.clone());
+    let identity_repo = IdentityRepo::new(pool.clone());
+    let resolved_entity_id = identity_repo
+        .resolve_redirect_target(book_id, entity_id)
+        .await?
+        .unwrap_or_else(|| entity_id.to_string());
 
     // Try cache first
     if let Some(cached) = cache_repo
-        .get_cached(book_id, "character_card", entity_id, max_chapter)
+        .get_cached(book_id, "character_card", &resolved_entity_id, max_chapter)
         .await?
     {
         if let Ok(view) = serde_json::from_str::<CharacterCardView>(&cached) {
@@ -61,12 +67,18 @@ pub async fn project_character_card(
     }
 
     // Cache miss - project from DB
-    let view = project_character_card_from_db(entity_id, book_id, pool).await?;
+    let view = project_character_card_from_db(&resolved_entity_id, book_id, pool).await?;
 
     // Cache the result
     let payload = serde_json::to_string(&view)?;
     cache_repo
-        .set_cached(book_id, "character_card", entity_id, max_chapter, &payload)
+        .set_cached(
+            book_id,
+            "character_card",
+            &resolved_entity_id,
+            max_chapter,
+            &payload,
+        )
         .await?;
 
     Ok(view)
@@ -167,11 +179,19 @@ async fn project_character_list_from_db(
     pool: &SqlitePool,
 ) -> anyhow::Result<Vec<CharacterListItem>> {
     let entity_repo = EntityRepo::new(pool.clone());
+    let identity_repo = IdentityRepo::new(pool.clone());
 
     let entities = entity_repo.list_by_book(book_id).await?;
     let mut items = Vec::new();
 
     for entity in entities {
+        if identity_repo
+            .resolve_redirect_target(book_id, &entity.id)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
         let aliases = entity_repo.list_aliases_by_entity(&entity.id).await?;
         let alias_names: Vec<String> = aliases.iter().map(|a| a.alias.clone()).collect();
 
@@ -327,6 +347,63 @@ mod tests {
         // Sorted by importance DESC
         assert_eq!(list[0].name, "张三");
         assert_eq!(list[1].name, "李四");
+    }
+
+    #[tokio::test]
+    async fn project_character_card_resolves_active_redirect_to_survivor() {
+        let (pool, entity_repo, _property_repo) = setup().await;
+
+        let victim = entity_repo
+            .create_entity("b1", "character", "黑衣人", "黑衣人", None, 0.6, 2)
+            .await
+            .unwrap();
+        let survivor = entity_repo
+            .create_entity("b1", "character", "张三", "张三", Some("真身"), 0.9, 1)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE entities SET status = 'merged' WHERE id = ?")
+            .bind(&victim.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let source_claim_id = uuid::Uuid::new_v4().to_string();
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES (?, 'b1', 2, 'identity_reveal', '黑衣人 is 张三', ?, ?, 0.96, 'high', 'accepted', datetime('now'), datetime('now'))")
+            .bind(&source_claim_id)
+            .bind(&span_id.0)
+            .bind(&run_id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::storage::db::v4::identity_repo::IdentityRepo::new(pool.clone())
+            .create_identity_link(
+                "b1",
+                &victim.id,
+                &survivor.id,
+                "redirect",
+                0.96,
+                &source_claim_id,
+                "active",
+            )
+            .await
+            .unwrap();
+
+        let card = project_character_card(&victim.id, "b1", 10, &pool)
+            .await
+            .unwrap();
+
+        assert_eq!(card.id, survivor.id);
+        assert_eq!(card.name, "张三");
+        assert_eq!(card.summary.as_deref(), Some("真身"));
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 use crate::service::v4::extractor::{Observation, RiskLevel};
-use crate::service::v4::resolver::{Resolution, ResolvedObservation};
+use crate::service::v4::resolver::ResolvedObservation;
 use crate::storage::db::v4::chapter_repo::ChapterRepo;
 use crate::storage::db::v4::claim_repo::{ClaimRecord, ClaimRepo};
 
@@ -72,6 +72,10 @@ pub async fn write_claims(
                     // RelationshipUpdate always enters Relationship Judge (status="proposed"),
                     // never quarantined or uncertain — it's a Phase 2 special high-risk path.
                     Observation::RelationshipUpdate { .. } => "proposed",
+                    // KnowledgeAssertion always enters Knowledge Revision Judge; risk is
+                    // observability/priority only and must not bypass the Phase 4 path.
+                    Observation::KnowledgeAssertion { .. } => "proposed",
+                    _ if is_identity_observation(&obs.observation) => "proposed",
                     _ => match obs.risk_level {
                         RiskLevel::High => {
                             // High risk: quarantine or mark uncertain
@@ -139,6 +143,11 @@ fn get_claim_type(obs: &Observation) -> String {
         Observation::Alias { .. } => "alias".to_string(),
         Observation::PropertyUpdate { .. } => "property_update".to_string(),
         Observation::RelationshipUpdate { .. } => "relationship_update".to_string(),
+        Observation::KnowledgeAssertion { .. } => "knowledge_assertion".to_string(),
+        Observation::IdentityReveal { .. } => "identity_reveal".to_string(),
+        Observation::EntityMergeCandidate { .. } => "entity_merge_candidate".to_string(),
+        Observation::EntitySplitCandidate { .. } => "entity_split_candidate".to_string(),
+        Observation::NotSameIdentity { .. } => "not_same_identity".to_string(),
         Observation::MinorEvent { .. } => "minor_event".to_string(),
         Observation::Summary { .. } => unreachable!("Summary should not create claims"),
     }
@@ -151,6 +160,11 @@ fn get_confidence(obs: &Observation) -> f64 {
         | Observation::Alias { confidence, .. }
         | Observation::PropertyUpdate { confidence, .. }
         | Observation::RelationshipUpdate { confidence, .. }
+        | Observation::KnowledgeAssertion { confidence, .. }
+        | Observation::IdentityReveal { confidence, .. }
+        | Observation::EntityMergeCandidate { confidence, .. }
+        | Observation::EntitySplitCandidate { confidence, .. }
+        | Observation::NotSameIdentity { confidence, .. }
         | Observation::MinorEvent { confidence, .. } => *confidence,
         Observation::Summary { .. } => 0.0,
     }
@@ -161,6 +175,18 @@ fn get_object_mention(obs: &Observation) -> Option<String> {
     match obs {
         Observation::Alias { alias, .. } => Some(alias.clone()),
         Observation::RelationshipUpdate { object_mention, .. } => Some(object_mention.clone()),
+        Observation::IdentityReveal {
+            canonical_mention, ..
+        } => Some(canonical_mention.clone()),
+        Observation::EntityMergeCandidate {
+            entity_b_mention, ..
+        }
+        | Observation::EntitySplitCandidate {
+            entity_b_mention, ..
+        }
+        | Observation::NotSameIdentity {
+            entity_b_mention, ..
+        } => Some(entity_b_mention.clone()),
         _ => None,
     }
 }
@@ -199,6 +225,47 @@ fn build_predicate(obs: &Observation) -> String {
                 subject_mention, object_mention, relation_label
             )
         }
+        Observation::KnowledgeAssertion {
+            category,
+            topic,
+            assertion_text,
+            ..
+        } => format!("{}:{} — {}", category, topic, assertion_text),
+        Observation::IdentityReveal {
+            revealed_mention,
+            canonical_mention,
+            reveal_type,
+            ..
+        } => {
+            format!(
+                "{} is revealed as {} ({})",
+                revealed_mention, canonical_mention, reveal_type
+            )
+        }
+        Observation::EntityMergeCandidate {
+            entity_a_mention,
+            entity_b_mention,
+            ..
+        } => format!(
+            "{} may be the same identity as {}",
+            entity_a_mention, entity_b_mention
+        ),
+        Observation::EntitySplitCandidate {
+            entity_a_mention,
+            entity_b_mention,
+            ..
+        } => format!(
+            "{} may have been merged with {}",
+            entity_a_mention, entity_b_mention
+        ),
+        Observation::NotSameIdentity {
+            entity_a_mention,
+            entity_b_mention,
+            ..
+        } => format!(
+            "{} is not the same identity as {}",
+            entity_a_mention, entity_b_mention
+        ),
         Observation::MinorEvent { description, .. } => description.clone(),
         Observation::Summary { .. } => unreachable!(),
     }
@@ -250,8 +317,94 @@ fn get_value_fields(obs: &Observation) -> (Option<String>, Option<String>) {
             });
             (None, Some(json.to_string()))
         }
+        Observation::KnowledgeAssertion {
+            category,
+            topic,
+            assertion_text,
+            importance_score,
+            referenced_entity_mentions,
+            status_hint,
+            reason_hint,
+            ..
+        } => {
+            let json = serde_json::json!({
+                "category": category,
+                "raw_topic": topic,
+                "topic_display": topic,
+                "assertion_text": assertion_text,
+                "importance_score": importance_score,
+                "referenced_entity_mentions": referenced_entity_mentions,
+                "status_hint": status_hint,
+                "reason_hint": reason_hint,
+            });
+            (Some(assertion_text.clone()), Some(json.to_string()))
+        }
+        Observation::IdentityReveal {
+            reveal_type,
+            reason_hint,
+            ..
+        } => {
+            let json = build_identity_payload(
+                "same_identity",
+                reason_hint.as_deref(),
+                Some(("reveal_type", reveal_type.as_str())),
+            );
+            (reason_hint.clone(), Some(json.to_string()))
+        }
+        Observation::EntityMergeCandidate { reason_hint, .. } => {
+            let json = build_identity_payload(
+                "same_identity",
+                reason_hint.as_deref(),
+                Some(("candidate_type", "entity_merge_candidate")),
+            );
+            (reason_hint.clone(), Some(json.to_string()))
+        }
+        Observation::EntitySplitCandidate { reason_hint, .. } => {
+            let json = build_identity_payload(
+                "mistaken_identity",
+                reason_hint.as_deref(),
+                Some(("candidate_type", "entity_split_candidate")),
+            );
+            (reason_hint.clone(), Some(json.to_string()))
+        }
+        Observation::NotSameIdentity { reason_hint, .. } => {
+            let json = build_identity_payload(
+                "not_same_identity",
+                reason_hint.as_deref(),
+                Some(("candidate_type", "not_same_identity")),
+            );
+            (reason_hint.clone(), Some(json.to_string()))
+        }
         _ => (None, None),
     }
+}
+
+fn is_identity_observation(obs: &Observation) -> bool {
+    matches!(
+        obs,
+        Observation::IdentityReveal { .. }
+            | Observation::EntityMergeCandidate { .. }
+            | Observation::EntitySplitCandidate { .. }
+            | Observation::NotSameIdentity { .. }
+    )
+}
+
+fn build_identity_payload(
+    identity_kind: &str,
+    reason_hint: Option<&str>,
+    variant_field: Option<(&str, &str)>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "reason_hint": reason_hint,
+        "identity_kind": identity_kind,
+        "judge_decision": serde_json::Value::Null,
+        "judge_confidence": serde_json::Value::Null,
+        "survivor_hint": serde_json::Value::Null,
+    });
+    if let Some((key, value)) = variant_field {
+        payload[key] = serde_json::Value::String(value.to_string());
+    }
+    payload
 }
 
 /// Check if an observation is critical high risk (should be quarantined vs uncertain).
@@ -275,6 +428,7 @@ fn is_critical_high_risk(obs: &Observation) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::v4::resolver::Resolution;
     use crate::storage::db;
     use sqlx::SqlitePool;
 
@@ -765,5 +919,201 @@ mod tests {
         assert_eq!(result.claims_created.len(), 1);
         assert_eq!(result.claims_created[0].status, "proposed");
         assert_eq!(result.claims_created[0].claim_type, "relationship_update");
+    }
+
+    #[tokio::test]
+    async fn identity_reveal_is_proposed_and_preserves_all_evidence_spans() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+
+        let span_id_1: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let chapter_id: (String,) =
+            sqlx::query_as("SELECT id FROM chapters WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let seg_id: (String,) =
+            sqlx::query_as("SELECT id FROM chapter_segments WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let span_id_2 = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES (?, 'b1', ?, 'hash', ?, 1, 10, 20, 'more text', datetime('now'))")
+            .bind(&span_id_2).bind(&chapter_id.0).bind(&seg_id.0).execute(&pool).await.unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::IdentityReveal {
+                revealed_mention: "黑衣人".to_string(),
+                canonical_mention: "张三".to_string(),
+                reveal_type: "disguise".to_string(),
+                reason_hint: Some("摘下面具".to_string()),
+                evidence_span_ids: vec![span_id_1.0.clone(), span_id_2.clone()],
+                confidence: 0.95,
+            },
+            subject_entity_id: Some("entity-shadow".to_string()),
+            object_entity_id: Some("entity-zhangsan".to_string()),
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::Uncertain,
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        let claim = &result.claims_created[0];
+        assert_eq!(claim.claim_type, "identity_reveal");
+        assert_eq!(claim.status, "proposed");
+        assert_eq!(claim.primary_source_span_id, span_id_1.0);
+        let spans = claim_repo.list_claim_spans(&claim.id).await.unwrap();
+        assert_eq!(spans.len(), 2);
+
+        let payload: serde_json::Value =
+            serde_json::from_str(claim.value_json.as_deref().expect("value_json")).unwrap();
+        assert_eq!(payload["identity_kind"], "same_identity");
+        assert_eq!(payload["reveal_type"], "disguise");
+        assert_eq!(payload["reason_hint"], "摘下面具");
+    }
+
+    #[tokio::test]
+    async fn not_same_identity_maps_to_proposed_claim_type() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::NotSameIdentity {
+                entity_a_mention: "此张三".to_string(),
+                entity_b_mention: "彼张三".to_string(),
+                reason_hint: Some("并非同一人".to_string()),
+                evidence_span_ids: vec![span_id.0.clone()],
+                confidence: 0.9,
+            },
+            subject_entity_id: Some("entity-a".to_string()),
+            object_entity_id: Some("entity-b".to_string()),
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::Uncertain,
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        let claim = &result.claims_created[0];
+        assert_eq!(claim.claim_type, "not_same_identity");
+        assert_eq!(claim.status, "proposed");
+        assert_eq!(claim.subject_entity_id.as_deref(), Some("entity-a"));
+        assert_eq!(claim.object_entity_id.as_deref(), Some("entity-b"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_assertion_creates_proposed_claim_with_complete_value_json() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::KnowledgeAssertion {
+                category: "power_system".to_string(),
+                topic: "修炼境界".to_string(),
+                assertion_text: "修炼境界分为炼气、筑基、金丹。".to_string(),
+                confidence: 0.9,
+                importance_score: 0.8,
+                evidence_span_ids: vec![span_id.0.clone()],
+                referenced_entity_mentions: vec![
+                    crate::service::v4::extractor::KnowledgeEntityMention {
+                        mention: "金丹".to_string(),
+                        entity_type_hint: Some("realm".to_string()),
+                        role: "realm".to_string(),
+                        confidence: 0.9,
+                        resolved_entity_id: None,
+                    },
+                    crate::service::v4::extractor::KnowledgeEntityMention {
+                        mention: "未解析实体".to_string(),
+                        entity_type_hint: None,
+                        role: "related".to_string(),
+                        confidence: 0.4,
+                        resolved_entity_id: None,
+                    },
+                ],
+                status_hint: Some("fact".to_string()),
+                reason_hint: Some("旁白说明境界体系".to_string()),
+            },
+            subject_entity_id: None,
+            object_entity_id: None,
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::Uncertain,
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        let claim = &result.claims_created[0];
+        assert_eq!(claim.claim_type, "knowledge_assertion");
+        assert_eq!(claim.status, "proposed");
+        assert_eq!(claim.risk_level, "high");
+        assert_eq!(claim.primary_source_span_id, span_id.0);
+        assert_eq!(
+            claim.value_text.as_deref(),
+            Some("修炼境界分为炼气、筑基、金丹。")
+        );
+
+        let value_json: serde_json::Value =
+            serde_json::from_str(claim.value_json.as_deref().unwrap()).unwrap();
+        assert_eq!(value_json["category"], "power_system");
+        assert_eq!(value_json["raw_topic"], "修炼境界");
+        assert_eq!(value_json["topic_display"], "修炼境界");
+        assert_eq!(
+            value_json["assertion_text"],
+            "修炼境界分为炼气、筑基、金丹。"
+        );
+        assert_eq!(value_json["status_hint"], "fact");
+        assert_eq!(value_json["importance_score"], 0.8);
+        assert_eq!(
+            value_json["referenced_entity_mentions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let links: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM claim_source_spans WHERE claim_id = ?")
+                .bind(&claim.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(links.0, 1);
     }
 }

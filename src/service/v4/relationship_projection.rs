@@ -1,5 +1,6 @@
 use crate::storage::db::v4::cache_repo::CacheRepo;
 use crate::storage::db::v4::entity_repo::EntityRepo;
+use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::relationship_repo::{
     RelationshipEventRepo, RelationshipRecord, RelationshipRepo,
 };
@@ -139,6 +140,35 @@ pub async fn project_relationship_list(
     Ok(view.edges)
 }
 
+pub async fn project_relationship_edges_for_character(
+    book_id: &str,
+    character_id: &str,
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<RelationshipEdge>> {
+    let rel_repo = RelationshipRepo::new(pool.clone());
+    let identity_repo = IdentityRepo::new(pool.clone());
+    let event_repo = RelationshipEventRepo::new(pool.clone());
+    let resolved_character_id = identity_repo
+        .resolve_redirect_target(book_id, character_id)
+        .await?
+        .unwrap_or_else(|| character_id.to_string());
+
+    let relationships = rel_repo.list_active_by_book(book_id).await?;
+    let mut edges = Vec::new();
+    for rel in relationships {
+        let Some(edge) =
+            build_edge_for_relationship_in_book(book_id, &rel, &event_repo, &identity_repo).await?
+        else {
+            continue;
+        };
+        if edge.source_id == resolved_character_id || edge.target_id == resolved_character_id {
+            edges.push(edge);
+        }
+    }
+
+    Ok(edges)
+}
+
 /// Build `RelationshipEdge` for a relationship record, fetching event count and latest claim ID.
 pub async fn build_edge_for_relationship(
     rel: &RelationshipRecord,
@@ -172,11 +202,22 @@ pub async fn build_edge_for_relationship(
     })
 }
 
-/// Invalidate relationship cache entries for a book.
-pub async fn invalidate_relationship_cache(
+pub async fn build_edge_for_relationship_in_book(
     book_id: &str,
-    pool: &SqlitePool,
-) -> anyhow::Result<()> {
+    rel: &RelationshipRecord,
+    event_repo: &RelationshipEventRepo,
+    identity_repo: &IdentityRepo,
+) -> anyhow::Result<Option<RelationshipEdge>> {
+    let Some(resolved) = resolve_relationship_redirects(book_id, rel, identity_repo).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        build_edge_for_relationship(&resolved, event_repo).await?,
+    ))
+}
+
+/// Invalidate relationship cache entries for a book.
+pub async fn invalidate_relationship_cache(book_id: &str, pool: &SqlitePool) -> anyhow::Result<()> {
     let cache_repo = CacheRepo::new(pool.clone());
     cache_repo
         .invalidate(book_id, RELATIONSHIP_GRAPH_CACHE_TYPE, BOOK_SCOPE_ID)
@@ -195,14 +236,23 @@ async fn project_relationship_graph_from_db(
 ) -> anyhow::Result<RelationshipGraphView> {
     let rel_repo = RelationshipRepo::new(pool.clone());
     let entity_repo = EntityRepo::new(pool.clone());
+    let identity_repo = IdentityRepo::new(pool.clone());
     let event_repo = RelationshipEventRepo::new(pool.clone());
 
     // Only active relationships
     let relationships = rel_repo.list_active_by_book(book_id).await?;
+    let mut resolved_relationships = Vec::new();
+    for rel in relationships {
+        if let Some(resolved) =
+            resolve_relationship_redirects(book_id, &rel, &identity_repo).await?
+        {
+            resolved_relationships.push(resolved);
+        }
+    }
 
     // Collect unique entity IDs
     let mut entity_ids: HashSet<String> = HashSet::new();
-    for rel in &relationships {
+    for rel in &resolved_relationships {
         entity_ids.insert(rel.subject_character_id.clone());
         entity_ids.insert(rel.object_character_id.clone());
     }
@@ -227,7 +277,7 @@ async fn project_relationship_graph_from_db(
     // Build edges with event info
     let mut edges = Vec::new();
     let mut groups: HashSet<String> = HashSet::new();
-    for rel in &relationships {
+    for rel in &resolved_relationships {
         groups.insert(rel.relation_group.clone());
         let edge = build_edge_for_relationship(rel, &event_repo).await?;
         edges.push(edge);
@@ -240,8 +290,32 @@ async fn project_relationship_graph_from_db(
         nodes,
         edges,
         groups: groups_vec,
-        total: relationships.len(),
+        total: resolved_relationships.len(),
     })
+}
+
+async fn resolve_relationship_redirects(
+    book_id: &str,
+    rel: &RelationshipRecord,
+    identity_repo: &IdentityRepo,
+) -> anyhow::Result<Option<RelationshipRecord>> {
+    let subject = identity_repo
+        .resolve_redirect_target(book_id, &rel.subject_character_id)
+        .await?
+        .unwrap_or_else(|| rel.subject_character_id.clone());
+    let object = identity_repo
+        .resolve_redirect_target(book_id, &rel.object_character_id)
+        .await?
+        .unwrap_or_else(|| rel.object_character_id.clone());
+
+    if subject == object {
+        return Ok(None);
+    }
+
+    let mut resolved = rel.clone();
+    resolved.subject_character_id = subject;
+    resolved.object_character_id = object;
+    Ok(Some(resolved))
 }
 
 #[cfg(test)]
@@ -250,8 +324,7 @@ mod tests {
     use crate::storage::db;
 
     async fn setup() -> SqlitePool {
-        let dir =
-            std::env::temp_dir().join(format!("reader-rel-proj-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("reader-rel-proj-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
         let pool = db::init_pool(&database_url).await.unwrap();
@@ -263,7 +336,15 @@ mod tests {
     async fn seed_full(pool: &SqlitePool, chapter: i64) -> (String, String, String) {
         let entity_repo = EntityRepo::new(pool.clone());
         let e1 = entity_repo
-            .create_entity("b1", "character", "Alice", "Alice", Some("protagonist"), 0.9, 1)
+            .create_entity(
+                "b1",
+                "character",
+                "Alice",
+                "Alice",
+                Some("protagonist"),
+                0.9,
+                1,
+            )
             .await
             .unwrap();
         entity_repo
@@ -307,8 +388,18 @@ mod tests {
         // Create relationship
         let rel = rel_repo
             .create_relationship(
-                "b1", &e1, &e2, "friendship", "friends", "undirected",
-                None, 0.5, "positive", 0.8, 0.7, 1,
+                "b1",
+                &e1,
+                &e2,
+                "friendship",
+                "friends",
+                "undirected",
+                None,
+                0.5,
+                "positive",
+                0.8,
+                0.7,
+                1,
             )
             .await
             .unwrap();
@@ -316,13 +407,24 @@ mod tests {
         // Create event
         ev_repo
             .create_event(
-                "b1", &rel.id, "established", "friendship", "friends",
-                None, Some(0.8), Some("positive"), 1, &claim_id, 0.9,
+                "b1",
+                &rel.id,
+                "established",
+                "friendship",
+                "friends",
+                None,
+                Some(0.8),
+                Some("positive"),
+                1,
+                &claim_id,
+                0.9,
             )
             .await
             .unwrap();
 
-        let graph = project_relationship_graph_from_db("b1", &pool).await.unwrap();
+        let graph = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap();
 
         // Should have 2 nodes (Alice and Bob)
         assert_eq!(graph.nodes.len(), 2);
@@ -358,20 +460,42 @@ mod tests {
 
         let rel = rel_repo
             .create_relationship(
-                "b1", &e1, &e2, "mentorship", "mentor-student", "directed",
-                Some("teaching"), 0.9, "positive", 0.9, 0.8, 1,
+                "b1",
+                &e1,
+                &e2,
+                "mentorship",
+                "mentor-student",
+                "directed",
+                Some("teaching"),
+                0.9,
+                "positive",
+                0.9,
+                0.8,
+                1,
             )
             .await
             .unwrap();
         ev_repo
             .create_event(
-                "b1", &rel.id, "established", "mentorship", "mentor-student",
-                Some("teaching"), Some(0.9), Some("positive"), 1, &claim_id, 0.95,
+                "b1",
+                &rel.id,
+                "established",
+                "mentorship",
+                "mentor-student",
+                Some("teaching"),
+                Some(0.9),
+                Some("positive"),
+                1,
+                &claim_id,
+                0.95,
             )
             .await
             .unwrap();
 
-        let edges = project_relationship_graph_from_db("b1", &pool).await.unwrap().edges;
+        let edges = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap()
+            .edges;
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].group, "mentorship");
     }
@@ -384,25 +508,333 @@ mod tests {
         let rel_repo = RelationshipRepo::new(pool.clone());
         let rel = rel_repo
             .create_relationship(
-                "b1", &e1, &e2, "rivalry", "rivals", "undirected",
-                None, 0.5, "negative", 0.7, 0.5, 1,
+                "b1",
+                &e1,
+                &e2,
+                "rivalry",
+                "rivals",
+                "undirected",
+                None,
+                0.5,
+                "negative",
+                0.7,
+                0.5,
+                1,
             )
             .await
             .unwrap();
 
         // Initially active
-        let graph = project_relationship_graph_from_db("b1", &pool).await.unwrap();
+        let graph = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap();
         assert_eq!(graph.total, 1);
 
         // Mark inactive
         rel_repo
-            .update_relationship(&rel.id, "former rivals", None, 0.5, "neutral", 0.5, 0.5, 1, 1, "inactive")
+            .update_relationship(
+                &rel.id,
+                "former rivals",
+                None,
+                0.5,
+                "neutral",
+                0.5,
+                0.5,
+                1,
+                1,
+                "inactive",
+            )
             .await
             .unwrap();
 
-        let graph = project_relationship_graph_from_db("b1", &pool).await.unwrap();
+        let graph = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap();
         assert_eq!(graph.total, 0);
         assert!(graph.edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn project_relationship_graph_resolves_redirected_victim_entities() {
+        let pool = setup().await;
+        let entity_repo = EntityRepo::new(pool.clone());
+        let rel_repo = RelationshipRepo::new(pool.clone());
+        let ev_repo = RelationshipEventRepo::new(pool.clone());
+
+        let victim = entity_repo
+            .create_entity("b1", "character", "黑衣人", "黑衣人", None, 0.6, 2)
+            .await
+            .unwrap();
+        let survivor = entity_repo
+            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+        let other = entity_repo
+            .create_entity("b1", "character", "李四", "李四", None, 0.7, 1)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE entities SET status = 'merged' WHERE id = ?")
+            .bind(&victim.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let claim_id = {
+            let ch_id = uuid::Uuid::new_v4().to_string();
+            let seg_id = uuid::Uuid::new_v4().to_string();
+            let span_id = uuid::Uuid::new_v4().to_string();
+            let run_id = uuid::Uuid::new_v4().to_string();
+            let cid = uuid::Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES (?, 'b1', 2, 'text', 'hash', datetime('now'))")
+                .bind(&ch_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES (?, 'b1', ?, 'hash', 0, datetime('now'))")
+                .bind(&seg_id)
+                .bind(&ch_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES (?, 'b1', ?, 'hash', ?, 0, 0, 10, 'text', datetime('now'))")
+                .bind(&span_id)
+                .bind(&ch_id)
+                .bind(&seg_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES (?, 'b1', ?, 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+                .bind(&run_id)
+                .bind(&ch_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES (?, 'b1', 2, 'identity_reveal', '黑衣人 is 张三', ?, ?, 0.96, 'high', 'accepted', datetime('now'), datetime('now'))")
+                .bind(&cid)
+                .bind(&span_id)
+                .bind(&run_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            cid
+        };
+        crate::storage::db::v4::identity_repo::IdentityRepo::new(pool.clone())
+            .create_identity_link(
+                "b1",
+                &victim.id,
+                &survivor.id,
+                "redirect",
+                0.96,
+                &claim_id,
+                "active",
+            )
+            .await
+            .unwrap();
+        let rel = rel_repo
+            .create_relationship(
+                "b1",
+                &victim.id,
+                &other.id,
+                "alliance",
+                "盟友",
+                "directed",
+                Some("共同御敌"),
+                0.8,
+                "positive",
+                0.9,
+                0.9,
+                2,
+            )
+            .await
+            .unwrap();
+        ev_repo
+            .create_event(
+                "b1",
+                &rel.id,
+                "creation",
+                "alliance",
+                "盟友",
+                Some("共同御敌"),
+                Some(0.8),
+                Some("positive"),
+                2,
+                &claim_id,
+                0.9,
+            )
+            .await
+            .unwrap();
+
+        let graph = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap();
+
+        assert!(graph.nodes.iter().all(|node| node.id != victim.id));
+        assert!(graph.nodes.iter().any(|node| node.id == survivor.id));
+        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.edges[0].source_id, survivor.id);
+        assert_eq!(graph.edges[0].target_id, other.id);
+    }
+
+    #[tokio::test]
+    async fn build_edge_for_relationship_in_book_resolves_redirected_victim_entity() {
+        let pool = setup().await;
+        let entity_repo = EntityRepo::new(pool.clone());
+        let rel_repo = RelationshipRepo::new(pool.clone());
+        let ev_repo = RelationshipEventRepo::new(pool.clone());
+        let identity_repo = crate::storage::db::v4::identity_repo::IdentityRepo::new(pool.clone());
+
+        let victim = entity_repo
+            .create_entity("b1", "character", "黑衣人", "黑衣人", None, 0.6, 2)
+            .await
+            .unwrap();
+        let survivor = entity_repo
+            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+        let other = entity_repo
+            .create_entity("b1", "character", "李四", "李四", None, 0.7, 1)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE entities SET status = 'merged' WHERE id = ?")
+            .bind(&victim.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_e1, _e2, claim_id) = seed_full(&pool, 2).await;
+        identity_repo
+            .create_identity_link(
+                "b1",
+                &victim.id,
+                &survivor.id,
+                "redirect",
+                0.96,
+                &claim_id,
+                "active",
+            )
+            .await
+            .unwrap();
+        let rel = rel_repo
+            .create_relationship(
+                "b1",
+                &victim.id,
+                &other.id,
+                "alliance",
+                "盟友",
+                "directed",
+                Some("共同御敌"),
+                0.8,
+                "positive",
+                0.9,
+                0.9,
+                2,
+            )
+            .await
+            .unwrap();
+        ev_repo
+            .create_event(
+                "b1",
+                &rel.id,
+                "creation",
+                "alliance",
+                "盟友",
+                Some("共同御敌"),
+                Some(0.8),
+                Some("positive"),
+                2,
+                &claim_id,
+                0.9,
+            )
+            .await
+            .unwrap();
+
+        let edge = build_edge_for_relationship_in_book("b1", &rel, &ev_repo, &identity_repo)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(edge.source_id, survivor.id);
+        assert_eq!(edge.target_id, other.id);
+    }
+
+    #[tokio::test]
+    async fn project_relationship_edges_for_character_includes_redirected_victim_edges() {
+        let pool = setup().await;
+        let entity_repo = EntityRepo::new(pool.clone());
+        let rel_repo = RelationshipRepo::new(pool.clone());
+        let ev_repo = RelationshipEventRepo::new(pool.clone());
+        let identity_repo = crate::storage::db::v4::identity_repo::IdentityRepo::new(pool.clone());
+
+        let victim = entity_repo
+            .create_entity("b1", "character", "黑衣人", "黑衣人", None, 0.6, 2)
+            .await
+            .unwrap();
+        let survivor = entity_repo
+            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+        let other = entity_repo
+            .create_entity("b1", "character", "李四", "李四", None, 0.7, 1)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE entities SET status = 'merged' WHERE id = ?")
+            .bind(&victim.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_e1, _e2, claim_id) = seed_full(&pool, 2).await;
+        identity_repo
+            .create_identity_link(
+                "b1",
+                &victim.id,
+                &survivor.id,
+                "redirect",
+                0.96,
+                &claim_id,
+                "active",
+            )
+            .await
+            .unwrap();
+        let rel = rel_repo
+            .create_relationship(
+                "b1",
+                &victim.id,
+                &other.id,
+                "alliance",
+                "盟友",
+                "directed",
+                Some("共同御敌"),
+                0.8,
+                "positive",
+                0.9,
+                0.9,
+                2,
+            )
+            .await
+            .unwrap();
+        ev_repo
+            .create_event(
+                "b1",
+                &rel.id,
+                "creation",
+                "alliance",
+                "盟友",
+                Some("共同御敌"),
+                Some(0.8),
+                Some("positive"),
+                2,
+                &claim_id,
+                0.9,
+            )
+            .await
+            .unwrap();
+
+        let edges = project_relationship_edges_for_character("b1", &survivor.id, &pool)
+            .await
+            .unwrap();
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source_id, survivor.id);
+        assert_eq!(edges[0].target_id, other.id);
     }
 
     #[tokio::test]
@@ -425,15 +857,33 @@ mod tests {
             .unwrap();
 
         rel_repo
-            .create_relationship("b1", &e1.id, &e2.id, "friendship", "friends", "undirected", None, 0.5, "positive", 0.8, 0.7, 1)
+            .create_relationship(
+                "b1",
+                &e1.id,
+                &e2.id,
+                "friendship",
+                "friends",
+                "undirected",
+                None,
+                0.5,
+                "positive",
+                0.8,
+                0.7,
+                1,
+            )
             .await
             .unwrap();
         rel_repo
-            .create_relationship("b1", &e1.id, &e3.id, "rivalry", "rivals", "directed", None, 0.5, "negative", 0.7, 0.6, 1)
+            .create_relationship(
+                "b1", &e1.id, &e3.id, "rivalry", "rivals", "directed", None, 0.5, "negative", 0.7,
+                0.6, 1,
+            )
             .await
             .unwrap();
 
-        let graph = project_relationship_graph_from_db("b1", &pool).await.unwrap();
+        let graph = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap();
         assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.edges.len(), 2);
         assert_eq!(graph.groups.len(), 2);
@@ -449,7 +899,20 @@ mod tests {
 
         let rel_repo = RelationshipRepo::new(pool.clone());
         rel_repo
-            .create_relationship("b1", &e1, &e2, "family", "siblings", "undirected", None, 0.5, "positive", 0.9, 0.8, 1)
+            .create_relationship(
+                "b1",
+                &e1,
+                &e2,
+                "family",
+                "siblings",
+                "undirected",
+                None,
+                0.5,
+                "positive",
+                0.9,
+                0.8,
+                1,
+            )
             .await
             .unwrap();
 
@@ -477,7 +940,20 @@ mod tests {
 
         let rel_repo = RelationshipRepo::new(pool.clone());
         rel_repo
-            .create_relationship("b1", &e1, &e2, "alliance", "allies", "undirected", None, 0.5, "positive", 0.7, 0.6, 1)
+            .create_relationship(
+                "b1",
+                &e1,
+                &e2,
+                "alliance",
+                "allies",
+                "undirected",
+                None,
+                0.5,
+                "positive",
+                0.7,
+                0.6,
+                1,
+            )
             .await
             .unwrap();
 
@@ -504,7 +980,20 @@ mod tests {
 
         let rel_repo = RelationshipRepo::new(pool.clone());
         rel_repo
-            .create_relationship("b1", &e1, &e2, "friendship", "friends", "undirected", None, 0.5, "positive", 0.8, 0.7, 1)
+            .create_relationship(
+                "b1",
+                &e1,
+                &e2,
+                "friendship",
+                "friends",
+                "undirected",
+                None,
+                0.5,
+                "positive",
+                0.8,
+                0.7,
+                1,
+            )
             .await
             .unwrap();
 
@@ -563,8 +1052,18 @@ mod tests {
 
         let rel = rel_repo
             .create_relationship(
-                "b1", &e1, &e2, "friendship", "friends", "undirected",
-                None, 0.5, "positive", 0.8, 0.7, 1,
+                "b1",
+                &e1,
+                &e2,
+                "friendship",
+                "friends",
+                "undirected",
+                None,
+                0.5,
+                "positive",
+                0.8,
+                0.7,
+                1,
             )
             .await
             .unwrap();
@@ -572,8 +1071,17 @@ mod tests {
         // First event
         ev_repo
             .create_event(
-                "b1", &rel.id, "established", "friendship", "friends",
-                None, Some(0.8), Some("positive"), 1, &claim_id1, 0.9,
+                "b1",
+                &rel.id,
+                "established",
+                "friendship",
+                "friends",
+                None,
+                Some(0.8),
+                Some("positive"),
+                1,
+                &claim_id1,
+                0.9,
             )
             .await
             .unwrap();
@@ -601,13 +1109,24 @@ mod tests {
 
         ev_repo
             .create_event(
-                "b1", &rel.id, "update", "friendship", "close friends",
-                Some("close"), Some(0.9), Some("positive"), 2, &claim_id2, 0.95,
+                "b1",
+                &rel.id,
+                "update",
+                "friendship",
+                "close friends",
+                Some("close"),
+                Some(0.9),
+                Some("positive"),
+                2,
+                &claim_id2,
+                0.95,
             )
             .await
             .unwrap();
 
-        let graph = project_relationship_graph_from_db("b1", &pool).await.unwrap();
+        let graph = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap();
         assert_eq!(graph.edges.len(), 1);
 
         let edge = &graph.edges[0];

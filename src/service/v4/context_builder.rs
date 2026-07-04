@@ -1,5 +1,5 @@
 use crate::storage::db::v4::entity_repo::EntityRepo;
-use crate::storage::db::v4::property_repo::PropertyRepo;
+use crate::storage::db::v4::knowledge_repo::KnowledgeRepo;
 use sqlx::SqlitePool;
 
 /// Builds context for AI extraction from book state.
@@ -58,6 +58,12 @@ impl ContextBuilder {
         let rels_context = self.get_relationships_context(book_id).await?;
         if !rels_context.is_empty() {
             parts.push(format!("## Existing Relationships\n{}", rels_context));
+        }
+
+        // 7. Related world knowledge summaries
+        let knowledge_context = self.get_knowledge_context(book_id).await?;
+        if !knowledge_context.is_empty() {
+            parts.push(format!("## Known Knowledge\n{}", knowledge_context));
         }
 
         Ok(parts.join("\n\n"))
@@ -155,10 +161,38 @@ impl ContextBuilder {
 
         let mut lines = Vec::new();
         for (subj, obj, group, label, state) in &rows {
-            let state_str = if state.is_empty() { String::new() } else { format!(" — {}", state) };
-            lines.push(format!("- {} ↔ {} [{}] {}{}", subj, obj, group, label, state_str));
+            let state_str = if state.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", state)
+            };
+            lines.push(format!(
+                "- {} ↔ {} [{}] {}{}",
+                subj, obj, group, label, state_str
+            ));
         }
 
+        Ok(lines.join("\n"))
+    }
+
+    async fn get_knowledge_context(&self, book_id: &str) -> anyhow::Result<String> {
+        let knowledge_repo = KnowledgeRepo::new(self.pool.clone());
+        let cards = knowledge_repo
+            .list_cards(book_id, None, Some("active"))
+            .await?;
+        if cards.is_empty() {
+            return Ok(String::new());
+        }
+
+        let lines: Vec<String> = cards
+            .iter()
+            .filter_map(|card| {
+                card.current_summary.as_ref().map(|summary| {
+                    format!("- [{}] {} — {}", card.category, card.topic_display, summary)
+                })
+            })
+            .take(12)
+            .collect();
         Ok(lines.join("\n"))
     }
 }
@@ -184,10 +218,29 @@ You are extracting structured observations from a novel chapter segment. Output 
    - Only extract CHARACTER-to-CHARACTER relationships. Do NOT extract person-place, person-ability, person-equipment, or person-realm relationships.
    - Only extract long-term or significant relationships. Skip fleeting interactions.
 
-5. **MinorEvent** — A noteworthy event that doesn't change entity state
+5. **identity_reveal** — Explicit evidence that two mentions are the same real character
+   - type: "identity_reveal"
+   - revealed_mention, canonical_mention, reveal_type, reason_hint, evidence_span_ids, confidence
+   - reveal_type must be one of: true_name, disguise, title_reveal, alias_reveal, identity_confirmation, mistaken_identity_correction
+   - Use this only for explicit same-person evidence, not ordinary aliasing.
+
+6. **entity_merge_candidate** — Explicit candidate that two entity mentions are the same person
+   - type: "entity_merge_candidate"
+   - entity_a_mention, entity_b_mention, reason_hint, evidence_span_ids, confidence
+   - Do NOT emit this for mere name similarity, same sect, or same realm.
+
+7. **entity_split_candidate** — Signal that a canonical identity may have been merged incorrectly
+   - type: "entity_split_candidate"
+   - entity_a_mention, entity_b_mention, reason_hint, evidence_span_ids, confidence
+
+8. **not_same_identity** — Explicit evidence that two mentions are not the same person
+   - type: "not_same_identity"
+   - entity_a_mention, entity_b_mention, reason_hint, evidence_span_ids, confidence
+
+9. **MinorEvent** — A noteworthy event that doesn't change entity state
    - description, involved_mentions, evidence_span_ids, confidence
 
-6. **Summary** — Chapter summary (only one per chapter)
+10. **Summary** — Chapter summary (only one per chapter)
    - summary, key_points, has_important_changes
 
 Rules:
@@ -195,12 +248,18 @@ Rules:
 - evidence_span_ids: IDs of source spans supporting this observation
 - confidence: 0.0-1.0
 - Do NOT invent entities that are not clearly introduced in the text
-- Do NOT make death/resurrection claims unless explicitly stated"#;
+- Do NOT make death/resurrection claims unless explicitly stated
+- “张三又名张三丰” -> alias / name property, not merge by default
+- “张三被称为剑魔” -> title / alias, not merge
+- “黑衣人摘下面具，竟是张三” -> identity_reveal, merge candidate
+- “白发老者正是李真人” -> identity_reveal, merge candidate
+- “此张三并非彼张三” -> not_same_identity"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::db;
+    use crate::storage::db::v4::property_repo::PropertyRepo;
 
     async fn setup() -> (SqlitePool, ContextBuilder) {
         let dir = std::env::temp_dir().join(format!("reader-v4-context-{}", uuid::Uuid::new_v4()));
@@ -433,5 +492,48 @@ mod tests {
         assert!(ctx.contains("张三"), "should contain subject name");
         assert!(ctx.contains("李四"), "should contain object name");
         assert!(ctx.contains("friendship"), "should contain relation group");
+    }
+
+    #[tokio::test]
+    async fn build_context_contains_related_knowledge_summaries() {
+        let (pool, builder) = setup().await;
+        let knowledge_repo =
+            crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
+        knowledge_repo
+            .find_or_create_card(
+                "book1",
+                "power_system",
+                "cultivation-realms",
+                "修炼境界",
+                Some("修炼境界分为炼气、筑基、金丹。"),
+                0.9,
+                0.8,
+                1,
+            )
+            .await
+            .unwrap();
+
+        let ctx = builder.build_context("book1", 2, "本章内容").await.unwrap();
+        assert!(ctx.contains("Known Knowledge"));
+        assert!(ctx.contains("power_system"));
+        assert!(ctx.contains("修炼境界"));
+        assert!(ctx.contains("修炼境界分为炼气、筑基、金丹。"));
+    }
+
+    #[tokio::test]
+    async fn build_context_schema_brief_mentions_identity_observations() {
+        let (_pool, builder) = setup().await;
+        let ctx = builder
+            .build_context("book1", 1, "黑衣人摘下面具")
+            .await
+            .unwrap();
+
+        assert!(ctx.contains("identity_reveal"));
+        assert!(ctx.contains("entity_merge_candidate"));
+        assert!(ctx.contains("entity_split_candidate"));
+        assert!(ctx.contains("not_same_identity"));
+        assert!(ctx.contains("张三又名张三丰"));
+        assert!(ctx.contains("黑衣人摘下面具，竟是张三"));
+        assert!(ctx.contains("此张三并非彼张三"));
     }
 }

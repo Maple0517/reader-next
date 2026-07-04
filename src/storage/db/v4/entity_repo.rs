@@ -671,7 +671,10 @@ mod tests {
         let result = repo
             .create_entity("book1", "character", "张三", "张三改", None, 0.5, 2)
             .await;
-        assert!(result.is_err(), "duplicate entity should be rejected by UNIQUE constraint");
+        assert!(
+            result.is_err(),
+            "duplicate entity should be rejected by UNIQUE constraint"
+        );
     }
 
     #[tokio::test]

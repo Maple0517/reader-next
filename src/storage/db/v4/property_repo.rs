@@ -809,23 +809,33 @@ mod tests {
         assert_eq!(prop2.value_text.as_deref(), Some("筑基期"));
 
         // Old should be superseded
-        let old_prop =
-            sqlx::query_as::<_, (String, Option<i64>)>("SELECT status, valid_to_chapter FROM entity_properties WHERE id = ?")
-                .bind(&prop1.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let old_prop = sqlx::query_as::<_, (String, Option<i64>)>(
+            "SELECT status, valid_to_chapter FROM entity_properties WHERE id = ?",
+        )
+        .bind(&prop1.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(old_prop.0, "superseded");
-        assert_eq!(old_prop.1, Some(4), "valid_to_chapter should be new.valid_from_chapter - 1");
+        assert_eq!(
+            old_prop.1,
+            Some(4),
+            "valid_to_chapter should be new.valid_from_chapter - 1"
+        );
 
         // New property should have supersedes_property_id pointing to old
-        let new_prop =
-            sqlx::query_as::<_, (Option<String>,)>("SELECT supersedes_property_id FROM entity_properties WHERE id = ?")
-                .bind(&prop2.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(new_prop.0, Some(prop1.id.clone()), "new property should reference superseded property");
+        let new_prop = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT supersedes_property_id FROM entity_properties WHERE id = ?",
+        )
+        .bind(&prop2.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            new_prop.0,
+            Some(prop1.id.clone()),
+            "new property should reference superseded property"
+        );
 
         // Current should be new value
         let current = prop_repo

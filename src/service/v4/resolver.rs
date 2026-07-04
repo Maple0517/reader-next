@@ -165,7 +165,10 @@ pub async fn resolve(
                     find_entity_for_mention(entity_repo, book_id, object_mention).await;
 
                 let (subject_id, resolution) = match subject_entity {
-                    Some(e) => (Some(e.id.clone()), Resolution::MatchExisting { entity_id: e.id }),
+                    Some(e) => (
+                        Some(e.id.clone()),
+                        Resolution::MatchExisting { entity_id: e.id },
+                    ),
                     None => (None, Resolution::CreateNew),
                 };
 
@@ -179,8 +182,90 @@ pub async fn resolve(
                 }
             }
 
-            Observation::MinorEvent { .. }
-            | Observation::Summary { .. } => ResolvedObservation {
+            Observation::IdentityReveal {
+                revealed_mention,
+                canonical_mention,
+                ..
+            } => {
+                let (subject_id, object_id, resolution) = resolve_identity_pair(
+                    entity_repo,
+                    book_id,
+                    revealed_mention,
+                    canonical_mention,
+                )
+                .await;
+
+                ResolvedObservation {
+                    observation: obs.clone(),
+                    subject_entity_id: subject_id,
+                    object_entity_id: object_id,
+                    resolved_dimension_key: None,
+                    risk_level,
+                    resolution,
+                }
+            }
+
+            Observation::EntityMergeCandidate {
+                entity_a_mention,
+                entity_b_mention,
+                ..
+            }
+            | Observation::EntitySplitCandidate {
+                entity_a_mention,
+                entity_b_mention,
+                ..
+            }
+            | Observation::NotSameIdentity {
+                entity_a_mention,
+                entity_b_mention,
+                ..
+            } => {
+                let (subject_id, object_id, resolution) =
+                    resolve_identity_pair(entity_repo, book_id, entity_a_mention, entity_b_mention)
+                        .await;
+
+                ResolvedObservation {
+                    observation: obs.clone(),
+                    subject_entity_id: subject_id,
+                    object_entity_id: object_id,
+                    resolved_dimension_key: None,
+                    risk_level,
+                    resolution,
+                }
+            }
+
+            Observation::KnowledgeAssertion {
+                referenced_entity_mentions,
+                ..
+            } => {
+                let mut updated = obs.clone();
+                if let Observation::KnowledgeAssertion {
+                    referenced_entity_mentions: updated_mentions,
+                    ..
+                } = &mut updated
+                {
+                    for (target, source) in updated_mentions
+                        .iter_mut()
+                        .zip(referenced_entity_mentions.iter())
+                    {
+                        target.resolved_entity_id =
+                            find_entity_for_mention(entity_repo, book_id, &source.mention)
+                                .await
+                                .map(|entity| entity.id);
+                    }
+                }
+
+                ResolvedObservation {
+                    observation: updated,
+                    subject_entity_id: None,
+                    object_entity_id: None,
+                    resolved_dimension_key: None,
+                    risk_level,
+                    resolution: Resolution::Uncertain,
+                }
+            }
+
+            Observation::MinorEvent { .. } | Observation::Summary { .. } => ResolvedObservation {
                 observation: obs.clone(),
                 subject_entity_id: None,
                 object_entity_id: None,
@@ -213,6 +298,30 @@ async fn find_entity_for_mention(
     }
 
     None
+}
+
+async fn resolve_identity_pair(
+    entity_repo: &EntityRepo,
+    book_id: &str,
+    left_mention: &str,
+    right_mention: &str,
+) -> (Option<String>, Option<String>, Resolution) {
+    let left = find_entity_for_mention(entity_repo, book_id, left_mention).await;
+    let right = find_entity_for_mention(entity_repo, book_id, right_mention).await;
+
+    let resolution = if let Some(entity) = left.as_ref() {
+        Resolution::MatchExisting {
+            entity_id: entity.id.clone(),
+        }
+    } else if let Some(entity) = right.as_ref() {
+        Resolution::MatchExisting {
+            entity_id: entity.id.clone(),
+        }
+    } else {
+        Resolution::Uncertain
+    };
+
+    (left.map(|e| e.id), right.map(|e| e.id), resolution)
 }
 
 /// Retrieves candidate entities for a mention.
@@ -488,7 +597,12 @@ mod tests {
         assert_eq!(results.len(), 1);
         let r = &results[0];
         assert_eq!(r.subject_entity_id, Some(subject.id.clone()));
-        assert_eq!(r.resolution, Resolution::MatchExisting { entity_id: subject.id });
+        assert_eq!(
+            r.resolution,
+            Resolution::MatchExisting {
+                entity_id: subject.id
+            }
+        );
     }
 
     #[tokio::test]
@@ -562,5 +676,110 @@ mod tests {
         let obs = make_relationship_obs("张三", "李四");
         let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
         assert_eq!(results[0].risk_level, RiskLevel::High);
+    }
+
+    #[tokio::test]
+    async fn identity_reveal_best_effort_resolves_both_sides() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        let revealed = entity_repo
+            .create_entity("book1", "character", "黑衣人", "黑衣人", None, 0.6, 1)
+            .await
+            .unwrap();
+        let canonical = entity_repo
+            .create_entity("book1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+
+        let obs = Observation::IdentityReveal {
+            revealed_mention: "黑衣人".to_string(),
+            canonical_mention: "张三".to_string(),
+            reveal_type: "disguise".to_string(),
+            reason_hint: Some("摘下面具".to_string()),
+            evidence_span_ids: vec!["s1".to_string()],
+            confidence: 0.95,
+        };
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        let resolved = &results[0];
+
+        assert_eq!(resolved.subject_entity_id, Some(revealed.id));
+        assert_eq!(resolved.object_entity_id, Some(canonical.id));
+        assert_eq!(resolved.risk_level, RiskLevel::High);
+    }
+
+    #[tokio::test]
+    async fn not_same_identity_keeps_unresolved_side_in_ledger() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        let left = entity_repo
+            .create_entity("book1", "character", "此张三", "此张三", None, 0.7, 1)
+            .await
+            .unwrap();
+
+        let obs = Observation::NotSameIdentity {
+            entity_a_mention: "此张三".to_string(),
+            entity_b_mention: "彼张三".to_string(),
+            reason_hint: Some("并非同一人".to_string()),
+            evidence_span_ids: vec!["s1".to_string()],
+            confidence: 0.88,
+        };
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        let resolved = &results[0];
+
+        assert_eq!(resolved.subject_entity_id, Some(left.id));
+        assert_eq!(resolved.object_entity_id, None);
+        assert_eq!(resolved.risk_level, RiskLevel::High);
+    }
+
+    #[tokio::test]
+    async fn knowledge_assertion_resolves_referenced_entities_best_effort() {
+        let (_pool, _retriever, entity_repo) = setup().await;
+        let realm = entity_repo
+            .create_entity("book1", "realm", "金丹", "金丹", None, 0.8, 1)
+            .await
+            .unwrap();
+
+        let obs = Observation::KnowledgeAssertion {
+            category: "power_system".to_string(),
+            topic: "修炼境界".to_string(),
+            assertion_text: "修炼境界包括金丹。".to_string(),
+            confidence: 0.9,
+            importance_score: 0.8,
+            evidence_span_ids: vec!["s1".to_string()],
+            referenced_entity_mentions: vec![
+                crate::service::v4::extractor::KnowledgeEntityMention {
+                    mention: "金丹".to_string(),
+                    entity_type_hint: Some("realm".to_string()),
+                    role: "realm".to_string(),
+                    confidence: 0.9,
+                    resolved_entity_id: None,
+                },
+                crate::service::v4::extractor::KnowledgeEntityMention {
+                    mention: "未出现概念".to_string(),
+                    entity_type_hint: Some("concept".to_string()),
+                    role: "related".to_string(),
+                    confidence: 0.4,
+                    resolved_entity_id: None,
+                },
+            ],
+            status_hint: Some("fact".to_string()),
+            reason_hint: None,
+        };
+
+        let results = resolve(&[obs], &entity_repo, "book1").await.unwrap();
+        let resolved = &results[0];
+        match &resolved.observation {
+            Observation::KnowledgeAssertion {
+                referenced_entity_mentions,
+                ..
+            } => {
+                assert_eq!(
+                    referenced_entity_mentions[0].resolved_entity_id.as_deref(),
+                    Some(realm.id.as_str())
+                );
+                assert_eq!(referenced_entity_mentions[1].resolved_entity_id, None);
+            }
+            _ => panic!("expected knowledge assertion"),
+        }
+        assert_eq!(resolved.risk_level, RiskLevel::High);
+        assert_eq!(resolved.resolution, Resolution::Uncertain);
     }
 }

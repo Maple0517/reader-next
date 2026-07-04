@@ -8,6 +8,12 @@ import type {
   V4MemoryStatusResponse,
   V4RelationshipGraphView,
   V4CharacterRelationshipsResponse,
+  V4IdentityLinksResponse,
+  V4CharacterIdentityResponse,
+  V4MergeOperationsResponse,
+  V4KnowledgeOverviewView,
+  V4KnowledgeCategoryView,
+  V4KnowledgeCardDetailView,
 } from '../../types/v4'
 
 export function getV4Memory(bookUrl: string) {
@@ -60,4 +66,28 @@ export function getV4Relationships(bookUrl: string, params?: { group?: string; m
 
 export function getV4CharacterRelationships(bookUrl: string, characterId: string) {
   return v4Http.get<V4CharacterRelationshipsResponse>(`/characters/${encodeURIComponent(characterId)}/relationships`, { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4IdentityLinks(bookUrl: string) {
+  return v4Http.get<V4IdentityLinksResponse>('/identity-links', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4CharacterIdentity(bookUrl: string, characterId: string) {
+  return v4Http.get<V4CharacterIdentityResponse>(`/characters/${encodeURIComponent(characterId)}/identity`, { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4MergeOperations(bookUrl: string) {
+  return v4Http.get<V4MergeOperationsResponse>('/merge-operations', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4Knowledge(bookUrl: string) {
+  return v4Http.get<V4KnowledgeOverviewView>('/knowledge', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4KnowledgeCategory(bookUrl: string, category: string) {
+  return v4Http.get<V4KnowledgeCategoryView>(`/knowledge/categories/${encodeURIComponent(category)}`, { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4KnowledgeCard(bookUrl: string, cardId: string) {
+  return v4Http.get<V4KnowledgeCardDetailView>(`/knowledge/cards/${encodeURIComponent(cardId)}`, { params: { bookUrl } }).then((r) => r.data)
 }

@@ -1,12 +1,14 @@
+use crate::service::ai_model_service::AiModelService;
+use crate::service::v4::extractor::{
+    VALID_DIRECTIONALITIES, VALID_POLARITIES, VALID_RELATION_GROUPS,
+};
+use crate::storage::db::v4::ai_run_repo::AiRunRepo;
 use crate::storage::db::v4::claim_repo::{ClaimRecord, SourceSpanRecord};
 use crate::storage::db::v4::entity_repo::EntityRecord;
 use crate::storage::db::v4::property_repo::CurrentPropertyRecord;
 use crate::storage::db::v4::relationship_repo::RelationshipRecord;
-use crate::storage::db::v4::ai_run_repo::AiRunRepo;
-use crate::service::ai_model_service::AiModelService;
-use crate::service::v4::extractor::{VALID_RELATION_GROUPS, VALID_DIRECTIONALITIES, VALID_POLARITIES};
-use sqlx::SqlitePool;
 use crate::util::hash::md5_hex;
+use sqlx::SqlitePool;
 
 /// Structural confidence threshold: claims below this are rejected.
 pub const STRUCTURAL_CONFIDENCE_THRESHOLD: f64 = 0.3;
@@ -185,8 +187,8 @@ const JUDGE_SYSTEM_PROMPT: &str = "你是小说人物关系判断 agent。判断
 /// Normalize JSON value: convert string values for numeric fields to numbers.
 /// Handles cases where AI returns "strong"/"weak" etc. for strength/confidence/importance_score.
 fn normalize_judge_json(raw: &str) -> anyhow::Result<String> {
-    let mut v: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
     if let Some(obj) = v.as_object_mut() {
         for key in &["strength", "importance_score", "confidence"] {
             if let Some(val) = obj.get_mut(*key) {
@@ -194,7 +196,8 @@ fn normalize_judge_json(raw: &str) -> anyhow::Result<String> {
                     serde_json::Value::String(s) => {
                         if let Ok(n) = s.parse::<f64>() {
                             *val = serde_json::Value::Number(
-                                serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0)),
+                                serde_json::Number::from_f64(n)
+                                    .unwrap_or(serde_json::Number::from(0)),
                             );
                         } else {
                             let mapped = match s.to_lowercase().as_str() {
@@ -204,7 +207,8 @@ fn normalize_judge_json(raw: &str) -> anyhow::Result<String> {
                                 _ => 0.5,
                             };
                             *val = serde_json::Value::Number(
-                                serde_json::Number::from_f64(mapped).unwrap_or(serde_json::Number::from(0)),
+                                serde_json::Number::from_f64(mapped)
+                                    .unwrap_or(serde_json::Number::from(0)),
                             );
                         }
                     }
@@ -250,7 +254,10 @@ fn try_repair_judge_json(raw: &str) -> anyhow::Result<String> {
         // Find the colon or comma before the last key
         let before = &trimmed[..pos];
         if let Some(colon_pos) = before.rfind(':') {
-            let attempt = format!("{}}}", &trimmed[..colon_pos].trim_end_matches(',').trim_end());
+            let attempt = format!(
+                "{}}}",
+                &trimmed[..colon_pos].trim_end_matches(',').trim_end()
+            );
             if serde_json::from_str::<serde_json::Value>(&attempt).is_ok() {
                 return Ok(attempt);
             }
@@ -321,9 +328,9 @@ pub fn validate_judge_decision(
 ) -> anyhow::Result<()> {
     match output.decision {
         JudgeDecision::Accept => match object {
-            None => anyhow::bail!(
-                "Accept decision requires resolved object, but object is unresolved"
-            ),
+            None => {
+                anyhow::bail!("Accept decision requires resolved object, but object is unresolved")
+            }
             Some(obj) if obj.entity_type != "character" => {
                 anyhow::bail!(
                     "Accept decision requires character object, got '{}'",
@@ -339,7 +346,10 @@ pub fn validate_judge_decision(
 fn strip_markdown_fences_judge(s: &str) -> String {
     let trimmed = s.trim();
     let stripped = if trimmed.starts_with("```") {
-        let after_open = trimmed.find('\n').map(|i| &trimmed[i + 1..]).unwrap_or(trimmed);
+        let after_open = trimmed
+            .find('\n')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or(trimmed);
         if let Some(end) = after_open.rfind("```") {
             &after_open[..end]
         } else {
@@ -608,10 +618,8 @@ pub async fn ai_semantic_judge(
 fn build_judge_model_body(path: &str, model: &str, prompt: &str) -> serde_json::Value {
     let is_gemini =
         crate::service::ai_book_generation_service::is_gemini_generate_content_path(path);
-    let is_anthropic =
-        crate::service::ai_book_generation_service::is_anthropic_messages_path(path);
-    let is_responses =
-        crate::service::ai_book_generation_service::is_responses_path(path);
+    let is_anthropic = crate::service::ai_book_generation_service::is_anthropic_messages_path(path);
+    let is_responses = crate::service::ai_book_generation_service::is_responses_path(path);
 
     if is_gemini {
         return serde_json::json!({
@@ -646,7 +654,6 @@ fn build_judge_model_body(path: &str, model: &str, prompt: &str) -> serde_json::
     })
 }
 
-
 /// Real AI Relationship Judge — calls LLM via AiModelService.
 ///
 /// Used in production and real AI smoke tests.
@@ -657,11 +664,11 @@ pub struct RealAiRelationshipJudge {
 }
 
 impl RealAiRelationshipJudge {
-    pub fn new(
-        ai_model_service: std::sync::Arc<AiModelService>,
-        pool: SqlitePool,
-    ) -> Self {
-        Self { ai_model_service, pool }
+    pub fn new(ai_model_service: std::sync::Arc<AiModelService>, pool: SqlitePool) -> Self {
+        Self {
+            ai_model_service,
+            pool,
+        }
     }
 }
 
@@ -678,7 +685,10 @@ impl crate::service::v4::pipeline::Judge for RealAiRelationshipJudge {
 
         // Look up subject entity
         let subject = match &claim.subject_entity_id {
-            Some(id) => entity_repo.get_by_id(id).await?.ok_or_else(|| anyhow::anyhow!("Subject entity not found: {}", id))?,
+            Some(id) => entity_repo
+                .get_by_id(id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Subject entity not found: {}", id))?,
             None => anyhow::bail!("Claim has no subject_entity_id"),
         };
 
@@ -692,16 +702,24 @@ impl crate::service::v4::pipeline::Judge for RealAiRelationshipJudge {
 
         // Look up source spans for this claim
         let claim_repo = crate::storage::db::v4::claim_repo::ClaimRepo::new(self.pool.clone());
-        let source_spans = claim_repo.list_claim_spans(&claim.id).await.unwrap_or_default();
+        let source_spans = claim_repo
+            .list_claim_spans(&claim.id)
+            .await
+            .unwrap_or_default();
 
         // Look up current relationship (if exists)
-        let current_relationship = if let (Some(sid), Some(oid)) = (&claim.subject_entity_id, &claim.object_entity_id) {
-            // Try to find existing relationship between these entities
-            let rels = rel_repo.list_by_character(&claim.book_id, sid).await.unwrap_or_default();
-            rels.into_iter().find(|r| &r.object_character_id == oid || &r.subject_character_id == oid)
-        } else {
-            None
-        };
+        let current_relationship =
+            if let (Some(sid), Some(oid)) = (&claim.subject_entity_id, &claim.object_entity_id) {
+                // Try to find existing relationship between these entities
+                let rels = rel_repo
+                    .list_by_character(&claim.book_id, sid)
+                    .await
+                    .unwrap_or_default();
+                rels.into_iter()
+                    .find(|r| &r.object_character_id == oid || &r.subject_character_id == oid)
+            } else {
+                None
+            };
 
         // Look up properties
         let subject_properties = property_repo
@@ -799,7 +817,14 @@ mod tests {
 
     #[test]
     fn subject_is_character_object_is_character_pass() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "character");
 
@@ -820,7 +845,14 @@ mod tests {
 
     #[test]
     fn subject_is_non_character_entity_reject() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "place");
         let object = make_entity("obj1", "character");
 
@@ -833,7 +865,14 @@ mod tests {
 
     #[test]
     fn subject_equals_object_reject() {
-        let claim = make_claim(Some("same_id"), Some("same_id"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("same_id"),
+            Some("same_id"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("same_id", "character");
         let object = make_entity("same_id", "character");
 
@@ -846,7 +885,14 @@ mod tests {
 
     #[test]
     fn object_resolved_as_place_redirect_location() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "place");
 
@@ -862,7 +908,14 @@ mod tests {
 
     #[test]
     fn object_resolved_as_organization_redirect_affiliation() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "organization");
 
@@ -878,7 +931,14 @@ mod tests {
 
     #[test]
     fn object_resolved_as_item_redirect_equipment() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "item");
 
@@ -894,7 +954,14 @@ mod tests {
 
     #[test]
     fn object_resolved_as_ability_redirect_ability() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "ability");
 
@@ -940,7 +1007,14 @@ mod tests {
 
     #[test]
     fn invalid_relation_group_reject() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "invalid_group", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "invalid_group",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "character");
 
@@ -953,7 +1027,14 @@ mod tests {
 
     #[test]
     fn confidence_below_threshold_reject() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.2, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.2,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "character");
 
@@ -971,15 +1052,19 @@ mod tests {
         let object = make_entity("obj1", "character");
 
         let result = structural_gate(&claim, Some(&subject), Some(&object));
-        assert_eq!(
-            result,
-            GateResult::Reject("no evidence spans".to_string())
-        );
+        assert_eq!(result, GateResult::Reject("no evidence spans".to_string()));
     }
 
     #[test]
     fn subject_entity_not_found_reject() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let object = make_entity("obj1", "character");
 
         let result = structural_gate(&claim, None, Some(&object));
@@ -1003,7 +1088,14 @@ mod tests {
 
     #[test]
     fn object_resolved_as_faction_redirect_affiliation() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "faction");
 
@@ -1019,7 +1111,14 @@ mod tests {
 
     #[test]
     fn object_resolved_as_realm_redirect_realm() {
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.8, "friendship", true, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "realm");
 
@@ -1037,7 +1136,14 @@ mod tests {
     fn object_resolved_as_place_low_confidence_no_hint_redirect_not_uncertain() {
         // Bug repro: object=place, hint=false, confidence=0.5
         // Must be Redirect (non-character entity takes priority), NOT Uncertain
-        let claim = make_claim(Some("subj1"), Some("obj1"), 0.5, "friendship", false, "span1");
+        let claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.5,
+            "friendship",
+            false,
+            "span1",
+        );
         let subject = make_entity("subj1", "character");
         let object = make_entity("obj1", "place");
 
@@ -1055,7 +1161,10 @@ mod tests {
     fn map_non_character_to_dimension_variants() {
         assert_eq!(map_non_character_to_dimension("place"), "location");
         assert_eq!(map_non_character_to_dimension("location"), "location");
-        assert_eq!(map_non_character_to_dimension("organization"), "affiliation");
+        assert_eq!(
+            map_non_character_to_dimension("organization"),
+            "affiliation"
+        );
         assert_eq!(map_non_character_to_dimension("faction"), "affiliation");
         assert_eq!(map_non_character_to_dimension("item"), "equipment");
         assert_eq!(map_non_character_to_dimension("ability"), "ability");
@@ -1095,10 +1204,7 @@ mod tests {
             output.normalized_relation_group,
             Some("mentorship".to_string())
         );
-        assert_eq!(
-            output.normalized_relation_label,
-            Some("师徒".to_string())
-        );
+        assert_eq!(output.normalized_relation_label, Some("师徒".to_string()));
         assert_eq!(output.directionality, Some("directed".to_string()));
         assert_eq!(output.strength, Some(0.8));
         assert_eq!(output.polarity, Some("positive".to_string()));
@@ -1158,10 +1264,7 @@ mod tests {
             "explanation_for_log": "test"
         }"#;
         let result = parse_judge_output(json);
-        assert!(
-            result.is_err(),
-            "invalid directionality should be rejected"
-        );
+        assert!(result.is_err(), "invalid directionality should be rejected");
     }
 
     #[test]
@@ -1215,7 +1318,10 @@ mod tests {
 
         let object = make_entity("obj1", "character");
         let result = validate_judge_decision(&output, Some(&object));
-        assert!(result.is_ok(), "Accept with character object should be valid");
+        assert!(
+            result.is_ok(),
+            "Accept with character object should be valid"
+        );
     }
 
     #[test]
@@ -1241,10 +1347,7 @@ mod tests {
             result.is_err(),
             "Accept with unresolved object should be rejected"
         );
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unresolved"));
+        assert!(result.unwrap_err().to_string().contains("unresolved"));
     }
 
     #[test]
@@ -1370,10 +1473,7 @@ mod tests {
         let parsed: JudgeOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.decision, JudgeDecision::Redirect);
         assert_eq!(parsed.redirect_to, Some("property_update".to_string()));
-        assert_eq!(
-            parsed.redirect_dimension_key,
-            Some("equipment".to_string())
-        );
+        assert_eq!(parsed.redirect_dimension_key, Some("equipment".to_string()));
     }
 
     #[test]

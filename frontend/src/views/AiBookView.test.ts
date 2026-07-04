@@ -108,4 +108,24 @@ describe('AiBookView', () => {
     expect(aiStoreMock.loadChapterMemory).toHaveBeenCalledWith(readerBook.bookUrl, 2)
     expect(wrapper.text()).not.toContain('AI资料加载失败')
   })
+
+  it('exposes a lightweight V4 identity debug tab', async () => {
+    aiStoreMock.load.mockResolvedValueOnce(aiStoreMock.memoryView)
+    aiStoreMock.loadChapterMemory.mockResolvedValueOnce(aiStoreMock.chapterMemory)
+
+    const wrapper = mount(await import('./AiBookView.vue').then((mod) => mod.default))
+    await flushPromises()
+
+    expect(wrapper.findAll('.tabs button').map((button) => button.text())).toContain('身份')
+  })
+
+  it('exposes a lightweight V4 knowledge tab', async () => {
+    aiStoreMock.load.mockResolvedValueOnce(aiStoreMock.memoryView)
+    aiStoreMock.loadChapterMemory.mockResolvedValueOnce(aiStoreMock.chapterMemory)
+
+    const wrapper = mount(await import('./AiBookView.vue').then((mod) => mod.default))
+    await flushPromises()
+
+    expect(wrapper.findAll('.tabs button').map((button) => button.text())).toContain('知识')
+  })
 })

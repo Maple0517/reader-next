@@ -340,12 +340,21 @@ impl RelationshipRepo {
         // Canonicalize undirected pairs: smaller ID always subject
         let (final_subject, final_object) = if directionality == "undirected" {
             if subject_character_id < object_character_id {
-                (subject_character_id.to_string(), object_character_id.to_string())
+                (
+                    subject_character_id.to_string(),
+                    object_character_id.to_string(),
+                )
             } else {
-                (object_character_id.to_string(), subject_character_id.to_string())
+                (
+                    object_character_id.to_string(),
+                    subject_character_id.to_string(),
+                )
             }
         } else {
-            (subject_character_id.to_string(), object_character_id.to_string())
+            (
+                subject_character_id.to_string(),
+                object_character_id.to_string(),
+            )
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -504,12 +513,11 @@ impl RelationshipEventRepo {
     }
 
     pub async fn count_by_relationship(&self, relationship_id: &str) -> anyhow::Result<i64> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM relationship_events WHERE relationship_id = ?",
-        )
-        .bind(relationship_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM relationship_events WHERE relationship_id = ?")
+                .bind(relationship_id)
+                .fetch_one(&self.pool)
+                .await?;
 
         Ok(row.0)
     }
@@ -572,8 +580,7 @@ mod tests {
     use crate::storage::db;
 
     async fn setup_test_db() -> SqlitePool {
-        let dir =
-            std::env::temp_dir().join(format!("reader-rel-repo-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("reader-rel-repo-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
         db::init_pool(&database_url).await.unwrap()
@@ -660,9 +667,20 @@ mod tests {
         assert_eq!(&fetched.object_character_id, expected_obj);
 
         // Update
-        repo.update_relationship(&rel.id, "close friends", Some("close friends"), 0.9, "positive", 0.9, 0.8, 2, 2, "active")
-            .await
-            .unwrap();
+        repo.update_relationship(
+            &rel.id,
+            "close friends",
+            Some("close friends"),
+            0.9,
+            "positive",
+            0.9,
+            0.8,
+            2,
+            2,
+            "active",
+        )
+        .await
+        .unwrap();
         let updated = repo.get_by_id(&rel.id).await.unwrap().unwrap();
         assert_eq!(updated.current_state.as_deref(), Some("close friends"));
         assert!((updated.strength - 0.9).abs() < f64::EPSILON);
@@ -815,19 +833,37 @@ mod tests {
         .await
         .unwrap();
 
-        repo.create_relationship("b1", &e1, &e2, "friendship", "friends", "undirected", None, 0.5, "positive", 0.8, 0.7, 1)
-            .await
-            .unwrap();
-        repo.create_relationship("b1", &e1, &e3, "rivalry", "rivals", "directed", None, 0.5, "negative", 0.7, 0.6, 1)
-            .await
-            .unwrap();
+        repo.create_relationship(
+            "b1",
+            &e1,
+            &e2,
+            "friendship",
+            "friends",
+            "undirected",
+            None,
+            0.5,
+            "positive",
+            0.8,
+            0.7,
+            1,
+        )
+        .await
+        .unwrap();
+        repo.create_relationship(
+            "b1", &e1, &e3, "rivalry", "rivals", "directed", None, 0.5, "negative", 0.7, 0.6, 1,
+        )
+        .await
+        .unwrap();
 
         // No filter
         let all = repo.list_by_book("b1", None, None).await.unwrap();
         assert_eq!(all.len(), 2);
 
         // Group filter
-        let filtered = repo.list_by_book("b1", Some("friendship"), None).await.unwrap();
+        let filtered = repo
+            .list_by_book("b1", Some("friendship"), None)
+            .await
+            .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].relation_group, "friendship");
 
@@ -852,13 +888,39 @@ mod tests {
         .unwrap();
 
         // e1--e2 (friendship)
-        repo.create_relationship("b1", &e1, &e2, "friendship", "friends", "undirected", None, 0.5, "positive", 0.8, 0.7, 1)
-            .await
-            .unwrap();
+        repo.create_relationship(
+            "b1",
+            &e1,
+            &e2,
+            "friendship",
+            "friends",
+            "undirected",
+            None,
+            0.5,
+            "positive",
+            0.8,
+            0.7,
+            1,
+        )
+        .await
+        .unwrap();
         // e1--e3 (alliance)
-        repo.create_relationship("b1", &e1, &e3, "alliance", "allies", "undirected", None, 0.5, "positive", 0.7, 0.6, 1)
-            .await
-            .unwrap();
+        repo.create_relationship(
+            "b1",
+            &e1,
+            &e3,
+            "alliance",
+            "allies",
+            "undirected",
+            None,
+            0.5,
+            "positive",
+            0.7,
+            0.6,
+            1,
+        )
+        .await
+        .unwrap();
 
         // e1 appears in 2 relationships
         let rels = repo.list_by_character("b1", &e1).await.unwrap();
@@ -901,9 +963,11 @@ mod tests {
         assert_eq!(repo.count_active_by_book("b1").await.unwrap(), 1);
 
         // Set inactive
-        repo.update_relationship(&rel.id, "inactive", None, 0.5, "neutral", 0.5, 0.5, 1, 1, "inactive")
-            .await
-            .unwrap();
+        repo.update_relationship(
+            &rel.id, "inactive", None, 0.5, "neutral", 0.5, 0.5, 1, 1, "inactive",
+        )
+        .await
+        .unwrap();
         assert_eq!(repo.count_active_by_book("b1").await.unwrap(), 0);
     }
 
@@ -1007,17 +1071,7 @@ mod tests {
         // Second event with same source_claim_id should fail
         let result = ev_repo
             .create_event(
-                "b1",
-                &rel.id,
-                "updated",
-                "family",
-                "siblings",
-                None,
-                None,
-                None,
-                1,
-                &claim_id,
-                0.8,
+                "b1", &rel.id, "updated", "family", "siblings", None, None, None, 1, &claim_id, 0.8,
             )
             .await;
         assert!(
@@ -1054,9 +1108,11 @@ mod tests {
         assert_eq!(active.len(), 1);
 
         // Mark inactive
-        repo.update_relationship(&rel.id, "inactive", None, 0.5, "neutral", 0.5, 0.5, 1, 1, "inactive")
-            .await
-            .unwrap();
+        repo.update_relationship(
+            &rel.id, "inactive", None, 0.5, "neutral", 0.5, 0.5, 1, 1, "inactive",
+        )
+        .await
+        .unwrap();
 
         let active = repo.list_active_by_book("b1").await.unwrap();
         assert_eq!(active.len(), 0);
@@ -1090,8 +1146,14 @@ mod tests {
 
         // Verify canonicalized: smaller ID should be subject
         let fetched = repo.get_by_id(&rel.id).await.unwrap().unwrap();
-        assert_eq!(&fetched.subject_character_id, smaller, "undirected: smaller ID should be subject");
-        assert_eq!(&fetched.object_character_id, larger, "undirected: larger ID should be object");
+        assert_eq!(
+            &fetched.subject_character_id, smaller,
+            "undirected: smaller ID should be subject"
+        );
+        assert_eq!(
+            &fetched.object_character_id, larger,
+            "undirected: larger ID should be object"
+        );
     }
 
     #[tokio::test]
@@ -1121,7 +1183,13 @@ mod tests {
 
         // Verify NOT canonicalized: original order preserved
         let fetched = repo.get_by_id(&rel.id).await.unwrap().unwrap();
-        assert_eq!(fetched.subject_character_id, e2, "directed: subject should be preserved");
-        assert_eq!(fetched.object_character_id, e1, "directed: object should be preserved");
+        assert_eq!(
+            fetched.subject_character_id, e2,
+            "directed: subject should be preserved"
+        );
+        assert_eq!(
+            fetched.object_character_id, e1,
+            "directed: object should be preserved"
+        );
     }
 }

@@ -9,9 +9,13 @@ use std::collections::HashSet;
 
 use crate::api::{auth::AuthContext, AppState};
 use crate::error::error::{ApiResponse, AppError};
+use crate::service::v4::knowledge_projection;
 use crate::service::v4::projection;
 use crate::service::v4::relationship_projection;
 use crate::storage::db::v4::entity_repo::EntityRepo;
+use crate::storage::db::v4::identity_repo::{
+    IdentityLinkRecord, IdentityRepo, MergeOperationRecord,
+};
 use crate::storage::db::v4::progress_repo::ProgressRepo;
 use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
 use crate::storage::db::v4::reset_v4;
@@ -135,6 +139,59 @@ pub struct V4CharacterRelationshipsResponse {
     pub total: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4IdentityLinkView {
+    pub id: String,
+    pub entity_a_id: String,
+    pub entity_b_id: String,
+    pub link_type: String,
+    pub status: String,
+    pub confidence: f64,
+    pub source_claim_id: String,
+    pub redirect_target_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4IdentityLinksResponse {
+    pub identity_links: Vec<V4IdentityLinkView>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4CharacterIdentityResponse {
+    pub character_id: String,
+    pub redirect_target_id: Option<String>,
+    pub identity_links: Vec<V4IdentityLinkView>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4MergeOperationView {
+    pub id: String,
+    pub survivor_entity_id: String,
+    pub victim_entity_id: String,
+    pub source_identity_link_id: String,
+    pub reason_code: String,
+    pub confidence: f64,
+    pub status: String,
+    pub property_conflict_count: i64,
+    pub relationship_merge_count: i64,
+    pub result_json: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4MergeOperationsResponse {
+    pub merge_operations: Vec<V4MergeOperationView>,
+    pub total: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -177,18 +234,22 @@ pub async fn get_v4_memory(
         .count_active_by_book(&ctx.book_id)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
+    let knowledge_count =
+        knowledge_projection::count_active_knowledge_cards(&ctx.book_id, &state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
 
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(V4MemoryResponse {
             book_url,
-            book_name: String::new(),  // resolved from book metadata if available
-            author: String::new(),     // resolved from book metadata if available
+            book_name: String::new(), // resolved from book metadata if available
+            author: String::new(),    // resolved from book metadata if available
             max_read_chapter: max_read,
             max_processed_chapter: max_processed,
             processing,
             character_count,
             relationship_count,
-            knowledge_count: 0,    // Phase 4
+            knowledge_count,
         })
         .unwrap_or_default(),
     )))
@@ -213,11 +274,7 @@ pub async fn get_v4_characters(
     let total = characters.len() as i64;
 
     Ok(Json(ApiResponse::ok(
-        serde_json::to_value(V4CharacterListView {
-            characters,
-            total,
-        })
-        .unwrap_or_default(),
+        serde_json::to_value(V4CharacterListView { characters, total }).unwrap_or_default(),
     )))
 }
 
@@ -250,7 +307,7 @@ pub async fn get_v4_character_card(
         serde_json::to_value(V4CharacterResponse {
             character,
             relationship_count,
-            recent_changes: vec![], // Phase 6: populated from claim history
+            recent_changes: vec![],    // Phase 6: populated from claim history
             evidence_available: false, // Phase 6: populated when evidence drawer is ready
         })
         .unwrap_or_default(),
@@ -276,14 +333,13 @@ pub async fn get_v4_chapter_memory(
         .map_err(|e| AppError::Internal(e.into()))?;
 
     // Fetch chapter title from chapters table
-    let chapter_row: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT title FROM chapters WHERE book_id = ? AND chapter_index = ?",
-    )
-    .bind(&ctx.book_id)
-    .bind(chapter_index)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
+    let chapter_row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT title FROM chapters WHERE book_id = ? AND chapter_index = ?")
+            .bind(&ctx.book_id)
+            .bind(chapter_index)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
     let chapter_title = chapter_row.and_then(|r| r.0);
 
     // Fetch chapter summary
@@ -311,14 +367,33 @@ pub async fn get_v4_chapter_memory(
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
     let event_repo = RelationshipEventRepo::new(state.pool.clone());
+    let identity_repo = IdentityRepo::new(state.pool.clone());
     let mut relationships_in_chapter = Vec::new();
     for (_ev, rel) in &relationship_pairs {
-        let edge = relationship_projection::build_edge_for_relationship(rel, &event_repo)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
-        relationships_in_chapter.push(edge);
+        let edge = relationship_projection::build_edge_for_relationship_in_book(
+            &ctx.book_id,
+            rel,
+            &event_repo,
+            &identity_repo,
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+        if let Some(edge) = edge {
+            relationships_in_chapter.push(edge);
+        }
     }
     let relationship_count = relationships_in_chapter.len() as i64;
+    let knowledge_count = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*)
+         FROM knowledge_assertions
+         WHERE book_id = ? AND chapter_index = ?",
+    )
+    .bind(&ctx.book_id)
+    .bind(chapter_index)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?
+    .0;
 
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(V4ChapterMemoryResponse {
@@ -329,7 +404,7 @@ pub async fn get_v4_chapter_memory(
             characters_in_chapter: characters,
             relationships_in_chapter,
             relationship_count,
-            knowledge_count: 0,    // Phase 4
+            knowledge_count,
         })
         .unwrap_or_default(),
     )))
@@ -437,8 +512,7 @@ pub async fn post_v4_chapter_generate(
     ensure_v4_enabled(&state, &ctx.book_id).await?;
 
     // Get raw_text from chapters table
-    let chapter_repo =
-        crate::storage::db::v4::chapter_repo::ChapterRepo::new(state.pool.clone());
+    let chapter_repo = crate::storage::db::v4::chapter_repo::ChapterRepo::new(state.pool.clone());
     let chapter = chapter_repo
         .get_chapter(&ctx.book_id, chapter_index)
         .await
@@ -455,8 +529,13 @@ pub async fn post_v4_chapter_generate(
     };
 
     // Run pipeline
-    let extractor = crate::service::v4::extractor::RealAiExtractor::new(state.ai_model_service.clone());
-    let model_config = state.ai_model_service.get().await.map_err(|e| AppError::Internal(e.into()))?;
+    let extractor =
+        crate::service::v4::extractor::RealAiExtractor::new(state.ai_model_service.clone());
+    let model_config = state
+        .ai_model_service
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
     let model_name = model_config.text.model.clone();
     crate::service::v4::pipeline::process_chapter(
         &ctx.book_id,
@@ -622,26 +701,41 @@ pub async fn get_v4_relationships(
 
     let rel_repo = RelationshipRepo::new(state.pool.clone());
     let relationships = rel_repo
-        .list_by_book(
-            &ctx.book_id,
-            req.group.as_deref(),
-            req.min_importance,
-        )
+        .list_by_book(&ctx.book_id, req.group.as_deref(), req.min_importance)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
 
-    // Collect unique entity IDs from relationships
+    let event_repo = RelationshipEventRepo::new(state.pool.clone());
+    let identity_repo = IdentityRepo::new(state.pool.clone());
+    let mut edges = Vec::new();
     let mut entity_ids: HashSet<String> = HashSet::new();
+    let mut groups_set: HashSet<String> = HashSet::new();
     for rel in &relationships {
-        entity_ids.insert(rel.subject_character_id.clone());
-        entity_ids.insert(rel.object_character_id.clone());
+        if let Some(edge) = relationship_projection::build_edge_for_relationship_in_book(
+            &ctx.book_id,
+            rel,
+            &event_repo,
+            &identity_repo,
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?
+        {
+            entity_ids.insert(edge.source_id.clone());
+            entity_ids.insert(edge.target_id.clone());
+            groups_set.insert(edge.group.clone());
+            edges.push(edge);
+        }
     }
 
     // Build nodes from entities
     let entity_repo = EntityRepo::new(state.pool.clone());
     let mut nodes = Vec::new();
     for eid in &entity_ids {
-        if let Some(entity) = entity_repo.get_by_id(eid).await.map_err(|e| AppError::Internal(e.into()))? {
+        if let Some(entity) = entity_repo
+            .get_by_id(eid)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?
+        {
             let aliases = entity_repo
                 .list_aliases_by_entity(eid)
                 .await
@@ -657,26 +751,15 @@ pub async fn get_v4_relationships(
         }
     }
 
-    // Build edges
-    let event_repo = RelationshipEventRepo::new(state.pool.clone());
-    let mut edges = Vec::new();
-    let mut groups_set: HashSet<String> = HashSet::new();
-    for rel in &relationships {
-        groups_set.insert(rel.relation_group.clone());
-        let edge = relationship_projection::build_edge_for_relationship(rel, &event_repo)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
-        edges.push(edge);
-    }
-
     let mut groups: Vec<String> = groups_set.into_iter().collect();
     groups.sort();
+    let total = edges.len();
 
     let view = relationship_projection::RelationshipGraphView {
         nodes,
         edges,
         groups,
-        total: relationships.len(),
+        total,
     };
 
     Ok(Json(ApiResponse::ok(
@@ -695,20 +778,13 @@ pub async fn get_v4_character_relationships(
     let req = parse_request(q, body)?;
     let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
 
-    let rel_repo = RelationshipRepo::new(state.pool.clone());
-    let relationships = rel_repo
-        .list_by_character(&ctx.book_id, &character_id)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-
-    let event_repo = RelationshipEventRepo::new(state.pool.clone());
-    let mut edges = Vec::new();
-    for rel in &relationships {
-        let edge = relationship_projection::build_edge_for_relationship(rel, &event_repo)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
-        edges.push(edge);
-    }
+    let edges = relationship_projection::project_relationship_edges_for_character(
+        &ctx.book_id,
+        &character_id,
+        &state.pool,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
     let total = edges.len();
 
     Ok(Json(ApiResponse::ok(
@@ -717,6 +793,176 @@ pub async fn get_v4_character_relationships(
             total,
         })
         .unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/identity-links — book-level identity debug links.
+pub async fn get_v4_identity_links(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let identity_repo = IdentityRepo::new(state.pool.clone());
+    let links = identity_repo
+        .list_identity_links_by_book(&ctx.book_id, None)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let identity_links = links
+        .into_iter()
+        .map(identity_link_to_view)
+        .collect::<Vec<_>>();
+    let total = identity_links.len();
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(V4IdentityLinksResponse {
+            identity_links,
+            total,
+        })
+        .unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/characters/:character_id/identity — identity debug view for one character.
+pub async fn get_v4_character_identity(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(character_id): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let identity_repo = IdentityRepo::new(state.pool.clone());
+    let redirect_target_id = identity_repo
+        .resolve_redirect_target(&ctx.book_id, &character_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let links = identity_repo
+        .list_identity_links_by_book(&ctx.book_id, None)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let identity_links = links
+        .into_iter()
+        .filter(|link| {
+            link.entity_a_id == character_id
+                || link.entity_b_id == character_id
+                || redirect_target_id.as_ref().is_some_and(|target_id| {
+                    link.entity_a_id == *target_id || link.entity_b_id == *target_id
+                })
+        })
+        .map(identity_link_to_view)
+        .collect::<Vec<_>>();
+    let total = identity_links.len();
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(V4CharacterIdentityResponse {
+            character_id,
+            redirect_target_id,
+            identity_links,
+            total,
+        })
+        .unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/merge-operations — book-level merge operation debug list.
+pub async fn get_v4_merge_operations(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let identity_repo = IdentityRepo::new(state.pool.clone());
+    let operations = identity_repo
+        .list_merge_operations_by_book(&ctx.book_id, None)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?
+        .into_iter()
+        .map(merge_operation_to_view)
+        .collect::<Vec<_>>();
+    let total = operations.len();
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(V4MergeOperationsResponse {
+            merge_operations: operations,
+            total,
+        })
+        .unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/knowledge — book-level knowledge overview.
+pub async fn get_v4_knowledge(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let max_processed = get_max_processed(&state, &ctx.book_id).await?;
+    let view =
+        knowledge_projection::project_knowledge_overview(&ctx.book_id, max_processed, &state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/knowledge/cards/:card_id — knowledge card detail.
+pub async fn get_v4_knowledge_card(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(card_id): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let max_processed = get_max_processed(&state, &ctx.book_id).await?;
+    let view = knowledge_projection::project_knowledge_card_detail(
+        &ctx.book_id,
+        &card_id,
+        max_processed,
+        &state.pool,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/knowledge/categories/:category — category-filtered knowledge cards.
+pub async fn get_v4_knowledge_category(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(category): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let max_processed = get_max_processed(&state, &ctx.book_id).await?;
+    let view = knowledge_projection::project_knowledge_category(
+        &ctx.book_id,
+        &category,
+        max_processed,
+        &state.pool,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
     )))
 }
 
@@ -743,6 +989,41 @@ fn parse_request<T: serde::de::DeserializeOwned + Default>(
     Ok(q)
 }
 
+fn identity_link_to_view(link: IdentityLinkRecord) -> V4IdentityLinkView {
+    let redirect_target_id = if link.link_type == "redirect" {
+        Some(link.entity_b_id.clone())
+    } else {
+        None
+    };
+    V4IdentityLinkView {
+        id: link.id,
+        entity_a_id: link.entity_a_id,
+        entity_b_id: link.entity_b_id,
+        link_type: link.link_type,
+        status: link.status,
+        confidence: link.confidence,
+        source_claim_id: link.source_claim_id,
+        redirect_target_id,
+    }
+}
+
+fn merge_operation_to_view(operation: MergeOperationRecord) -> V4MergeOperationView {
+    V4MergeOperationView {
+        id: operation.id,
+        survivor_entity_id: operation.survivor_entity_id,
+        victim_entity_id: operation.victim_entity_id,
+        source_identity_link_id: operation.source_identity_link_id,
+        reason_code: operation.reason_code,
+        confidence: operation.confidence,
+        status: operation.status,
+        property_conflict_count: operation.property_conflict_count,
+        relationship_merge_count: operation.relationship_merge_count,
+        result_json: operation.result_json,
+        created_at: operation.created_at,
+        completed_at: operation.completed_at,
+    }
+}
+
 async fn resolve_v4_book(
     state: &AppState,
     auth: &AuthContext,
@@ -763,13 +1044,11 @@ async fn resolve_v4_book(
     let book_id = crate::util::hash::md5_hex(&book_url);
 
     // Ensure reading_progress exists
-    sqlx::query(
-        "INSERT OR IGNORE INTO reading_progress (book_id, max_read_chapter) VALUES (?, 0)",
-    )
-    .bind(&book_id)
-    .execute(&state.pool)
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
+    sqlx::query("INSERT OR IGNORE INTO reading_progress (book_id, max_read_chapter) VALUES (?, 0)")
+        .bind(&book_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
 
     // Ensure processing_progress exists
     let progress_repo = ProgressRepo::new(state.pool.clone());
@@ -791,24 +1070,22 @@ async fn get_max_processed(state: &AppState, book_id: &str) -> Result<i64, AppEr
 }
 
 async fn get_max_read(state: &AppState, book_id: &str) -> Result<i64, AppError> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT max_read_chapter FROM reading_progress WHERE book_id = ?",
-    )
-    .bind(book_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT max_read_chapter FROM reading_progress WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
     Ok(row.map(|r| r.0).unwrap_or(0))
 }
 
 async fn ensure_v4_enabled(state: &AppState, book_id: &str) -> Result<(), AppError> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        "SELECT enabled FROM book_memory_v4_settings WHERE book_id = ?",
-    )
-    .bind(book_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
+    let row: Option<(i32,)> =
+        sqlx::query_as("SELECT enabled FROM book_memory_v4_settings WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
 
     match row {
         Some((enabled,)) if enabled == 1 => Ok(()),
@@ -837,12 +1114,20 @@ async fn ensure_v4_enabled(state: &AppState, book_id: &str) -> Result<(), AppErr
 
 /// Background worker that processes chapters sequentially.
 /// Checks `processing_progress.status` for cooperative cancellation.
-async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::SqlitePool, ai_model_service: std::sync::Arc<crate::service::ai_model_service::AiModelService>) {
+async fn run_catchup_worker(
+    book_id: &str,
+    target_chapter: i64,
+    pool: &sqlx::SqlitePool,
+    ai_model_service: std::sync::Arc<crate::service::ai_model_service::AiModelService>,
+) {
     let progress_repo = ProgressRepo::new(pool.clone());
-    let chapter_repo =
-        crate::storage::db::v4::chapter_repo::ChapterRepo::new(pool.clone());
+    let chapter_repo = crate::storage::db::v4::chapter_repo::ChapterRepo::new(pool.clone());
     let extractor = crate::service::v4::extractor::RealAiExtractor::new(ai_model_service.clone());
-    let model_name = ai_model_service.get().await.map(|c| c.text.model).unwrap_or_default();
+    let model_name = ai_model_service
+        .get()
+        .await
+        .map(|c| c.text.model)
+        .unwrap_or_default();
 
     // Get current progress
     let start_chapter = match progress_repo.get_progress(book_id).await {
@@ -933,11 +1218,7 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
         .await
         {
             Ok(()) => {
-                tracing::info!(
-                    "Processed chapter {} for book {}",
-                    chapter_index,
-                    book_id
-                );
+                tracing::info!("Processed chapter {} for book {}", chapter_index, book_id);
             }
             Err(e) => {
                 tracing::error!(
@@ -953,7 +1234,10 @@ async fn run_catchup_worker(book_id: &str, target_chapter: i64, pool: &sqlx::Sql
                         None,
                         None,
                         None,
-                        Some(&format!("Pipeline failed at chapter {}: {}", chapter_index, e)),
+                        Some(&format!(
+                            "Pipeline failed at chapter {}: {}",
+                            chapter_index, e
+                        )),
                     )
                     .await;
                 return;
@@ -1006,7 +1290,11 @@ mod tests {
             .await
             .unwrap();
 
-        let p = progress_repo.get_progress("test-book").await.unwrap().unwrap();
+        let p = progress_repo
+            .get_progress("test-book")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(p.status, "running");
         assert_eq!(p.target_chapter, Some(10));
         assert_eq!(p.current_chapter, Some(1));
@@ -1017,7 +1305,11 @@ mod tests {
             .await
             .unwrap();
 
-        let p = progress_repo.get_progress("test-book").await.unwrap().unwrap();
+        let p = progress_repo
+            .get_progress("test-book")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(p.max_processed_chapter, 1);
 
         // Cancel
@@ -1026,7 +1318,11 @@ mod tests {
             .await
             .unwrap();
 
-        let p = progress_repo.get_progress("test-book").await.unwrap().unwrap();
+        let p = progress_repo
+            .get_progress("test-book")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(p.status, "cancel_requested");
 
         // Set to cancelled
@@ -1035,7 +1331,11 @@ mod tests {
             .await
             .unwrap();
 
-        let p = progress_repo.get_progress("test-book").await.unwrap().unwrap();
+        let p = progress_repo
+            .get_progress("test-book")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(p.status, "cancelled");
     }
 
@@ -1067,11 +1367,10 @@ mod tests {
         reset_v4(&pool, "b1").await.unwrap();
 
         // Chapter preserved
-        let ch_count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM chapters WHERE book_id = 'b1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let ch_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chapters WHERE book_id = 'b1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(ch_count.0, 1, "chapters should be preserved");
 
         // Entity cleared
@@ -1087,10 +1386,9 @@ mod tests {
     async fn v4_characters_empty_on_fresh_book() {
         let pool = setup_pool().await;
 
-        let characters =
-            projection::project_character_list("fresh-book", 0, &pool)
-                .await
-                .unwrap();
+        let characters = projection::project_character_list("fresh-book", 0, &pool)
+            .await
+            .unwrap();
         assert!(characters.is_empty());
     }
 
@@ -1183,12 +1481,11 @@ mod tests {
         let pool = setup_pool().await;
 
         // Default: no settings
-        let row: Option<(i32,)> = sqlx::query_as(
-            "SELECT enabled FROM book_memory_v4_settings WHERE book_id = 'b1'",
-        )
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
+        let row: Option<(i32,)> =
+            sqlx::query_as("SELECT enabled FROM book_memory_v4_settings WHERE book_id = 'b1'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
         assert!(row.is_none());
 
         // Enable
@@ -1201,29 +1498,27 @@ mod tests {
         .await
         .unwrap();
 
-        let row: (i32,) = sqlx::query_as(
-            "SELECT enabled FROM book_memory_v4_settings WHERE book_id = 'b1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (i32,) =
+            sqlx::query_as("SELECT enabled FROM book_memory_v4_settings WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(row.0, 1);
 
         // Disable
         sqlx::query(
-            "UPDATE book_memory_v4_settings SET enabled = 0, updated_at = ? WHERE book_id = 'b1'"
+            "UPDATE book_memory_v4_settings SET enabled = 0, updated_at = ? WHERE book_id = 'b1'",
         )
         .bind(&now)
         .execute(&pool)
         .await
         .unwrap();
 
-        let row: (i32,) = sqlx::query_as(
-            "SELECT enabled FROM book_memory_v4_settings WHERE book_id = 'b1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (i32,) =
+            sqlx::query_as("SELECT enabled FROM book_memory_v4_settings WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(row.0, 0);
     }
 
@@ -1244,7 +1539,10 @@ mod tests {
         assert!(progress.is_some());
         let p = progress.unwrap();
         let already_running = p.status == "running" || p.status == "cancel_requested";
-        assert!(already_running, "should detect that catchup is already running");
+        assert!(
+            already_running,
+            "should detect that catchup is already running"
+        );
 
         // Also verify cancel_requested blocks
         progress_repo
@@ -1254,7 +1552,10 @@ mod tests {
 
         let progress = progress_repo.get_progress("b1").await.unwrap().unwrap();
         let already_running = progress.status == "running" || progress.status == "cancel_requested";
-        assert!(already_running, "cancel_requested should also block new catchup");
+        assert!(
+            already_running,
+            "cancel_requested should also block new catchup"
+        );
 
         // After completion, new catchup should be allowed
         progress_repo
@@ -1332,9 +1633,10 @@ mod tests {
     #[test]
     fn v4_relationships_request_deserializes_with_filters() {
         // With all filters
-        let req: V4RelationshipsRequest =
-            serde_json::from_str(r#"{"bookUrl":"http://example.com/book.txt","group":"friendship","minImportance":0.5}"#)
-                .unwrap();
+        let req: V4RelationshipsRequest = serde_json::from_str(
+            r#"{"bookUrl":"http://example.com/book.txt","group":"friendship","minImportance":0.5}"#,
+        )
+        .unwrap();
         assert_eq!(req.book_url.as_deref(), Some("http://example.com/book.txt"));
         assert_eq!(req.group.as_deref(), Some("friendship"));
         assert!((req.min_importance.unwrap() - 0.5).abs() < f64::EPSILON);
@@ -1363,6 +1665,65 @@ mod tests {
         assert!(json["relationships"].is_array());
         assert_eq!(json["relationships"].as_array().unwrap().len(), 0);
         assert_eq!(json["total"], 0);
+    }
+
+    #[test]
+    fn v4_identity_debug_responses_serialize_camel_case() {
+        let link = V4IdentityLinkView {
+            id: "l1".to_string(),
+            entity_a_id: "victim".to_string(),
+            entity_b_id: "survivor".to_string(),
+            link_type: "redirect".to_string(),
+            status: "active".to_string(),
+            confidence: 0.96,
+            source_claim_id: "claim-1".to_string(),
+            redirect_target_id: Some("survivor".to_string()),
+        };
+        let links = V4IdentityLinksResponse {
+            identity_links: vec![link.clone()],
+            total: 1,
+        };
+        let character = V4CharacterIdentityResponse {
+            character_id: "victim".to_string(),
+            redirect_target_id: Some("survivor".to_string()),
+            identity_links: vec![link],
+            total: 1,
+        };
+        let operations = V4MergeOperationsResponse {
+            merge_operations: vec![V4MergeOperationView {
+                id: "op-1".to_string(),
+                survivor_entity_id: "survivor".to_string(),
+                victim_entity_id: "victim".to_string(),
+                source_identity_link_id: "l1".to_string(),
+                reason_code: "explicit_reveal".to_string(),
+                confidence: 0.96,
+                status: "completed".to_string(),
+                property_conflict_count: 0,
+                relationship_merge_count: 2,
+                result_json: Some(r#"{"ok":true}"#.to_string()),
+                created_at: "2026-07-03T00:00:00Z".to_string(),
+                completed_at: Some("2026-07-03T00:00:01Z".to_string()),
+            }],
+            total: 1,
+        };
+
+        let links_json = serde_json::to_value(&links).unwrap();
+        assert!(links_json["identityLinks"].is_array());
+        assert_eq!(
+            links_json["identityLinks"][0]["redirectTargetId"],
+            "survivor"
+        );
+
+        let character_json = serde_json::to_value(&character).unwrap();
+        assert_eq!(character_json["characterId"], "victim");
+        assert_eq!(character_json["redirectTargetId"], "survivor");
+
+        let operations_json = serde_json::to_value(&operations).unwrap();
+        assert!(operations_json["mergeOperations"].is_array());
+        assert_eq!(
+            operations_json["mergeOperations"][0]["relationshipMergeCount"],
+            2
+        );
     }
 
     #[test]

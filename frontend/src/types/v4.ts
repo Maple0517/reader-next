@@ -143,3 +143,104 @@ export interface V4CharacterRelationshipsResponse {
   relationships: V4RelationshipEdge[]
   total: number
 }
+
+// ─── Identity Debug Types (Phase 3) ───
+
+export interface V4IdentityLink {
+  id: string
+  entityAId: string
+  entityBId: string
+  linkType: string
+  status: string
+  confidence: number
+  sourceClaimId: string
+  redirectTargetId: string | null
+}
+
+export interface V4IdentityLinksResponse {
+  identityLinks: V4IdentityLink[]
+  total: number
+}
+
+export interface V4CharacterIdentityResponse {
+  characterId: string
+  redirectTargetId: string | null
+  identityLinks: V4IdentityLink[]
+  total: number
+}
+
+export interface V4MergeOperation {
+  id: string
+  survivorEntityId: string
+  victimEntityId: string
+  sourceIdentityLinkId: string
+  reasonCode: string
+  confidence: number
+  status: string
+  propertyConflictCount: number
+  relationshipMergeCount: number
+  resultJson: string | null
+  createdAt: string
+  completedAt: string | null
+}
+
+export interface V4MergeOperationsResponse {
+  mergeOperations: V4MergeOperation[]
+  total: number
+}
+
+// ─── Knowledge Types (Phase 4) ───
+
+export type V4KnowledgeAssertionStatus = 'active' | 'rumor' | 'uncertain' | 'revised' | 'contradicted' | 'false_in_world'
+
+export interface V4KnowledgeCategorySummary {
+  category: string
+  count: number
+}
+
+export interface V4KnowledgeCardListItem {
+  id: string
+  category: string
+  topicKey: string
+  topicDisplay: string
+  currentSummary: string | null
+  confidence: number
+  importanceScore: number
+  firstSeenChapter: number
+  lastUpdatedChapter: number
+  assertionCount: number
+}
+
+export interface V4KnowledgeOverviewView {
+  cards: V4KnowledgeCardListItem[]
+  categories: V4KnowledgeCategorySummary[]
+  total: number
+}
+
+export interface V4KnowledgeCategoryView {
+  category: string
+  cards: V4KnowledgeCardListItem[]
+  total: number
+}
+
+export interface V4KnowledgeReferencedEntityView {
+  entityId: string
+  displayName: string
+  entityType: string
+  role: string
+}
+
+export interface V4KnowledgeAssertionView {
+  id: string
+  assertionText: string
+  status: V4KnowledgeAssertionStatus
+  confidence: number
+  importanceScore: number
+  chapterIndex: number
+  referencedEntities: V4KnowledgeReferencedEntityView[]
+}
+
+export interface V4KnowledgeCardDetailView {
+  card: V4KnowledgeCardListItem
+  assertionsByStatus: Record<string, V4KnowledgeAssertionView[]>
+}

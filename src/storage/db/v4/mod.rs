@@ -3,6 +3,8 @@ pub mod cache_repo;
 pub mod chapter_repo;
 pub mod claim_repo;
 pub mod entity_repo;
+pub mod identity_repo;
+pub mod knowledge_repo;
 pub mod progress_repo;
 pub mod property_repo;
 pub mod relationship_repo;
@@ -122,6 +124,34 @@ pub async fn reset_v4(pool: &SqlitePool, book_id: &str) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM chapter_summaries WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM knowledge_assertion_entities WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM knowledge_assertion_links WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM knowledge_assertions WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM knowledge_cards WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM entity_merge_conflicts WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM entity_merge_operations WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM entity_identity_links WHERE book_id = ?")
         .bind(book_id)
         .execute(&mut *tx)
         .await?;
@@ -369,6 +399,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v4_identity_tables_exist() {
+        let pool = setup_test_db().await;
+
+        for table in &[
+            "entity_identity_links",
+            "entity_merge_operations",
+            "entity_merge_conflicts",
+        ] {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+            )
+            .bind(*table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Table '{}' should exist", table);
+        }
+    }
+
+    #[tokio::test]
+    async fn v4_identity_indexes_exist() {
+        let pool = setup_test_db().await;
+
+        let indexes = vec![
+            "idx_identity_links_book_pair",
+            "idx_identity_links_source_claim",
+            "idx_identity_links_status",
+            "idx_merge_ops_book_survivor",
+            "idx_merge_ops_book_victim",
+            "idx_merge_conflicts_op",
+        ];
+
+        for index in indexes {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Index '{}' should exist", index);
+        }
+    }
+
+    #[tokio::test]
     async fn v4_relationship_indexes_exist() {
         let pool = setup_test_db().await;
 
@@ -389,6 +464,207 @@ mod tests {
             .unwrap();
             assert_eq!(result.0, 1, "Index '{}' should exist", index);
         }
+    }
+
+    #[tokio::test]
+    async fn v4_knowledge_tables_exist() {
+        let pool = setup_test_db().await;
+
+        for table in &[
+            "knowledge_cards",
+            "knowledge_assertions",
+            "knowledge_assertion_links",
+            "knowledge_assertion_entities",
+        ] {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+            )
+            .bind(*table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Table '{}' should exist", table);
+        }
+    }
+
+    #[tokio::test]
+    async fn v4_knowledge_indexes_exist() {
+        let pool = setup_test_db().await;
+
+        let indexes = vec![
+            "idx_knowledge_cards_book_category_status",
+            "idx_knowledge_cards_book_topic",
+            "idx_knowledge_assertions_card_status",
+            "idx_knowledge_assertions_source_claim",
+            "idx_knowledge_assertions_book_chapter",
+            "idx_knowledge_assertion_links_from",
+            "idx_knowledge_assertion_links_to",
+            "idx_knowledge_assertion_entities_assertion",
+            "idx_knowledge_assertion_entities_entity",
+        ];
+
+        for index in indexes {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Index '{}' should exist", index);
+        }
+    }
+
+    #[tokio::test]
+    async fn knowledge_unique_topic_per_category() {
+        let pool = setup_test_db().await;
+
+        sqlx::query("INSERT INTO knowledge_cards (id, book_id, category, topic_key, topic_display, confidence, importance_score, first_seen_chapter, last_updated_chapter, status, created_at, updated_at) VALUES ('k1', 'b1', 'power_system', 'cultivation-realms', 'Cultivation Realms', 0.8, 0.9, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        let duplicate_same_category = sqlx::query("INSERT INTO knowledge_cards (id, book_id, category, topic_key, topic_display, confidence, importance_score, first_seen_chapter, last_updated_chapter, status, created_at, updated_at) VALUES ('k2', 'b1', 'power_system', 'cultivation-realms', 'Cultivation Levels', 0.7, 0.8, 2, 2, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool)
+            .await;
+        assert!(
+            duplicate_same_category.is_err(),
+            "UNIQUE(book_id, category, topic_key) should reject duplicates"
+        );
+
+        sqlx::query("INSERT INTO knowledge_cards (id, book_id, category, topic_key, topic_display, confidence, importance_score, first_seen_chapter, last_updated_chapter, status, created_at, updated_at) VALUES ('k3', 'b1', 'history', 'cultivation-realms', 'Cultivation Realms History', 0.7, 0.8, 2, 2, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn knowledge_fk_and_link_constraints() {
+        let pool = setup_test_db().await;
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'knowledge_assertion', 'test', 'ss1', 'run1', 0.9, 'high', 'proposed', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e1', 'b1', 'concept', 'Magic', 'Magic', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_cards (id, book_id, category, topic_key, topic_display, confidence, importance_score, first_seen_chapter, last_updated_chapter, status, created_at, updated_at) VALUES ('k1', 'b1', 'world_rule', 'magic-rules', 'Magic Rules', 0.8, 0.9, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_assertions (id, book_id, card_id, source_claim_id, assertion_text, status, confidence, importance_score, chapter_index, created_at, updated_at) VALUES ('a1', 'b1', 'k1', 'c1', 'Magic has rules.', 'active', 0.9, 0.8, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_assertions (id, book_id, card_id, source_claim_id, assertion_text, status, confidence, importance_score, chapter_index, created_at, updated_at) VALUES ('a2', 'b1', 'k1', 'c1', 'Magic rules are incomplete.', 'active', 0.8, 0.7, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        let invalid_assertion = sqlx::query("INSERT INTO knowledge_assertions (id, book_id, card_id, source_claim_id, assertion_text, status, confidence, importance_score, chapter_index, created_at, updated_at) VALUES ('bad-a', 'b1', 'missing-card', 'c1', 'Bad.', 'active', 0.9, 0.8, 1, datetime('now'), datetime('now'))")
+            .execute(&pool)
+            .await;
+        assert!(
+            invalid_assertion.is_err(),
+            "assertion FK should reject missing card"
+        );
+
+        sqlx::query("INSERT INTO knowledge_assertion_links (id, book_id, from_assertion_id, to_assertion_id, link_type, created_at) VALUES ('l1', 'b1', 'a2', 'a1', 'clarifies', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        let duplicate_link = sqlx::query("INSERT INTO knowledge_assertion_links (id, book_id, from_assertion_id, to_assertion_id, link_type, created_at) VALUES ('l2', 'b1', 'a2', 'a1', 'clarifies', datetime('now'))")
+            .execute(&pool)
+            .await;
+        assert!(
+            duplicate_link.is_err(),
+            "UNIQUE(book_id, from_assertion_id, to_assertion_id, link_type) should reject duplicate links"
+        );
+
+        let self_link = sqlx::query("INSERT INTO knowledge_assertion_links (id, book_id, from_assertion_id, to_assertion_id, link_type, created_at) VALUES ('l3', 'b1', 'a1', 'a1', 'supports', datetime('now'))")
+            .execute(&pool)
+            .await;
+        assert!(self_link.is_err(), "link CHECK should reject self-links");
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch2', 'b2', 1, 'text', 'hash2', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg2', 'b2', 'ch2', 'hash2', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss2', 'b2', 'ch2', 'hash2', 'seg2', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run2', 'b2', 'ch2', 'extract', 'test', 'v1', 1, 'hash2', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c2', 'b2', 1, 'knowledge_assertion', 'test', 'ss2', 'run2', 0.9, 'high', 'proposed', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_cards (id, book_id, category, topic_key, topic_display, confidence, importance_score, first_seen_chapter, last_updated_chapter, status, created_at, updated_at) VALUES ('k2', 'b2', 'world_rule', 'foreign-magic-rules', 'Foreign Magic Rules', 0.8, 0.9, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_assertions (id, book_id, card_id, source_claim_id, assertion_text, status, confidence, importance_score, chapter_index, created_at, updated_at) VALUES ('a3', 'b2', 'k2', 'c2', 'Foreign magic has rules.', 'active', 0.9, 0.8, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        let cross_book_link = sqlx::query("INSERT INTO knowledge_assertion_links (id, book_id, from_assertion_id, to_assertion_id, link_type, created_at) VALUES ('l4', 'b1', 'a2', 'a3', 'clarifies', datetime('now'))")
+            .execute(&pool)
+            .await;
+        assert!(
+            cross_book_link.is_err(),
+            "link composite FK should reject cross-book assertion links"
+        );
+
+        sqlx::query("INSERT INTO knowledge_assertion_entities (id, book_id, assertion_id, entity_id, role, created_at) VALUES ('ae1', 'b1', 'a1', 'e1', 'related', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        let duplicate_entity_ref = sqlx::query("INSERT INTO knowledge_assertion_entities (id, book_id, assertion_id, entity_id, role, created_at) VALUES ('ae2', 'b1', 'a1', 'e1', 'related', datetime('now'))")
+            .execute(&pool)
+            .await;
+        assert!(
+            duplicate_entity_ref.is_err(),
+            "UNIQUE(assertion_id, entity_id, role) should reject duplicate references"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_v4_clears_knowledge_tables() {
+        let pool = setup_test_db().await;
+        init_v4(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'knowledge_assertion', 'test', 'ss1', 'run1', 0.9, 'high', 'accepted', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e1', 'b1', 'concept', 'Magic', 'Magic', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_cards (id, book_id, category, topic_key, topic_display, confidence, importance_score, first_seen_chapter, last_updated_chapter, status, created_at, updated_at) VALUES ('k1', 'b1', 'world_rule', 'magic-rules', 'Magic Rules', 0.8, 0.9, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_assertions (id, book_id, card_id, source_claim_id, assertion_text, status, confidence, importance_score, chapter_index, created_at, updated_at) VALUES ('a1', 'b1', 'k1', 'c1', 'Magic has rules.', 'active', 0.9, 0.8, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_assertions (id, book_id, card_id, source_claim_id, assertion_text, status, confidence, importance_score, chapter_index, created_at, updated_at) VALUES ('a2', 'b1', 'k1', 'c1', 'Magic has hidden rules.', 'active', 0.8, 0.7, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_assertion_links (id, book_id, from_assertion_id, to_assertion_id, link_type, created_at) VALUES ('l1', 'b1', 'a2', 'a1', 'clarifies', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_assertion_entities (id, book_id, assertion_id, entity_id, role, created_at) VALUES ('ae1', 'b1', 'a1', 'e1', 'related', datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        reset_v4(&pool, "b1").await.unwrap();
+
+        for table in &[
+            "knowledge_assertion_entities",
+            "knowledge_assertion_links",
+            "knowledge_assertions",
+            "knowledge_cards",
+        ] {
+            let count: (i64,) = sqlx::query_as(&format!(
+                "SELECT COUNT(*) FROM {} WHERE book_id = 'b1'",
+                table
+            ))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count.0, 0, "{} should be cleared", table);
+        }
+
+        let claim_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM claims WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(claim_count.0, 0, "claims should still be cleared");
     }
 
     #[tokio::test]
@@ -514,5 +790,60 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(ev_count.0, 0, "relationship_events should be cleared");
+    }
+
+    #[tokio::test]
+    async fn reset_v4_clears_identity_tables() {
+        let pool = setup_test_db().await;
+        init_v4(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'identity_reveal', 'same_identity', 'ss1', 'run1', 0.9, 'high', 'proposed', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e1', 'b1', 'character', 'A', 'A', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('e2', 'b1', 'character', 'B', 'B', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO entity_identity_links (id, book_id, entity_a_id, entity_b_id, link_type, confidence, source_claim_id, status, created_at, updated_at) VALUES ('l1', 'b1', 'e1', 'e2', 'same_identity', 0.9, 'c1', 'active', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entity_merge_operations (id, book_id, survivor_entity_id, victim_entity_id, source_identity_link_id, reason_code, confidence, status, created_at) VALUES ('m1', 'b1', 'e1', 'e2', 'l1', 'identity_reveal', 0.9, 'pending', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entity_merge_conflicts (id, book_id, merge_operation_id, survivor_entity_id, victim_entity_id, conflict_type, dimension_key, survivor_value, victim_value, resolution, created_at) VALUES ('mc1', 'b1', 'm1', 'e1', 'e2', 'property_conflict', 'identity', 'A', 'B', 'keep_survivor', datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        reset_v4(&pool, "b1").await.unwrap();
+
+        let link_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM entity_identity_links WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(link_count.0, 0, "entity_identity_links should be cleared");
+
+        let op_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM entity_merge_operations WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(op_count.0, 0, "entity_merge_operations should be cleared");
+
+        let conflict_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM entity_merge_conflicts WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            conflict_count.0, 0,
+            "entity_merge_conflicts should be cleared"
+        );
     }
 }
