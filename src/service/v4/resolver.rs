@@ -265,7 +265,10 @@ pub async fn resolve(
                 }
             }
 
-            Observation::MinorEvent { .. } | Observation::Summary { .. } => ResolvedObservation {
+            Observation::LocationIntroduction { .. }
+            | Observation::LocationEdge { .. }
+            | Observation::MinorEvent { .. }
+            | Observation::Summary { .. } => ResolvedObservation {
                 observation: obs.clone(),
                 subject_entity_id: None,
                 object_entity_id: None,

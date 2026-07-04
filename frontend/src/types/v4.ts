@@ -244,3 +244,93 @@ export interface V4KnowledgeCardDetailView {
   card: V4KnowledgeCardListItem
   assertionsByStatus: Record<string, V4KnowledgeAssertionView[]>
 }
+
+// ─── Map Types (Phase 5) ───
+
+export interface V4PlaceSummaryView {
+  id: string
+  name: string
+  placeType: string
+}
+
+export interface V4LinkedOrganizationView {
+  id: string
+  name: string
+  linkType: string
+}
+
+export interface V4PlaceDetailView {
+  id: string
+  name: string
+  placeType: string
+  linkedOrganizations: V4LinkedOrganizationView[]
+}
+
+export interface V4PlaceHierarchyNode {
+  placeId: string
+  name: string
+  placeType: string
+  children: V4PlaceHierarchyNode[]
+}
+
+export interface V4MapOverviewView {
+  placeCount: number
+  activeEdgeCount: number
+  conflictCount: number
+  topPlaces: V4PlaceSummaryView[]
+}
+
+export interface V4MapPlacesResponse {
+  places: V4PlaceSummaryView[]
+  hierarchy: V4PlaceHierarchyNode[]
+  total: number
+}
+
+export interface V4MapGraphNode {
+  placeId: string
+  label: string
+  placeType: string
+}
+
+export interface V4MapGraphEdge {
+  edgeId: string
+  fromPlaceId: string
+  toPlaceId: string
+  edgeType: string
+}
+
+export interface V4MapLayoutNode {
+  placeId: string
+  x: number
+  y: number
+  label: string
+  placeType: string
+}
+
+export interface V4MapLayoutView {
+  nodes: V4MapLayoutNode[]
+  edges: V4MapGraphEdge[]
+  warnings: string[]
+}
+
+export interface V4MapGraphView {
+  nodes: V4MapGraphNode[]
+  edges: V4MapGraphEdge[]
+  layout: V4MapLayoutView | null
+  warnings: string[]
+}
+
+export interface V4MapConflictView {
+  id: string
+  newEdgeClaimId: string
+  existingEdgeId: string | null
+  conflictType: string
+  reasonCode: string
+  status: string
+  createdAt: string
+}
+
+export interface V4MapConflictsResponse {
+  conflicts: V4MapConflictView[]
+  total: number
+}

@@ -75,6 +75,11 @@ pub async fn write_claims(
                     // KnowledgeAssertion always enters Knowledge Revision Judge; risk is
                     // observability/priority only and must not bypass the Phase 4 path.
                     Observation::KnowledgeAssertion { .. } => "proposed",
+                    // Location observations always enter the Phase 5 place/map path.
+                    // They remain proposed until the place reducer transaction accepts them.
+                    Observation::LocationIntroduction { .. } | Observation::LocationEdge { .. } => {
+                        "proposed"
+                    }
                     _ if is_identity_observation(&obs.observation) => "proposed",
                     _ => match obs.risk_level {
                         RiskLevel::High => {
@@ -144,6 +149,8 @@ fn get_claim_type(obs: &Observation) -> String {
         Observation::PropertyUpdate { .. } => "property_update".to_string(),
         Observation::RelationshipUpdate { .. } => "relationship_update".to_string(),
         Observation::KnowledgeAssertion { .. } => "knowledge_assertion".to_string(),
+        Observation::LocationIntroduction { .. } => "location_introduction".to_string(),
+        Observation::LocationEdge { .. } => "location_edge".to_string(),
         Observation::IdentityReveal { .. } => "identity_reveal".to_string(),
         Observation::EntityMergeCandidate { .. } => "entity_merge_candidate".to_string(),
         Observation::EntitySplitCandidate { .. } => "entity_split_candidate".to_string(),
@@ -161,6 +168,8 @@ fn get_confidence(obs: &Observation) -> f64 {
         | Observation::PropertyUpdate { confidence, .. }
         | Observation::RelationshipUpdate { confidence, .. }
         | Observation::KnowledgeAssertion { confidence, .. }
+        | Observation::LocationIntroduction { confidence, .. }
+        | Observation::LocationEdge { confidence, .. }
         | Observation::IdentityReveal { confidence, .. }
         | Observation::EntityMergeCandidate { confidence, .. }
         | Observation::EntitySplitCandidate { confidence, .. }
@@ -178,6 +187,9 @@ fn get_object_mention(obs: &Observation) -> Option<String> {
         Observation::IdentityReveal {
             canonical_mention, ..
         } => Some(canonical_mention.clone()),
+        Observation::LocationEdge {
+            to_place_mention, ..
+        } => Some(to_place_mention.clone()),
         Observation::EntityMergeCandidate {
             entity_b_mention, ..
         }
@@ -231,6 +243,26 @@ fn build_predicate(obs: &Observation) -> String {
             assertion_text,
             ..
         } => format!("{}:{} — {}", category, topic, assertion_text),
+        Observation::LocationIntroduction {
+            place_mention,
+            place_type,
+            parent_place_mention,
+            ..
+        } => {
+            if let Some(parent) = parent_place_mention {
+                format!("place {} ({}) under {}", place_mention, place_type, parent)
+            } else {
+                format!("place {} ({})", place_mention, place_type)
+            }
+        }
+        Observation::LocationEdge {
+            from_place_mention,
+            to_place_mention,
+            edge_type,
+            ..
+        } => {
+            format!("{} {} {}", from_place_mention, edge_type, to_place_mention)
+        }
         Observation::IdentityReveal {
             revealed_mention,
             canonical_mention,
@@ -338,6 +370,40 @@ fn get_value_fields(obs: &Observation) -> (Option<String>, Option<String>) {
                 "reason_hint": reason_hint,
             });
             (Some(assertion_text.clone()), Some(json.to_string()))
+        }
+        Observation::LocationIntroduction {
+            place_type,
+            parent_place_mention,
+            aliases,
+            description,
+            importance_score,
+            map_visible_hint,
+            ..
+        } => {
+            let json = serde_json::json!({
+                "place_type": place_type,
+                "parent_place_mention": parent_place_mention,
+                "aliases": aliases,
+                "description": description,
+                "importance_score": importance_score,
+                "map_visible_hint": map_visible_hint,
+            });
+            (description.clone(), Some(json.to_string()))
+        }
+        Observation::LocationEdge {
+            edge_type,
+            direction_hint,
+            distance_hint,
+            is_topological_hint,
+            ..
+        } => {
+            let json = serde_json::json!({
+                "edge_type": edge_type,
+                "direction_hint": direction_hint,
+                "distance_hint": distance_hint,
+                "is_topological_hint": is_topological_hint,
+            });
+            (None, Some(json.to_string()))
         }
         Observation::IdentityReveal {
             reveal_type,
@@ -540,6 +606,173 @@ mod tests {
             result.claims_created[0].subject_entity_id.as_deref(),
             Some("entity-1")
         );
+    }
+
+    #[tokio::test]
+    async fn location_introduction_creates_proposed_claim() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::LocationIntroduction {
+                place_mention: "青云城".to_string(),
+                place_type: "city".to_string(),
+                parent_place_mention: Some("东域".to_string()),
+                aliases: vec!["青云古城".to_string()],
+                description: Some("东域重城".to_string()),
+                importance_score: 0.8,
+                map_visible_hint: Some(true),
+                evidence_span_ids: vec![span_id.0.clone()],
+                confidence: 0.9,
+            },
+            subject_entity_id: None,
+            object_entity_id: None,
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::Low,
+            resolution: Resolution::CreateNew,
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        let claim = &result.claims_created[0];
+        assert_eq!(claim.status, "proposed");
+        assert_eq!(claim.claim_type, "location_introduction");
+        assert_eq!(claim.subject_mention.as_deref(), Some("青云城"));
+        let value: serde_json::Value =
+            serde_json::from_str(claim.value_json.as_deref().expect("value_json")).unwrap();
+        assert_eq!(value["place_type"], "city");
+        assert_eq!(value["parent_place_mention"], "东域");
+        assert_eq!(value["aliases"][0], "青云古城");
+        assert_eq!(value["map_visible_hint"], true);
+    }
+
+    #[tokio::test]
+    async fn location_edge_creates_proposed_claim() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::LocationEdge {
+                from_place_mention: "黑风谷".to_string(),
+                to_place_mention: "青云城".to_string(),
+                edge_type: "north_of".to_string(),
+                direction_hint: Some("north".to_string()),
+                distance_hint: Some("百里".to_string()),
+                evidence_span_ids: vec![span_id.0.clone()],
+                confidence: 0.86,
+                is_topological_hint: true,
+            },
+            subject_entity_id: None,
+            object_entity_id: None,
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::Uncertain,
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_created.len(), 1);
+        let claim = &result.claims_created[0];
+        assert_eq!(claim.status, "proposed");
+        assert_eq!(claim.claim_type, "location_edge");
+        assert_eq!(claim.subject_mention.as_deref(), Some("黑风谷"));
+        assert_eq!(claim.object_mention.as_deref(), Some("青云城"));
+        let value: serde_json::Value =
+            serde_json::from_str(claim.value_json.as_deref().expect("value_json")).unwrap();
+        assert_eq!(value["edge_type"], "north_of");
+        assert_eq!(value["direction_hint"], "north");
+        assert_eq!(value["distance_hint"], "百里");
+        assert_eq!(value["is_topological_hint"], true);
+    }
+
+    #[tokio::test]
+    async fn location_claims_preserve_source_spans() {
+        let (pool, claim_repo, chapter_repo) = setup().await;
+        let first_span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let second_span_id = uuid::Uuid::new_v4().to_string();
+        let chapter_id: (String,) =
+            sqlx::query_as("SELECT id FROM chapters WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let segment_id: (String,) =
+            sqlx::query_as("SELECT id FROM chapter_segments WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES (?, 'b1', ?, 'hash', ?, 1, 11, 20, 'more text', datetime('now'))")
+            .bind(&second_span_id)
+            .bind(&chapter_id.0)
+            .bind(&segment_id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let resolved = vec![ResolvedObservation {
+            observation: Observation::LocationEdge {
+                from_place_mention: "青云城".to_string(),
+                to_place_mention: "黑风谷".to_string(),
+                edge_type: "route_to".to_string(),
+                direction_hint: None,
+                distance_hint: None,
+                evidence_span_ids: vec![first_span_id.0.clone(), second_span_id.clone()],
+                confidence: 0.8,
+                is_topological_hint: true,
+            },
+            subject_entity_id: None,
+            object_entity_id: None,
+            resolved_dimension_key: None,
+            risk_level: RiskLevel::High,
+            resolution: Resolution::Uncertain,
+        }];
+
+        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+            .await
+            .unwrap();
+        let claim_id = &result.claims_created[0].id;
+        let links: Vec<(String, String)> = sqlx::query_as(
+            "SELECT source_span_id, role FROM claim_source_spans WHERE claim_id = ? ORDER BY role DESC, source_span_id ASC",
+        )
+        .bind(claim_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(links.len(), 2);
+        assert!(links.contains(&(first_span_id.0, "primary".to_string())));
+        assert!(links.contains(&(second_span_id, "supporting".to_string())));
     }
 
     #[tokio::test]

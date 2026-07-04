@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use crate::api::{auth::AuthContext, AppState};
 use crate::error::error::{ApiResponse, AppError};
 use crate::service::v4::knowledge_projection;
+use crate::service::v4::place_projection;
 use crate::service::v4::projection;
 use crate::service::v4::relationship_projection;
 use crate::storage::db::v4::entity_repo::EntityRepo;
@@ -17,6 +18,7 @@ use crate::storage::db::v4::identity_repo::{
     IdentityLinkRecord, IdentityRepo, MergeOperationRecord,
 };
 use crate::storage::db::v4::progress_repo::ProgressRepo;
+use crate::storage::db::v4::place_repo::{PlaceEdgeConflictRecord, PlaceRepo};
 use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
 use crate::storage::db::v4::reset_v4;
 use crate::util::text::repair_encoded_url;
@@ -190,6 +192,33 @@ pub struct V4MergeOperationView {
 pub struct V4MergeOperationsResponse {
     pub merge_operations: Vec<V4MergeOperationView>,
     pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4MapPlacesResponse {
+    pub places: Vec<place_projection::PlaceSummaryView>,
+    pub hierarchy: Vec<place_projection::PlaceHierarchyNode>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4MapConflictsResponse {
+    pub conflicts: Vec<V4MapConflictView>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V4MapConflictView {
+    pub id: String,
+    pub new_edge_claim_id: String,
+    pub existing_edge_id: Option<String>,
+    pub conflict_type: String,
+    pub reason_code: String,
+    pub status: String,
+    pub created_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -966,6 +995,124 @@ pub async fn get_v4_knowledge_category(
     )))
 }
 
+/// GET /v4/map — book-level map overview.
+pub async fn get_v4_map(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let view = place_projection::project_map_overview(&ctx.book_id, &state.pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/map/places — place list plus hierarchy.
+pub async fn get_v4_map_places(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let places = place_projection::project_all_places(&ctx.book_id, &state.pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let hierarchy = place_projection::project_place_hierarchy(&ctx.book_id, &state.pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let total = places.len();
+    let response = V4MapPlacesResponse {
+        places,
+        hierarchy,
+        total,
+    };
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(response).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/map/places/:place_id — place detail.
+pub async fn get_v4_map_place_detail(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(place_id): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let view = place_projection::project_place_detail(&ctx.book_id, &place_id, &state.pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/map/graph — active topology graph.
+pub async fn get_v4_map_graph(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let view = place_projection::project_map_graph(&ctx.book_id, &state.pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/map/layout — rebuild deterministic layout snapshot from active topology.
+pub async fn get_v4_map_layout(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let max_processed = get_max_processed(&state, &ctx.book_id).await?;
+    let view = place_projection::rebuild_layout_snapshot(&ctx.book_id, max_processed, &state.pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+/// GET /v4/map/conflicts — map conflict ledger.
+pub async fn get_v4_map_conflicts(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let conflicts = PlaceRepo::new(state.pool.clone())
+        .list_conflicts(&ctx.book_id, None)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?
+        .into_iter()
+        .map(map_conflict_to_view)
+        .collect::<Vec<_>>();
+    let total = conflicts.len();
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(V4MapConflictsResponse { conflicts, total }).unwrap_or_default(),
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
@@ -1021,6 +1168,18 @@ fn merge_operation_to_view(operation: MergeOperationRecord) -> V4MergeOperationV
         result_json: operation.result_json,
         created_at: operation.created_at,
         completed_at: operation.completed_at,
+    }
+}
+
+fn map_conflict_to_view(conflict: PlaceEdgeConflictRecord) -> V4MapConflictView {
+    V4MapConflictView {
+        id: conflict.id,
+        new_edge_claim_id: conflict.new_edge_claim_id,
+        existing_edge_id: conflict.existing_edge_id,
+        conflict_type: conflict.conflict_type,
+        reason_code: conflict.reason_code,
+        status: conflict.status,
+        created_at: conflict.created_at,
     }
 }
 

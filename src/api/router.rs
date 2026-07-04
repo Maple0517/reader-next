@@ -47,6 +47,12 @@ const V4_MERGE_OPERATIONS_ROUTE: &str = "/api/books/v4/merge-operations";
 const V4_KNOWLEDGE_ROUTE: &str = "/api/books/v4/knowledge";
 const V4_KNOWLEDGE_CARD_ROUTE: &str = "/api/books/v4/knowledge/cards/:card_id";
 const V4_KNOWLEDGE_CATEGORY_ROUTE: &str = "/api/books/v4/knowledge/categories/:category";
+const V4_MAP_ROUTE: &str = "/api/books/v4/map";
+const V4_MAP_PLACES_ROUTE: &str = "/api/books/v4/map/places";
+const V4_MAP_PLACE_DETAIL_ROUTE: &str = "/api/books/v4/map/places/:place_id";
+const V4_MAP_GRAPH_ROUTE: &str = "/api/books/v4/map/graph";
+const V4_MAP_LAYOUT_ROUTE: &str = "/api/books/v4/map/layout";
+const V4_MAP_CONFLICTS_ROUTE: &str = "/api/books/v4/map/conflicts";
 
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
@@ -351,6 +357,15 @@ pub fn build_router(state: AppState) -> Router {
             V4_KNOWLEDGE_CATEGORY_ROUTE,
             get(handlers::get_v4_knowledge_category),
         )
+        .route(V4_MAP_ROUTE, get(handlers::get_v4_map))
+        .route(V4_MAP_PLACES_ROUTE, get(handlers::get_v4_map_places))
+        .route(
+            V4_MAP_PLACE_DETAIL_ROUTE,
+            get(handlers::get_v4_map_place_detail),
+        )
+        .route(V4_MAP_GRAPH_ROUTE, get(handlers::get_v4_map_graph))
+        .route(V4_MAP_LAYOUT_ROUTE, get(handlers::get_v4_map_layout))
+        .route(V4_MAP_CONFLICTS_ROUTE, get(handlers::get_v4_map_conflicts))
         .route("/reader3/getReplaceRules", get(handlers::get_replace_rules))
         .route(
             "/reader3/saveReplaceRule",
@@ -648,6 +663,15 @@ mod tests {
                 Method::GET,
                 "/api/books/v4/knowledge/categories/history".to_string(),
             ),
+            (Method::GET, V4_MAP_ROUTE.to_string()),
+            (Method::GET, V4_MAP_PLACES_ROUTE.to_string()),
+            (
+                Method::GET,
+                V4_MAP_PLACE_DETAIL_ROUTE.replace(":place_id", "test-place"),
+            ),
+            (Method::GET, V4_MAP_GRAPH_ROUTE.to_string()),
+            (Method::GET, V4_MAP_LAYOUT_ROUTE.to_string()),
+            (Method::GET, V4_MAP_CONFLICTS_ROUTE.to_string()),
         ] {
             let response = client
                 .request(method.clone(), format!("{base_url}{path}"))
@@ -844,6 +868,177 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(memory["data"]["knowledgeCount"], 1);
+
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn v4_map_api_returns_overview_places_graph_layout_conflicts() {
+        let (state, dir) = create_test_state().await;
+        db::v4::init_v4(&state.pool).await.unwrap();
+        let book_url = "map-book";
+        let book_id = crate::util::hash::md5_hex(book_url);
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('chapter-map-1', ?, 1, 'map text', 'hash-map', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('segment-map-1', ?, 'chapter-map-1', 'hash-map', 0, datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('span-map-1', ?, 'chapter-map-1', 'hash-map', 'segment-map-1', 0, 0, 10, '青云城到黑风谷', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run-map-1', ?, 'chapter-map-1', 'extract', 'test', 'v1', 1, 'input', 'completed', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, subject_mention, object_mention, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('claim-map-1', ?, 1, 'location_edge', '青云城', '黑风谷', 'location_edge', 'span-map-1', 'run-map-1', 0.9, 'medium', 'accepted', datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('place-map-a', ?, 'place', '青云城', '青云城', 0.9, 1, 1, 'active', datetime('now'), datetime('now')), ('place-map-b', ?, 'place', '黑风谷', '黑风谷', 0.7, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO place_details (entity_id, book_id, place_type, parent_place_id, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('place-map-a', ?, 'city', NULL, 0.9, 1, 1, 'active', datetime('now'), datetime('now')), ('place-map-b', ?, 'dungeon', 'place-map-a', 0.7, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        for idx in 0..11 {
+            let place_id = format!("place-map-extra-{idx}");
+            let name = format!("外域据点{idx}");
+            sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES (?, ?, 'place', ?, ?, 0.1, 1, 1, 'active', datetime('now'), datetime('now'))")
+                .bind(&place_id)
+                .bind(&book_id)
+                .bind(&name)
+                .bind(&name)
+                .execute(&state.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO place_details (entity_id, book_id, place_type, parent_place_id, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES (?, ?, 'building', NULL, 0.1, 1, 1, 'active', datetime('now'), datetime('now'))")
+                .bind(&place_id)
+                .bind(&book_id)
+                .execute(&state.pool)
+                .await
+                .unwrap();
+        }
+        let place_repo = crate::storage::db::v4::place_repo::PlaceRepo::new(state.pool.clone());
+        place_repo
+            .find_or_create_edge(
+                &book_id,
+                "place-map-a",
+                "place-map-b",
+                "route_to",
+                None,
+                Some("三日路程"),
+                0.9,
+                "claim-map-1",
+                1,
+            )
+            .await
+            .unwrap();
+        place_repo
+            .insert_conflict(
+                &book_id,
+                "claim-map-1",
+                None,
+                "duplicate_conflicting_direction",
+                "opposite_direction",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let client = Client::new();
+        let base_url = format!("http://{}", addr);
+
+        let overview: serde_json::Value = client
+            .get(format!("{base_url}/api/books/v4/map?bookUrl={book_url}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(overview["data"]["placeCount"], 13);
+        assert_eq!(overview["data"]["activeEdgeCount"], 1);
+
+        let places: serde_json::Value = client
+            .get(format!("{base_url}/api/books/v4/map/places?bookUrl={book_url}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let hierarchy_names = places["data"]["hierarchy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert!(hierarchy_names.contains(&"青云城"));
+        assert_eq!(places["data"]["total"], 13);
+        assert_eq!(places["data"]["places"].as_array().unwrap().len(), 13);
+
+        let detail: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/map/places/place-map-a?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(detail["data"]["name"], "青云城");
+
+        let graph: serde_json::Value = client
+            .get(format!("{base_url}/api/books/v4/map/graph?bookUrl={book_url}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(graph["data"]["edges"][0]["edgeType"], "route_to");
+
+        let layout: serde_json::Value = client
+            .get(format!("{base_url}/api/books/v4/map/layout?bookUrl={book_url}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(layout["data"]["nodes"].as_array().unwrap().len(), 13);
+
+        let conflicts: serde_json::Value = client
+            .get(format!("{base_url}/api/books/v4/map/conflicts?bookUrl={book_url}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(conflicts["data"]["total"], 1);
 
         server.abort();
         let _ = tokio::fs::remove_dir_all(dir).await;

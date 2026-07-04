@@ -280,45 +280,11 @@
           />
         </section>
 
-        <section v-else class="stack-panel">
-          <AiBookMapPanel
-            :map="memoryView.map"
-            :locations="memoryView.locations"
-            :busy="aiStore.isBusy"
-            @generate="generateMap"
+        <section v-else-if="activeTab === 'map' && book" class="stack-panel">
+          <V4MapPanel
+            :book-url="book.bookUrl"
+            :body-style="{}"
           />
-
-          <article class="panel-card">
-            <div class="panel-head">
-              <div>
-                <h2>地点</h2>
-                <p>{{ memoryView.locations.length }} 个地点</p>
-              </div>
-            </div>
-            <article v-for="location in displayLocations" :key="location.id" class="list-item">
-              <div class="item-title">
-                <h3>{{ location.name }}</h3>
-                <span>{{ location.kind || location.scale }}</span>
-              </div>
-              <p>{{ location.description || '暂无说明' }}</p>
-              <div class="meta-line">
-                <span v-if="location.currentStatus">状态：{{ location.currentStatus }}</span>
-                <span v-if="location.parentName">上级：{{ location.parentName }}</span>
-                <span v-if="location.firstSeenChapter">首次：{{ location.firstSeenChapter }}</span>
-              </div>
-              <details v-if="hasEvidence(location.evidence)" class="evidence-block">
-                <summary>来源</summary>
-                <ul>
-                  <li v-for="item in visibleEvidence(location.evidence)" :key="evidenceKey(item)">
-                    <strong>{{ evidenceChapterLabel(item) }}</strong>
-                    <span>{{ item.note }}</span>
-                    <blockquote v-if="item.quote">{{ item.quote }}</blockquote>
-                  </li>
-                </ul>
-              </details>
-            </article>
-            <EmptyState v-if="!displayLocations.length" text="暂无地点资料" />
-          </article>
         </section>
       </main>
     </div>
@@ -342,9 +308,9 @@ import { computed, defineComponent, h, onMounted, onUnmounted, ref, watch } from
 import { useRoute, useRouter } from 'vue-router'
 import { getShelfBook } from '../api/bookshelf'
 import { getV4Characters } from '../api/v4/book'
-import AiBookMapPanel from '../components/reader/AiBookMapPanel.vue'
 import V4IdentityPanel from '../components/reader/V4IdentityPanel.vue'
 import V4KnowledgePanel from '../components/reader/V4KnowledgePanel.vue'
+import V4MapPanel from '../components/reader/V4MapPanel.vue'
 import V4RelationshipPanel from '../components/reader/V4RelationshipPanel.vue'
 import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
@@ -377,18 +343,6 @@ type DisplayRelationship = {
   polarity: string
   strength: string
   status: string
-  evidence: AiBookEvidence[]
-}
-
-type DisplayLocation = {
-  id: string
-  name: string
-  kind: string
-  scale: string
-  description: string
-  currentStatus: string
-  parentName: string
-  firstSeenChapter: string
   evidence: AiBookEvidence[]
 }
 
@@ -475,7 +429,6 @@ const progressText = computed(() => {
   return `${processed} 已入库 · 当前阅读 ${current}`
 })
 const characterNameById = computed(() => new Map((memoryView.value?.characters || []).map((item) => [item.id, item.name])))
-const locationNameById = computed(() => new Map((memoryView.value?.locations || []).map((item) => [item.id, item.name])))
 const chapterStateByName = computed(() => new Map((chapterMemory.value?.digest?.characterStates || []).map((item) => [item.name, item])))
 const currentChapterSummary = computed(() => chapterMemory.value?.digest?.summary || chapterMemory.value?.lastError || '当前章节还没有摘要')
 const currentKeyPoints = computed(() => chapterMemory.value?.digest?.keyPoints || [])
@@ -505,17 +458,6 @@ const displayRelationships = computed<DisplayRelationship[]>(() => (memoryView.v
   strength: relationship.strength,
   status: relationship.status,
   evidence: relationship.evidence,
-})))
-const displayLocations = computed<DisplayLocation[]>(() => (memoryView.value?.locations || []).map((location) => ({
-  id: location.id,
-  name: location.name,
-  kind: location.kind,
-  scale: location.scale,
-  description: location.description,
-  currentStatus: location.currentStatus || '',
-  parentName: location.parentLocationId ? locationNameById.value.get(location.parentLocationId) || '' : '',
-  firstSeenChapter: formatChapter(location.firstSeenChapterIndex ?? undefined),
-  evidence: location.evidence,
 })))
 const worldviewGroups = computed(() => {
   const groups = new Map<string, NonNullable<typeof memoryView.value>["knowledgeFacts"]>()
@@ -660,19 +602,6 @@ async function generateCurrentChapter() {
     appStore.showToast('当前章节 AI资料已生成', 'success')
   } catch (error) {
     appStore.showToast((error as Error).message || '当前章节生成失败', 'error')
-  }
-}
-
-async function generateMap() {
-  if (!book.value) return
-  try {
-    await aiStore.generateMap({
-      bookUrl: book.value.bookUrl,
-      sourceChapterIndex: currentChapterIndex.value,
-    })
-    appStore.showToast('AI 地图已生成', 'success')
-  } catch (error) {
-    appStore.showToast((error as Error).message || 'AI 地图生成失败', 'error')
   }
 }
 

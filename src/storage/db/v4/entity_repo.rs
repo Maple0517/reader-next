@@ -114,6 +114,28 @@ impl EntityRepo {
         Ok(row.map(|r| r.into()))
     }
 
+    pub async fn get_by_canonical_name_and_type(
+        &self,
+        book_id: &str,
+        entity_type: &str,
+        canonical_name: &str,
+    ) -> anyhow::Result<Option<EntityRecord>> {
+        let normalized = normalize_name(canonical_name);
+        let row = sqlx::query_as::<_, EntityRow>(
+            "SELECT id, book_id, entity_type, canonical_name, display_name, short_summary, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at
+             FROM entities
+             WHERE book_id = ? AND entity_type = ? AND canonical_name = ? AND status = 'active'
+             LIMIT 1",
+        )
+        .bind(book_id)
+        .bind(entity_type)
+        .bind(&normalized)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
     pub async fn list_by_book(&self, book_id: &str) -> anyhow::Result<Vec<EntityRecord>> {
         let rows = sqlx::query_as::<_, EntityRow>(
             "SELECT id, book_id, entity_type, canonical_name, display_name, short_summary, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at FROM entities WHERE book_id = ? AND status = 'active' ORDER BY importance_score DESC, canonical_name ASC"
@@ -257,6 +279,28 @@ impl EntityRepo {
              LIMIT 1"
         )
         .bind(book_id)
+        .bind(alias)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
+    pub async fn find_entity_by_alias_and_type(
+        &self,
+        book_id: &str,
+        entity_type: &str,
+        alias: &str,
+    ) -> anyhow::Result<Option<EntityRecord>> {
+        let row = sqlx::query_as::<_, EntityRow>(
+            "SELECT e.id, e.book_id, e.entity_type, e.canonical_name, e.display_name, e.short_summary, e.importance_score, e.first_seen_chapter, e.last_seen_chapter, e.status, e.created_at, e.updated_at
+             FROM entities e
+             JOIN entity_aliases a ON a.entity_id = e.id
+             WHERE e.book_id = ? AND e.entity_type = ? AND a.alias = ? AND e.status = 'active'
+             LIMIT 1"
+        )
+        .bind(book_id)
+        .bind(entity_type)
         .bind(alias)
         .fetch_optional(&self.pool)
         .await?;

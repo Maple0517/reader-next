@@ -14,6 +14,12 @@ import type {
   V4KnowledgeOverviewView,
   V4KnowledgeCategoryView,
   V4KnowledgeCardDetailView,
+  V4MapConflictsResponse,
+  V4MapGraphView,
+  V4MapLayoutView,
+  V4MapOverviewView,
+  V4MapPlacesResponse,
+  V4PlaceDetailView,
 } from '../../types/v4'
 
 export function getV4Memory(bookUrl: string) {
@@ -90,4 +96,28 @@ export function getV4KnowledgeCategory(bookUrl: string, category: string) {
 
 export function getV4KnowledgeCard(bookUrl: string, cardId: string) {
   return v4Http.get<V4KnowledgeCardDetailView>(`/knowledge/cards/${encodeURIComponent(cardId)}`, { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4Map(bookUrl: string) {
+  return v4Http.get<V4MapOverviewView>('/map', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4MapPlaces(bookUrl: string) {
+  return v4Http.get<V4MapPlacesResponse>('/map/places', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4MapPlaceDetail(bookUrl: string, placeId: string) {
+  return v4Http.get<V4PlaceDetailView>(`/map/places/${encodeURIComponent(placeId)}`, { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4MapGraph(bookUrl: string) {
+  return v4Http.get<V4MapGraphView>('/map/graph', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4MapLayout(bookUrl: string) {
+  return v4Http.get<V4MapLayoutView>('/map/layout', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4MapConflicts(bookUrl: string) {
+  return v4Http.get<V4MapConflictsResponse>('/map/conflicts', { params: { bookUrl } }).then((r) => r.data)
 }

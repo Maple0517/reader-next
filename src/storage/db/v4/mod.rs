@@ -5,6 +5,7 @@ pub mod claim_repo;
 pub mod entity_repo;
 pub mod identity_repo;
 pub mod knowledge_repo;
+pub mod place_repo;
 pub mod progress_repo;
 pub mod property_repo;
 pub mod relationship_repo;
@@ -127,6 +128,30 @@ pub async fn reset_v4(pool: &SqlitePool, book_id: &str) -> anyhow::Result<()> {
         .bind(book_id)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM map_layout_snapshots WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM place_edge_conflicts WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM place_edge_sources WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM place_edges WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM place_details WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM entity_links WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM knowledge_assertion_entities WHERE book_id = ?")
         .bind(book_id)
         .execute(&mut *tx)
@@ -213,6 +238,37 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
         db::init_pool(&database_url).await.unwrap()
+    }
+
+    async fn assert_table_exists(pool: &SqlitePool, table: &str) {
+        let result: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?")
+                .bind(table)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(result.0, 1, "Table '{}' should exist", table);
+    }
+
+    async fn insert_phase5_schema_base(pool: &SqlitePool) {
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'location_edge', 'spatial', 'ss1', 'run1', 0.9, 'high', 'proposed', datetime('now'), datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c2', 'b1', 1, 'location_edge', 'spatial', 'ss1', 'run1', 0.8, 'high', 'proposed', datetime('now'), datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('p1', 'b1', 'place', '青云城', '青云城', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('p2', 'b1', 'place', '落霞山', '落霞山', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('org1', 'b1', 'organization', '青云门', '青云门', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(pool).await.unwrap();
     }
 
     #[tokio::test]
@@ -512,6 +568,239 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(result.0, 1, "Index '{}' should exist", index);
+        }
+    }
+
+    #[tokio::test]
+    async fn v4_place_map_tables_exist() {
+        let pool = setup_test_db().await;
+
+        for table in &[
+            "place_details",
+            "place_edges",
+            "place_edge_sources",
+            "map_layout_snapshots",
+            "place_edge_conflicts",
+            "entity_links",
+        ] {
+            assert_table_exists(&pool, table).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn v4_place_map_indexes_exist() {
+        let pool = setup_test_db().await;
+
+        let indexes = vec![
+            "idx_place_details_book_status",
+            "idx_place_details_book_type",
+            "idx_place_details_parent",
+            "idx_place_edges_book_status",
+            "idx_place_edges_from",
+            "idx_place_edges_to",
+            "idx_place_edges_source_claim",
+            "idx_place_edge_sources_edge",
+            "idx_map_layout_snapshots_book_chapter",
+            "idx_map_layout_snapshots_edge_hash",
+            "idx_place_edge_conflicts_book_status",
+            "idx_place_edge_conflicts_claim",
+            "idx_entity_links_book_pair",
+            "idx_entity_links_source_claim",
+        ];
+
+        for index in indexes {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Index '{}' should exist", index);
+        }
+    }
+
+    #[tokio::test]
+    async fn place_details_schema() {
+        let pool = setup_test_db().await;
+        assert_table_exists(&pool, "place_details").await;
+        insert_phase5_schema_base(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO place_details (entity_id, book_id, place_type, parent_place_id, first_seen_chapter, last_seen_chapter, created_at, updated_at)
+             VALUES ('p1', 'b1', 'city', 'p2', 1, 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let self_parent = sqlx::query(
+            "INSERT INTO place_details (entity_id, book_id, place_type, parent_place_id, first_seen_chapter, last_seen_chapter, created_at, updated_at)
+             VALUES ('p2', 'b1', 'mountain', 'p2', 1, 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            self_parent.is_err(),
+            "place_details must reject self parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn place_edges_schema() {
+        let pool = setup_test_db().await;
+        assert_table_exists(&pool, "place_edges").await;
+        insert_phase5_schema_base(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO place_edges (id, book_id, from_place_id, to_place_id, edge_type, confidence, source_claim_id, first_seen_chapter, last_seen_chapter, created_at, updated_at)
+             VALUES ('edge1', 'b1', 'p1', 'p2', 'near', 0.8, 'c1', 1, 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let self_edge = sqlx::query(
+            "INSERT INTO place_edges (id, book_id, from_place_id, to_place_id, edge_type, confidence, source_claim_id, first_seen_chapter, last_seen_chapter, created_at, updated_at)
+             VALUES ('edge2', 'b1', 'p1', 'p1', 'near', 0.8, 'c1', 1, 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await;
+        assert!(self_edge.is_err(), "place_edges must reject self edges");
+
+        let invalid_status = sqlx::query(
+            "INSERT INTO place_edges (id, book_id, from_place_id, to_place_id, edge_type, confidence, source_claim_id, first_seen_chapter, last_seen_chapter, status, created_at, updated_at)
+             VALUES ('edge3', 'b1', 'p1', 'p2', 'near', 0.8, 'c1', 1, 1, 'uncertain', datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            invalid_status.is_err(),
+            "place_edges stores only accepted canonical statuses"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_layout_snapshots_schema() {
+        let pool = setup_test_db().await;
+        assert_table_exists(&pool, "map_layout_snapshots").await;
+
+        sqlx::query(
+            "INSERT INTO map_layout_snapshots (id, book_id, max_chapter, layout_version, layout_json, source_edge_hash, created_at)
+             VALUES ('layout1', 'b1', 1, 'v1', '{}', 'hash1', datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn place_edge_sources_schema() {
+        let pool = setup_test_db().await;
+        assert_table_exists(&pool, "place_edge_sources").await;
+        insert_phase5_schema_base(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO place_edges (id, book_id, from_place_id, to_place_id, edge_type, confidence, source_claim_id, first_seen_chapter, last_seen_chapter, created_at, updated_at)
+             VALUES ('edge1', 'b1', 'p1', 'p2', 'near', 0.8, 'c1', 1, 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO place_edge_sources (id, book_id, edge_id, source_claim_id, chapter_index, confidence, created_at)
+             VALUES ('src1', 'b1', 'edge1', 'c1', 1, 0.8, datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let duplicate_source = sqlx::query(
+            "INSERT INTO place_edge_sources (id, book_id, edge_id, source_claim_id, chapter_index, confidence, created_at)
+             VALUES ('src2', 'b1', 'edge1', 'c1', 1, 0.8, datetime('now'))",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            duplicate_source.is_err(),
+            "same edge/source claim should be unique"
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_links_schema() {
+        let pool = setup_test_db().await;
+        assert_table_exists(&pool, "entity_links").await;
+        insert_phase5_schema_base(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO entity_links (id, book_id, entity_a_id, entity_b_id, link_type, source_claim_id, confidence, created_at, updated_at)
+             VALUES ('el1', 'b1', 'org1', 'p1', 'headquarters_of', 'c1', 0.8, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let self_link = sqlx::query(
+            "INSERT INTO entity_links (id, book_id, entity_a_id, entity_b_id, link_type, source_claim_id, confidence, created_at, updated_at)
+             VALUES ('el2', 'b1', 'p1', 'p1', 'related_entity', 'c1', 0.8, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await;
+        assert!(self_link.is_err(), "entity_links must reject self links");
+
+        let invalid_type = sqlx::query(
+            "INSERT INTO entity_links (id, book_id, entity_a_id, entity_b_id, link_type, source_claim_id, confidence, created_at, updated_at)
+             VALUES ('el3', 'b1', 'org1', 'p1', 'redirect', 'c1', 0.8, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            invalid_type.is_err(),
+            "generic entity_links must not accept identity redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_v4_cleans_map_tables() {
+        let pool = setup_test_db().await;
+        init_v4(&pool).await.unwrap();
+        insert_phase5_schema_base(&pool).await;
+
+        sqlx::query("INSERT INTO place_details (entity_id, book_id, place_type, first_seen_chapter, last_seen_chapter, created_at, updated_at) VALUES ('p1', 'b1', 'city', 1, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO place_details (entity_id, book_id, place_type, first_seen_chapter, last_seen_chapter, created_at, updated_at) VALUES ('p2', 'b1', 'mountain', 1, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO place_edges (id, book_id, from_place_id, to_place_id, edge_type, confidence, source_claim_id, first_seen_chapter, last_seen_chapter, created_at, updated_at) VALUES ('edge1', 'b1', 'p1', 'p2', 'near', 0.8, 'c1', 1, 1, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO place_edge_sources (id, book_id, edge_id, source_claim_id, chapter_index, confidence, created_at) VALUES ('src1', 'b1', 'edge1', 'c1', 1, 0.8, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO place_edge_conflicts (id, book_id, new_edge_claim_id, existing_edge_id, conflict_type, reason_code, status, created_at) VALUES ('conflict1', 'b1', 'c2', 'edge1', 'opposite_direction', 'test', 'open', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO map_layout_snapshots (id, book_id, max_chapter, layout_version, layout_json, source_edge_hash, created_at) VALUES ('layout1', 'b1', 1, 'v1', '{}', 'hash1', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO entity_links (id, book_id, entity_a_id, entity_b_id, link_type, source_claim_id, confidence, created_at, updated_at) VALUES ('el1', 'b1', 'org1', 'p1', 'headquarters_of', 'c1', 0.8, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        reset_v4(&pool, "b1").await.unwrap();
+
+        for table in &[
+            "map_layout_snapshots",
+            "place_edge_conflicts",
+            "place_edge_sources",
+            "place_edges",
+            "place_details",
+            "entity_links",
+        ] {
+            let count: (i64,) = sqlx::query_as(&format!(
+                "SELECT COUNT(*) FROM {} WHERE book_id = 'b1'",
+                table
+            ))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count.0, 0, "{} should be cleared", table);
         }
     }
 

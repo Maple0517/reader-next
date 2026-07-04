@@ -123,6 +123,27 @@ pub enum Observation {
         status_hint: Option<String>,
         reason_hint: Option<String>,
     },
+    LocationIntroduction {
+        place_mention: String,
+        place_type: String,
+        parent_place_mention: Option<String>,
+        aliases: Vec<String>,
+        description: Option<String>,
+        importance_score: f64,
+        map_visible_hint: Option<bool>,
+        evidence_span_ids: Vec<String>,
+        confidence: f64,
+    },
+    LocationEdge {
+        from_place_mention: String,
+        to_place_mention: String,
+        edge_type: String,
+        direction_hint: Option<String>,
+        distance_hint: Option<String>,
+        evidence_span_ids: Vec<String>,
+        confidence: f64,
+        is_topological_hint: bool,
+    },
     IdentityReveal {
         revealed_mention: String,
         canonical_mention: String,
@@ -175,6 +196,10 @@ impl Observation {
             Observation::RelationshipUpdate {
                 subject_mention, ..
             } => Some(subject_mention),
+            Observation::LocationIntroduction { place_mention, .. } => Some(place_mention),
+            Observation::LocationEdge {
+                from_place_mention, ..
+            } => Some(from_place_mention),
             Observation::IdentityReveal {
                 revealed_mention, ..
             } => Some(revealed_mention),
@@ -225,6 +250,12 @@ impl Observation {
             }
             | Observation::KnowledgeAssertion {
                 evidence_span_ids, ..
+            }
+            | Observation::LocationIntroduction {
+                evidence_span_ids, ..
+            }
+            | Observation::LocationEdge {
+                evidence_span_ids, ..
             } => evidence_span_ids,
             Observation::Summary { .. } => &[],
         }
@@ -262,6 +293,12 @@ impl Observation {
                 evidence_span_ids, ..
             }
             | Observation::KnowledgeAssertion {
+                evidence_span_ids, ..
+            }
+            | Observation::LocationIntroduction {
+                evidence_span_ids, ..
+            }
+            | Observation::LocationEdge {
                 evidence_span_ids, ..
             } => *evidence_span_ids = span_ids,
             Observation::Summary { .. } => {}
@@ -317,6 +354,8 @@ pub fn classify_risk(observation: &Observation) -> RiskLevel {
         Observation::MinorEvent { .. } => RiskLevel::Low,
         Observation::RelationshipUpdate { .. } => RiskLevel::High,
         Observation::KnowledgeAssertion { .. } => RiskLevel::High,
+        Observation::LocationIntroduction { .. } => RiskLevel::Low,
+        Observation::LocationEdge { .. } => RiskLevel::High,
         Observation::IdentityReveal { .. }
         | Observation::EntityMergeCandidate { .. }
         | Observation::EntitySplitCandidate { .. }
@@ -415,6 +454,48 @@ const VALID_DIMENSION_KEYS: &[&str] = &[
     "background",
 ];
 
+pub const VALID_PLACE_TYPES: &[&str] = &[
+    "world",
+    "continent",
+    "region",
+    "country",
+    "city",
+    "sect_site",
+    "building",
+    "room",
+    "mountain",
+    "river",
+    "forest",
+    "road",
+    "route",
+    "secret_realm",
+    "battlefield",
+    "dungeon",
+    "unknown",
+];
+
+pub const VALID_PLACE_EDGE_TYPES: &[&str] = &[
+    "contains",
+    "part_of",
+    "near",
+    "adjacent_to",
+    "route_to",
+    "north_of",
+    "south_of",
+    "east_of",
+    "west_of",
+    "northeast_of",
+    "northwest_of",
+    "southeast_of",
+    "southwest_of",
+    "upstream_of",
+    "downstream_of",
+    "inside",
+    "entrance_to",
+    "connects_to",
+    "unknown_spatial",
+];
+
 pub const VALID_RELATION_GROUPS: &[&str] = &[
     "family",
     "romance",
@@ -508,6 +589,8 @@ impl Extractor for RealAiExtractor {
              - minor_event: 值得注意的事件（description, involved_mentions, evidence_span_ids, confidence）\n\
              - relationship_update: 重要人物关系（subject_mention, object_mention, relation_hint, relation_group, relation_label, directionality, evidence_span_ids, confidence, importance_hint, is_long_term_or_significant_hint）\n\
              - knowledge_assertion: 长期世界观知识（category, topic, assertion_text, evidence_span_ids, referenced_entity_mentions, status_hint, reason_hint, confidence, importance_score）\n\
+             - location_introduction: 地点首次出现/地点信息（place_mention, place_type, parent_place_mention, aliases, description, importance_score, map_visible_hint, evidence_span_ids, confidence）\n\
+             - location_edge: 稳定地点拓扑边（from_place_mention, to_place_mention, edge_type, direction_hint, distance_hint, is_topological_hint, evidence_span_ids, confidence）\n\
              - identity_reveal: 明确身份揭示（revealed_mention, canonical_mention, reveal_type, reason_hint, evidence_span_ids, confidence）\n\
              - entity_merge_candidate: 明确同一人候选（entity_a_mention, entity_b_mention, reason_hint, evidence_span_ids, confidence）\n\
              - entity_split_candidate: 可能误合并候选（entity_a_mention, entity_b_mention, reason_hint, evidence_span_ids, confidence）\n\
@@ -518,6 +601,8 @@ impl Extractor for RealAiExtractor {
              identity reveal 的 reveal_type 必须是以下之一：{}\n\n\
              knowledge category 必须是以下之一：{}\n\n\
              knowledge status_hint 只能是 fact / rumor / uncertain / false_belief；secret / prophecy 必须用 category 表达。\n\n\
+             place_type 必须是以下之一：{}\n\n\
+             location_edge.edge_type 必须是以下之一：{}\n\n\
              evidence_span_ids 必须使用以下可用 span IDs：{}\n\n\
              knowledge_assertion 只抽长期有用的世界知识：修炼体系、势力结构、世界规则、历史、秘密、预言、政治、地理概况。\n\
              不要把人物当前状态、人物关系、身份揭露、地点方向/地图边抽成 knowledge：\n\
@@ -525,6 +610,12 @@ impl Extractor for RealAiExtractor {
              - “张三和李四结盟” -> relationship_update，不是 knowledge_assertion\n\
              - “黑衣人其实是张三” -> identity_reveal，不是 knowledge_assertion\n\
              - “青云门在东域以北” -> Phase 5 map/location edge；Phase 4 只可抽地理概况，不写拓扑边\n\n\
+             location_edge 只抽两个地点之间稳定或有长期意义的空间关系：包含、相邻、路线、方位等。\n\
+             不要把人物移动、人物当前位置、组织归属、人物关系、身份揭示、纯知识概况抽成 location_edge：\n\
+             - “张三去了青云城” -> property_update(location) 或 minor_event，不是 location_edge\n\
+             - “张三属于青云门” -> property_update(affiliation) 或 relationship_update，不是 location_edge\n\
+             - “青云门是正道大派” -> knowledge_assertion / organization，不是 location_edge\n\
+             - “北境常年冰封” -> knowledge_assertion(geography)，不是 location_edge，除非同时给出两个地点的稳定空间关系\n\n\
              普通 alias / title 不是 identity_reveal：\n\
              - “张三又名张三丰” -> alias / name property, not merge by default\n\
              - “张三被称为剑魔” -> title / alias, not merge\n\
@@ -537,6 +628,8 @@ impl Extractor for RealAiExtractor {
             VALID_RELATION_GROUPS.join(", "),
             VALID_IDENTITY_REVEAL_TYPES.join(", "),
             VALID_KNOWLEDGE_CATEGORIES.join(", "),
+            VALID_PLACE_TYPES.join(", "),
+            VALID_PLACE_EDGE_TYPES.join(", "),
             span_ids_json
         );
 
@@ -684,6 +777,10 @@ pub fn parse_observations_from_json(
             "knowledge_assertion" | "KnowledgeAssertion" | "knowledgeAssertion" => {
                 "knowledge_assertion"
             }
+            "location_introduction" | "LocationIntroduction" | "locationIntroduction" => {
+                "location_introduction"
+            }
+            "location_edge" | "LocationEdge" | "locationEdge" => "location_edge",
             "identity_reveal" | "IdentityReveal" | "identityReveal" => "identity_reveal",
             "entity_merge_candidate" | "EntityMergeCandidate" | "entityMergeCandidate" => {
                 "entity_merge_candidate"
@@ -842,6 +939,71 @@ pub fn parse_observations_from_json(
                     referenced_entity_mentions,
                     status_hint,
                     reason_hint,
+                });
+            }
+            "location_introduction" => {
+                let place_mention = required_str(item, "place_mention")?;
+                if place_mention.trim().is_empty() {
+                    anyhow::bail!("place_mention is empty");
+                }
+                let place_type = required_str(item, "place_type")?;
+                if !VALID_PLACE_TYPES.contains(&place_type.as_str()) {
+                    anyhow::bail!("Invalid place_type: {}", place_type);
+                }
+                let parent_place_mention =
+                    optional_str(item, "parent_place_mention").map(|s| s.to_string());
+                let aliases = optional_str_array(item, "aliases");
+                let description = optional_str(item, "description").map(|s| s.to_string());
+                let importance_score = validate_unit_f64(item, "importance_score", 0.5)?;
+                let map_visible_hint = item.get("map_visible_hint").and_then(|v| v.as_bool());
+                let evidence_span_ids = validate_evidence_spans(item, &span_set)?;
+                let confidence = validate_confidence(item)?;
+                observations.push(Observation::LocationIntroduction {
+                    place_mention,
+                    place_type,
+                    parent_place_mention,
+                    aliases,
+                    description,
+                    importance_score,
+                    map_visible_hint,
+                    evidence_span_ids,
+                    confidence,
+                });
+            }
+            "location_edge" => {
+                reject_mistyped_location_edge_shape(item)?;
+                let from_place_mention = required_str(item, "from_place_mention")?;
+                if from_place_mention.trim().is_empty() {
+                    anyhow::bail!("from_place_mention is empty");
+                }
+                let to_place_mention = required_str(item, "to_place_mention")?;
+                if to_place_mention.trim().is_empty() {
+                    anyhow::bail!("to_place_mention is empty");
+                }
+                let edge_type = required_str(item, "edge_type")?;
+                if !VALID_PLACE_EDGE_TYPES.contains(&edge_type.as_str()) {
+                    anyhow::bail!("Invalid location edge_type: {}", edge_type);
+                }
+                let is_topological_hint = item
+                    .get("is_topological_hint")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if !is_topological_hint {
+                    anyhow::bail!("location_edge is not topological");
+                }
+                let direction_hint = optional_str(item, "direction_hint").map(|s| s.to_string());
+                let distance_hint = optional_str(item, "distance_hint").map(|s| s.to_string());
+                let evidence_span_ids = validate_evidence_spans(item, &span_set)?;
+                let confidence = validate_confidence(item)?;
+                observations.push(Observation::LocationEdge {
+                    from_place_mention,
+                    to_place_mention,
+                    edge_type,
+                    direction_hint,
+                    distance_hint,
+                    evidence_span_ids,
+                    confidence,
+                    is_topological_hint,
                 });
             }
             "summary" => {
@@ -1020,6 +1182,29 @@ fn reject_mistyped_knowledge_shape(item: &serde_json::Value) -> anyhow::Result<(
     for key in forbidden {
         if item.get(key).is_some() {
             anyhow::bail!("knowledge_assertion contains non-knowledge field: {}", key);
+        }
+    }
+    Ok(())
+}
+
+fn reject_mistyped_location_edge_shape(item: &serde_json::Value) -> anyhow::Result<()> {
+    let forbidden = [
+        "subject_mention",
+        "object_mention",
+        "involved_mentions",
+        "dimension_key",
+        "relation_group",
+        "relation_label",
+        "revealed_mention",
+        "canonical_mention",
+        "reveal_type",
+        "category",
+        "topic",
+        "assertion_text",
+    ];
+    for key in forbidden {
+        if item.get(key).is_some() {
+            anyhow::bail!("location_edge contains non-map field: {}", key);
         }
     }
     Ok(())
@@ -1345,6 +1530,94 @@ mod tests {
             }
             _ => panic!("expected EntityIntroduction"),
         }
+    }
+
+    #[test]
+    fn location_introduction_parser() {
+        let json = r#"[{"type":"location_introduction","place_mention":"青云城","place_type":"city","parent_place_mention":"东域","aliases":["青云古城"],"description":"东域重城","importance_score":0.8,"map_visible_hint":true,"evidence_span_ids":["s1"],"confidence":0.9}]"#;
+        let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            Observation::LocationIntroduction {
+                place_mention,
+                place_type,
+                parent_place_mention,
+                aliases,
+                importance_score,
+                map_visible_hint,
+                ..
+            } => {
+                assert_eq!(place_mention, "青云城");
+                assert_eq!(place_type, "city");
+                assert_eq!(parent_place_mention.as_deref(), Some("东域"));
+                assert_eq!(aliases, &vec!["青云古城".to_string()]);
+                assert_eq!(*importance_score, 0.8);
+                assert_eq!(*map_visible_hint, Some(true));
+            }
+            _ => panic!("expected location introduction"),
+        }
+    }
+
+    #[test]
+    fn location_edge_parser() {
+        let json = r#"[{"type":"location_edge","from_place_mention":"黑风谷","to_place_mention":"青云城","edge_type":"north_of","direction_hint":"north","distance_hint":"百里","is_topological_hint":true,"evidence_span_ids":["s1"],"confidence":0.86}]"#;
+        let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            Observation::LocationEdge {
+                from_place_mention,
+                to_place_mention,
+                edge_type,
+                direction_hint,
+                distance_hint,
+                is_topological_hint,
+                ..
+            } => {
+                assert_eq!(from_place_mention, "黑风谷");
+                assert_eq!(to_place_mention, "青云城");
+                assert_eq!(edge_type, "north_of");
+                assert_eq!(direction_hint.as_deref(), Some("north"));
+                assert_eq!(distance_hint.as_deref(), Some("百里"));
+                assert!(*is_topological_hint);
+            }
+            _ => panic!("expected location edge"),
+        }
+    }
+
+    #[test]
+    fn missing_place_evidence_rejected() {
+        let json = r#"[{"type":"location_introduction","place_mention":"青云城","place_type":"city","evidence_span_ids":[],"confidence":0.8}]"#;
+        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
+    }
+
+    #[test]
+    fn invalid_place_type_rejected() {
+        let json = r#"[{"type":"location_introduction","place_mention":"青云城","place_type":"school","evidence_span_ids":["s1"],"confidence":0.8}]"#;
+        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
+    }
+
+    #[test]
+    fn invalid_edge_type_rejected() {
+        let json = r#"[{"type":"location_edge","from_place_mention":"青云城","to_place_mention":"黑风谷","edge_type":"teleports_to","is_topological_hint":true,"evidence_span_ids":["s1"],"confidence":0.8}]"#;
+        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
+    }
+
+    #[test]
+    fn character_current_location_not_accepted_as_place_edge() {
+        let json = r#"[{"type":"location_edge","from_place_mention":"张三","to_place_mention":"青云城","edge_type":"route_to","subject_mention":"张三","is_topological_hint":false,"evidence_span_ids":["s1"],"confidence":0.8}]"#;
+        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
+    }
+
+    #[test]
+    fn relationship_not_accepted_as_place_edge() {
+        let json = r#"[{"type":"location_edge","from_place_mention":"张三","to_place_mention":"青云门","edge_type":"contains","relation_group":"hierarchy","is_topological_hint":true,"evidence_span_ids":["s1"],"confidence":0.8}]"#;
+        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
+    }
+
+    #[test]
+    fn knowledge_geography_summary_not_accepted_as_place_edge() {
+        let json = r#"[{"type":"location_edge","from_place_mention":"北境","to_place_mention":"大雪","edge_type":"unknown_spatial","category":"geography","assertion_text":"北境常年冰封。","is_topological_hint":true,"evidence_span_ids":["s1"],"confidence":0.8}]"#;
+        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
     }
 
     #[test]

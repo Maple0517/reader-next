@@ -5,8 +5,13 @@ use crate::service::v4::identity_judge::{self, IdentityGateResult, IdentityJudge
 use crate::service::v4::knowledge_judge::{
     self, KnowledgeGateResult, KnowledgeJudgeAssertionInput, KnowledgeRevisionJudge,
 };
+use crate::service::v4::map_conflict_judge::{
+    self, MapConflictDecision, MapConflictJudge, MapConflictJudgeInput,
+};
+use crate::service::v4::map_gate::{self, MapGateContext, MapGateResult};
+use crate::service::v4::place_resolver::{PlaceResolutionAction, PlaceResolver};
 use crate::service::v4::projection;
-use crate::service::v4::reducer;
+use crate::service::v4::{place_reducer, reducer};
 use crate::service::v4::relationship_judge::{self, GateResult, JudgeDecision, JudgeOutput};
 use crate::service::v4::relationship_projection;
 use crate::service::v4::resolver;
@@ -157,6 +162,60 @@ pub async fn process_chapter_with_knowledge_judge(
     judge: Option<&dyn Judge>,
     identity_judge: Option<&dyn IdentityJudge>,
     knowledge_judge: Option<&dyn KnowledgeRevisionJudge>,
+) -> anyhow::Result<()> {
+    process_chapter_with_all_judges(
+        book_id,
+        chapter_index,
+        raw_text,
+        pool,
+        extractor,
+        model_name,
+        judge,
+        identity_judge,
+        knowledge_judge,
+        None,
+    )
+    .await
+}
+
+pub async fn process_chapter_with_map_conflict_judge(
+    book_id: &str,
+    chapter_index: i64,
+    raw_text: &str,
+    pool: &SqlitePool,
+    extractor: &dyn Extractor,
+    model_name: Option<&str>,
+    judge: Option<&dyn Judge>,
+    identity_judge: Option<&dyn IdentityJudge>,
+    knowledge_judge: Option<&dyn KnowledgeRevisionJudge>,
+    map_conflict_judge: Option<&dyn MapConflictJudge>,
+) -> anyhow::Result<()> {
+    process_chapter_with_all_judges(
+        book_id,
+        chapter_index,
+        raw_text,
+        pool,
+        extractor,
+        model_name,
+        judge,
+        identity_judge,
+        knowledge_judge,
+        map_conflict_judge,
+    )
+    .await
+}
+
+async fn process_chapter_with_all_judges(
+    book_id: &str,
+    chapter_index: i64,
+    raw_text: &str,
+    pool: &SqlitePool,
+    extractor: &dyn Extractor,
+    model_name: Option<&str>,
+    judge: Option<&dyn Judge>,
+    identity_judge: Option<&dyn IdentityJudge>,
+    knowledge_judge: Option<&dyn KnowledgeRevisionJudge>,
+    map_conflict_judge: Option<&dyn MapConflictJudge>,
 ) -> anyhow::Result<()> {
     let model = model_name.unwrap_or(DEFAULT_MODEL);
     let chapter_repo = ChapterRepo::new(pool.clone());
@@ -327,6 +386,7 @@ pub async fn process_chapter_with_knowledge_judge(
         let mut relationship_claims = Vec::new();
         let mut identity_claims = Vec::new();
         let mut knowledge_claims = Vec::new();
+        let mut location_claims = Vec::new();
         let mut other_claims = Vec::new();
         for claim in claim_result.claims_created.iter().cloned() {
             if claim.claim_type == "relationship_update" {
@@ -335,6 +395,11 @@ pub async fn process_chapter_with_knowledge_judge(
                 identity_claims.push(claim);
             } else if claim.claim_type == "knowledge_assertion" {
                 knowledge_claims.push(claim);
+            } else if matches!(
+                claim.claim_type.as_str(),
+                "location_introduction" | "location_edge"
+            ) {
+                location_claims.push(claim);
             } else {
                 other_claims.push(claim);
             }
@@ -755,7 +820,40 @@ pub async fn process_chapter_with_knowledge_judge(
             .await?;
         }
 
-        // k. Mark AI run as success with output_json
+        // k. Phase 5: process place/map claims after Phase 1-4 canonical writes
+        if !location_claims.is_empty() {
+            let default_map_judge = map_conflict_judge::DefaultMapConflictJudge::new();
+            let map_judge_ref = map_conflict_judge.unwrap_or(&default_map_judge);
+            if let Err(err) = process_location_claims_for_segment(
+                book_id,
+                chapter_index,
+                pool,
+                map_judge_ref,
+                &claim_repo,
+                &entity_repo,
+                &location_claims,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Phase 5 map processing failed for book {} chapter {}: {}",
+                    book_id,
+                    chapter_index,
+                    err
+                );
+                let claim_ids = location_claims
+                    .iter()
+                    .map(|claim| claim.id.clone())
+                    .collect::<Vec<_>>();
+                if !claim_ids.is_empty() {
+                    let _ = claim_repo
+                        .batch_update_claim_status(&claim_ids, "uncertain")
+                        .await;
+                }
+            }
+        }
+
+        // l. Mark AI run as success with output_json
         ai_run_repo
             .update_run_status(&ai_run.id, "success", output_json.as_deref(), None)
             .await?;
@@ -777,6 +875,400 @@ pub async fn process_chapter_with_knowledge_judge(
         .advance_processed_chapter(book_id, chapter_index)
         .await?;
 
+    Ok(())
+}
+
+async fn process_location_claims_for_segment(
+    book_id: &str,
+    chapter_index: i64,
+    pool: &SqlitePool,
+    map_judge: &dyn MapConflictJudge,
+    claim_repo: &ClaimRepo,
+    entity_repo: &EntityRepo,
+    location_claims: &[ClaimRecord],
+) -> anyhow::Result<()> {
+    let identity_repo = IdentityRepo::new(pool.clone());
+    let place_resolver = PlaceResolver::new(EntityRepo::new(pool.clone()), identity_repo);
+    let mut introduction_claims = Vec::new();
+    let mut edge_claims = Vec::new();
+
+    for claim in location_claims
+        .iter()
+        .filter(|claim| claim.claim_type == "location_introduction")
+    {
+        match prepare_location_introduction_claim(&place_resolver, claim_repo, pool, book_id, claim)
+            .await?
+        {
+            Some(prepared) => introduction_claims.push(prepared),
+            None => {
+                claim_repo
+                    .update_claim_status(&claim.id, "uncertain")
+                    .await?;
+            }
+        }
+    }
+
+    if !introduction_claims.is_empty() {
+        place_reducer::reduce_location_claims(&introduction_claims, book_id, pool).await?;
+    }
+
+    let existing_parent_links = load_existing_parent_links(book_id, pool).await?;
+    for claim in location_claims
+        .iter()
+        .filter(|claim| claim.claim_type == "location_edge")
+    {
+        match prepare_location_edge_claim(
+            &place_resolver,
+            claim_repo,
+            entity_repo,
+            pool,
+            book_id,
+            chapter_index,
+            map_judge,
+            claim,
+            &existing_parent_links,
+        )
+        .await?
+        {
+            Some(prepared) => edge_claims.push(prepared),
+            None => {}
+        }
+    }
+
+    if !edge_claims.is_empty() {
+        place_reducer::reduce_location_claims(&edge_claims, book_id, pool).await?;
+    }
+
+    Ok(())
+}
+
+async fn prepare_location_introduction_claim(
+    place_resolver: &PlaceResolver,
+    claim_repo: &ClaimRepo,
+    pool: &SqlitePool,
+    book_id: &str,
+    claim: &ClaimRecord,
+) -> anyhow::Result<Option<ClaimRecord>> {
+    let mut value = parse_value_json_object(claim.value_json.as_deref());
+    let place_type = value
+        .get("place_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let parent_place_mention = value
+        .get("parent_place_mention")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let aliases = value
+        .get("aliases")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let Some(place_mention) = claim.subject_mention.as_deref() else {
+        return Ok(None);
+    };
+    let resolution = place_resolver
+        .resolve_place(
+            book_id,
+            place_mention,
+            &place_type,
+            parent_place_mention.as_deref(),
+            &aliases,
+            claim.confidence,
+        )
+        .await?;
+    if resolution.action == PlaceResolutionAction::Uncertain {
+        return Ok(None);
+    }
+
+    if let Some(parent_id) = resolution.parent_place_id {
+        value.insert(
+            "parent_place_id".to_string(),
+            serde_json::Value::String(parent_id),
+        );
+    }
+    if let Some(org_id) = resolution.organization_link_candidate_id {
+        value.insert(
+            "organization_link_candidate_id".to_string(),
+            serde_json::Value::String(org_id),
+        );
+        value
+            .entry("entity_link_type".to_string())
+            .or_insert_with(|| serde_json::Value::String("organization_place_pair".to_string()));
+    }
+    insert_claim_evidence_span_ids(&mut value, claim);
+
+    let updated_json = serde_json::Value::Object(value).to_string();
+    claim_repo
+        .update_claim_value_json(&claim.id, &updated_json)
+        .await?;
+    let mut prepared = claim.clone();
+    prepared.subject_entity_id = resolution.place_entity_id;
+    prepared.value_json = Some(updated_json);
+    persist_claim_entity_ids(pool, &prepared).await?;
+    Ok(Some(prepared))
+}
+
+async fn prepare_location_edge_claim(
+    place_resolver: &PlaceResolver,
+    claim_repo: &ClaimRepo,
+    entity_repo: &EntityRepo,
+    pool: &SqlitePool,
+    book_id: &str,
+    chapter_index: i64,
+    map_judge: &dyn MapConflictJudge,
+    claim: &ClaimRecord,
+    existing_parent_links: &[(String, String)],
+) -> anyhow::Result<Option<ClaimRecord>> {
+    let mut value = parse_value_json_object(claim.value_json.as_deref());
+    let Some(from_mention) = claim.subject_mention.as_deref() else {
+        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        return Ok(None);
+    };
+    let Some(to_mention) = claim.object_mention.as_deref() else {
+        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        return Ok(None);
+    };
+
+    let from_resolution = place_resolver
+        .resolve_place(book_id, from_mention, "unknown", None, &[], claim.confidence)
+        .await?;
+    let to_resolution = place_resolver
+        .resolve_place(book_id, to_mention, "unknown", None, &[], claim.confidence)
+        .await?;
+    let (Some(from_place_id), Some(to_place_id)) = (
+        from_resolution.place_entity_id.clone(),
+        to_resolution.place_entity_id.clone(),
+    ) else {
+        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        return Ok(None);
+    };
+
+    value.insert(
+        "from_place_id".to_string(),
+        serde_json::Value::String(from_place_id.clone()),
+    );
+    value.insert(
+        "to_place_id".to_string(),
+        serde_json::Value::String(to_place_id.clone()),
+    );
+    insert_claim_evidence_span_ids(&mut value, claim);
+
+    let mut prepared = claim.clone();
+    prepared.subject_entity_id = Some(from_place_id.clone());
+    prepared.object_entity_id = Some(to_place_id.clone());
+    prepared.value_json = Some(serde_json::Value::Object(value.clone()).to_string());
+    persist_claim_entity_ids(pool, &prepared).await?;
+
+    let from_place = entity_repo.get_by_id(&from_place_id).await?;
+    let to_place = entity_repo.get_by_id(&to_place_id).await?;
+    match map_gate::structural_gate(MapGateContext {
+        claim: &prepared,
+        from_place: from_place.as_ref(),
+        to_place: to_place.as_ref(),
+        existing_parent_links,
+    }) {
+        MapGateResult::Pass => {}
+        MapGateResult::Reject(reason) => {
+            merge_map_gate_reason(&mut value, "reject", &reason);
+            let updated_json = serde_json::Value::Object(value).to_string();
+            claim_repo
+                .update_claim_value_json(&claim.id, &updated_json)
+                .await?;
+            set_claim_risk_level(pool, &claim.id, "medium").await?;
+            prepared.risk_level = "medium".to_string();
+            prepared.value_json = Some(updated_json);
+            return Ok(Some(prepared));
+        }
+        MapGateResult::Uncertain(reason) => {
+            merge_map_gate_reason(&mut value, "uncertain", &reason);
+            let updated_json = serde_json::Value::Object(value).to_string();
+            claim_repo
+                .update_claim_value_json(&claim.id, &updated_json)
+                .await?;
+            claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+            return Ok(None);
+        }
+    }
+
+    let edge_type = value
+        .get("edge_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("connected_to")
+        .to_string();
+    let judge_input = MapConflictJudgeInput {
+        book_id: book_id.to_string(),
+        chapter_index,
+        claim_id: claim.id.clone(),
+        claim_type: claim.claim_type.clone(),
+        from_place_mention: from_mention.to_string(),
+        to_place_mention: to_mention.to_string(),
+        edge_type,
+        evidence_spans: claim_evidence_span_ids(claim),
+        existing_map_context: load_existing_map_context(book_id, pool).await?,
+        boundary_warnings: Vec::new(),
+    };
+    let judge_output = map_judge.judge(&judge_input).await?;
+    merge_map_judge_output(&mut value, &judge_output)?;
+    let updated_json = serde_json::Value::Object(value).to_string();
+    claim_repo
+        .update_claim_value_json(&claim.id, &updated_json)
+        .await?;
+    prepared.value_json = Some(updated_json);
+
+    if judge_output.decision == MapConflictDecision::Uncertain {
+        claim_repo.update_claim_status(&claim.id, "uncertain").await?;
+        return Ok(None);
+    }
+
+    set_claim_risk_level(pool, &claim.id, "medium").await?;
+    prepared.risk_level = "medium".to_string();
+    Ok(Some(prepared))
+}
+
+async fn load_existing_parent_links(
+    book_id: &str,
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT entity_id, parent_place_id
+         FROM place_details
+         WHERE book_id = ? AND status = 'active' AND parent_place_id IS NOT NULL",
+    )
+    .bind(book_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+async fn set_claim_risk_level(
+    pool: &SqlitePool,
+    claim_id: &str,
+    risk_level: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE claims SET risk_level = ?, updated_at = ? WHERE id = ?")
+        .bind(risk_level)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(claim_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn load_existing_map_context(
+    book_id: &str,
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT from_place_id, to_place_id, edge_type
+         FROM place_edges
+         WHERE book_id = ? AND status = 'active'
+         ORDER BY created_at DESC
+         LIMIT 20",
+    )
+    .bind(book_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(from, to, edge_type)| format!("{from} {edge_type} {to}"))
+        .collect())
+}
+
+fn insert_claim_evidence_span_ids(
+    value: &mut serde_json::Map<String, serde_json::Value>,
+    claim: &ClaimRecord,
+) {
+    let ids = claim_evidence_span_ids(claim)
+        .into_iter()
+        .map(serde_json::Value::String)
+        .collect::<Vec<_>>();
+    value.insert("evidence_span_ids".to_string(), serde_json::Value::Array(ids));
+}
+
+fn claim_evidence_span_ids(claim: &ClaimRecord) -> Vec<String> {
+    let primary = claim.primary_source_span_id.trim();
+    if primary.is_empty() {
+        Vec::new()
+    } else {
+        vec![primary.to_string()]
+    }
+}
+
+fn merge_map_gate_reason(
+    value: &mut serde_json::Map<String, serde_json::Value>,
+    decision: &str,
+    reason: &str,
+) {
+    value.insert(
+        "judge_decision".to_string(),
+        serde_json::Value::String(decision.to_string()),
+    );
+    value.insert(
+        "reason_code".to_string(),
+        serde_json::Value::String(reason.to_string()),
+    );
+}
+
+fn merge_map_judge_output(
+    value: &mut serde_json::Map<String, serde_json::Value>,
+    output: &map_conflict_judge::MapConflictJudgeOutput,
+) -> anyhow::Result<()> {
+    let decision = match output.decision {
+        MapConflictDecision::Accept => "accept",
+        MapConflictDecision::Conflict => "conflict",
+        MapConflictDecision::Uncertain => "uncertain",
+        MapConflictDecision::Reject => "reject",
+    };
+    value.insert(
+        "judge_decision".to_string(),
+        serde_json::Value::String(decision.to_string()),
+    );
+    if let Some(edge_type) = &output.normalized_edge_type {
+        value.insert(
+            "normalized_edge_type".to_string(),
+            serde_json::Value::String(edge_type.clone()),
+        );
+    }
+    if let Some(direction) = &output.normalized_direction_hint {
+        value.insert(
+            "normalized_direction_hint".to_string(),
+            serde_json::Value::String(direction.clone()),
+        );
+    }
+    if let Some(distance) = &output.normalized_distance_hint {
+        value.insert(
+            "normalized_distance_hint".to_string(),
+            serde_json::Value::String(distance.clone()),
+        );
+    }
+    if let Some(conflict_type) = &output.conflict_type {
+        value.insert(
+            "conflict_type".to_string(),
+            serde_json::Value::String(conflict_type.clone()),
+        );
+    }
+    value.insert(
+        "reason_code".to_string(),
+        serde_json::Value::String(output.reason_code.clone()),
+    );
+    value.insert(
+        "judge_confidence".to_string(),
+        serde_json::Value::Number(
+            serde_json::Number::from_f64(output.confidence)
+                .ok_or_else(|| anyhow::anyhow!("invalid map judge confidence"))?,
+        ),
+    );
+    value.insert(
+        "judge_output".to_string(),
+        serde_json::to_value(output)?,
+    );
     Ok(())
 }
 
@@ -1402,6 +1894,55 @@ mod tests {
         }
     }
 
+    fn make_location_intro_obs(
+        place: &str,
+        place_type: &str,
+    ) -> crate::service::v4::extractor::Observation {
+        crate::service::v4::extractor::Observation::LocationIntroduction {
+            place_mention: place.to_string(),
+            place_type: place_type.to_string(),
+            parent_place_mention: None,
+            aliases: vec![],
+            description: Some(format!("{place} is a place.")),
+            importance_score: 0.8,
+            map_visible_hint: Some(true),
+            evidence_span_ids: vec![],
+            confidence: 0.9,
+        }
+    }
+
+    fn make_location_edge_obs(
+        from: &str,
+        to: &str,
+        edge_type: &str,
+    ) -> crate::service::v4::extractor::Observation {
+        crate::service::v4::extractor::Observation::LocationEdge {
+            from_place_mention: from.to_string(),
+            to_place_mention: to.to_string(),
+            edge_type: edge_type.to_string(),
+            direction_hint: None,
+            distance_hint: Some("三日路程".to_string()),
+            evidence_span_ids: vec![],
+            confidence: 0.9,
+            is_topological_hint: true,
+        }
+    }
+
+    fn mock_map_accept_judge() -> crate::service::v4::map_conflict_judge::MockMapConflictJudge {
+        crate::service::v4::map_conflict_judge::MockMapConflictJudge::new(
+            crate::service::v4::map_conflict_judge::MapConflictJudgeOutput {
+                decision: crate::service::v4::map_conflict_judge::MapConflictDecision::Accept,
+                normalized_edge_type: Some("route_to".to_string()),
+                normalized_direction_hint: None,
+                normalized_distance_hint: Some("三日路程".to_string()),
+                conflict_type: None,
+                reason_code: "test_accept".to_string(),
+                confidence: 0.92,
+                explanation_for_log: "test accepts map edge".to_string(),
+            },
+        )
+    }
+
     fn make_knowledge_obs_with_entity_ref(
         category: &str,
         topic: &str,
@@ -1428,6 +1969,133 @@ mod tests {
             status_hint: Some("fact".to_string()),
             reason_hint: Some("long-term world rule with entity reference".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn phase5_pipeline_creates_place_and_edge() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let extractor = MockExtractor::new(vec![
+            make_location_intro_obs("青云城", "city"),
+            make_location_intro_obs("黑风谷", "dungeon"),
+            make_location_edge_obs("青云城", "黑风谷", "route_to"),
+        ]);
+        let map_judge = mock_map_accept_judge();
+
+        process_chapter_with_map_conflict_judge(
+            "b1",
+            1,
+            "青云城到黑风谷有一条古道。",
+            &pool,
+            &extractor,
+            None,
+            None,
+            None,
+            None,
+            Some(&map_judge),
+        )
+        .await
+        .unwrap();
+
+        let place_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM place_details WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let edge_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM place_edges WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(place_count.0, 2);
+        assert_eq!(edge_count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn phase5_pipeline_failure_does_not_rollback_phase1_4() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let extractor = MockExtractor::new(vec![
+            make_entity_obs("张三"),
+            make_location_intro_obs("非法地点", "invalid_place_type"),
+        ]);
+        let map_judge = mock_map_accept_judge();
+
+        let result = process_chapter_with_map_conflict_judge(
+            "b1",
+            1,
+            "张三路过非法地点。",
+            &pool,
+            &extractor,
+            None,
+            None,
+            None,
+            None,
+            Some(&map_judge),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "map reducer failure should not fail chapter processing after Phase 1 writes"
+        );
+
+        let entity_repo = EntityRepo::new(pool.clone());
+        assert!(
+            entity_repo
+                .get_by_canonical_name("b1", "张三")
+                .await
+                .unwrap()
+                .is_some(),
+            "Phase 1 entity write should remain committed"
+        );
+        let progress = progress_repo.get_progress("b1").await.unwrap().unwrap();
+        assert_eq!(progress.max_processed_chapter, 1);
+    }
+
+    #[tokio::test]
+    async fn phase5_pipeline_rejects_knowledge_summary_as_edge() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let extractor = MockExtractor::new(vec![make_knowledge_obs(
+            "geography",
+            "青云城地理",
+            "黑风谷位于青云城以北，是重要地理信息。",
+        )]);
+        let map_judge = mock_map_accept_judge();
+
+        process_chapter_with_map_conflict_judge(
+            "b1",
+            1,
+            "黑风谷位于青云城以北。",
+            &pool,
+            &extractor,
+            None,
+            None,
+            None,
+            None,
+            Some(&map_judge),
+        )
+        .await
+        .unwrap();
+
+        let map_edge_claims: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM claims WHERE book_id = 'b1' AND claim_type = 'location_edge'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let active_edges: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM place_edges WHERE book_id = 'b1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(map_edge_claims.0, 0);
+        assert_eq!(active_edges.0, 0);
     }
 
     fn read_arcane_throne_admin_chapters(
@@ -3433,6 +4101,322 @@ mod tests {
             }),
             "relationship/property/map/identity distractors should not become canonical knowledge"
         );
+    }
+
+    struct SmokeMapJudge {
+        real: crate::service::v4::map_conflict_judge::RealAiMapConflictJudge,
+        real_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        scripted_conflicts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        real_errors: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[axum::async_trait]
+    impl crate::service::v4::map_conflict_judge::MapConflictJudge for SmokeMapJudge {
+        async fn judge(
+            &self,
+            input: &crate::service::v4::map_conflict_judge::MapConflictJudgeInput,
+        ) -> anyhow::Result<crate::service::v4::map_conflict_judge::MapConflictJudgeOutput> {
+            let call_index = self
+                .real_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call_index == 0 {
+                if let Err(err) = self.real.judge(input).await {
+                    self.real_errors.lock().unwrap().push(err.to_string());
+                }
+            }
+
+            if input.edge_type == "north_of" {
+                self.scripted_conflicts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(crate::service::v4::map_conflict_judge::MapConflictJudgeOutput {
+                    decision: crate::service::v4::map_conflict_judge::MapConflictDecision::Conflict,
+                    normalized_edge_type: Some(input.edge_type.clone()),
+                    normalized_direction_hint: Some("north".to_string()),
+                    normalized_distance_hint: None,
+                    conflict_type: Some("direction_conflict".to_string()),
+                    reason_code: "phase5_smoke_direction_conflict".to_string(),
+                    confidence: 0.93,
+                    explanation_for_log: "smoke fixture forces one conflicting direction so the canonical conflict path is deterministic".to_string(),
+                });
+            }
+
+            Ok(crate::service::v4::map_conflict_judge::MapConflictJudgeOutput {
+                decision: crate::service::v4::map_conflict_judge::MapConflictDecision::Accept,
+                normalized_edge_type: Some(input.edge_type.clone()),
+                normalized_direction_hint: None,
+                normalized_distance_hint: Some("smoke fixture distance".to_string()),
+                conflict_type: None,
+                reason_code: "phase5_smoke_accept".to_string(),
+                confidence: 0.91,
+                explanation_for_log: "smoke fixture accepts stable topology after real judge connectivity is exercised".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn real_ai_smoke_test_map_phase5_fixture() {
+        if std::env::var("RUN_REAL_AI_TESTS").unwrap_or_default() != "1" {
+            return;
+        }
+
+        let pool = setup_pool().await;
+        let book_id = "phase5-map-smoke";
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress(book_id).await.unwrap();
+        let (ai_service, _tmp_dir) = create_smoke_test_ai_service()
+            .await
+            .expect("Failed to create AI service for Phase 5 map smoke test");
+
+        let real_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scripted_conflicts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let real_errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let map_judge = SmokeMapJudge {
+            real: crate::service::v4::map_conflict_judge::RealAiMapConflictJudge::new(
+                ai_service,
+                pool.clone(),
+            ),
+            real_calls: real_calls.clone(),
+            scripted_conflicts: scripted_conflicts.clone(),
+            real_errors: real_errors.clone(),
+        };
+        let relationship_judge = mock_accept_judge();
+        let identity_judge = crate::service::v4::identity_judge::MockIdentityJudge::new(
+            crate::service::v4::identity_judge::IdentityJudgeOutput {
+                decision: crate::service::v4::identity_judge::IdentityJudgeDecision::Uncertain,
+                link_type: "possible_same_identity".to_string(),
+                survivor_hint: "none".to_string(),
+                confidence: 0.5,
+                reason_code: "phase5_smoke_identity_neutral".to_string(),
+                explanation_for_log: "identity is out of scope for this map smoke".to_string(),
+                property_conflicts: vec![],
+                relationship_migration_hint: "not_applicable".to_string(),
+            },
+        );
+
+        let organization_obs = crate::service::v4::extractor::Observation::EntityIntroduction {
+            subject_mention: "青云门".to_string(),
+            entity_type: "organization".to_string(),
+            aliases: vec![],
+            short_summary: "青云门是东域宗门组织。".to_string(),
+            evidence_span_ids: vec![],
+            confidence: 0.92,
+        };
+        let movement_distractor = crate::service::v4::extractor::Observation::PropertyUpdate {
+            subject_mention: "林澈".to_string(),
+            dimension_key: "location".to_string(),
+            value_text: Some("丹房".to_string()),
+            value_json: None,
+            evidence_span_ids: vec![],
+            confidence: 0.88,
+        };
+
+        let chapters = vec![
+            (
+                1,
+                "东域包含青云门，青云门内有丹房。青云门到黑水渡有一条后山古道。青云门同时也是宗门组织名。林澈从丹房走到庭院只是人物移动；苏晚和林澈是同门朋友。东域多山只是地理知识摘要。",
+                MockExtractor::new(vec![
+                    make_entity_obs("林澈"),
+                    make_entity_obs("苏晚"),
+                    organization_obs,
+                    make_rel_obs("林澈", "苏晚", "friendship", "同门朋友", 0.9),
+                    movement_distractor,
+                    make_knowledge_obs("geography", "东域地貌", "东域多山，宗门沿山势分布。"),
+                    make_location_intro_obs("东域", "region"),
+                    crate::service::v4::extractor::Observation::LocationIntroduction {
+                        place_mention: "青云门".to_string(),
+                        place_type: "sect_site".to_string(),
+                        parent_place_mention: Some("东域".to_string()),
+                        aliases: vec!["青云山门".to_string()],
+                        description: Some("青云门在东域山中。".to_string()),
+                        importance_score: 0.9,
+                        map_visible_hint: Some(true),
+                        evidence_span_ids: vec![],
+                        confidence: 0.93,
+                    },
+                    crate::service::v4::extractor::Observation::LocationIntroduction {
+                        place_mention: "丹房".to_string(),
+                        place_type: "building".to_string(),
+                        parent_place_mention: Some("青云门".to_string()),
+                        aliases: vec![],
+                        description: Some("丹房位于青云门内。".to_string()),
+                        importance_score: 0.7,
+                        map_visible_hint: Some(true),
+                        evidence_span_ids: vec![],
+                        confidence: 0.9,
+                    },
+                    make_location_intro_obs("后山古道", "route"),
+                    make_location_intro_obs("黑水渡", "city"),
+                    make_location_edge_obs("东域", "青云门", "contains"),
+                    make_location_edge_obs("青云门", "丹房", "contains"),
+                    make_location_edge_obs("青云门", "黑水渡", "route_to"),
+                ]),
+            ),
+            (
+                2,
+                "后续传闻称丹房在青云门以北，这与丹房位于青云门内的拓扑说法冲突，应进入地图冲突记录而不是 active map。林澈回到丹房仍然只是人物当前位置。",
+                MockExtractor::new(vec![
+                    crate::service::v4::extractor::Observation::PropertyUpdate {
+                        subject_mention: "林澈".to_string(),
+                        dimension_key: "location".to_string(),
+                        value_text: Some("丹房".to_string()),
+                        value_json: None,
+                        evidence_span_ids: vec![],
+                        confidence: 0.88,
+                    },
+                    make_location_edge_obs("丹房", "青云门", "north_of"),
+                ]),
+            ),
+        ];
+
+        for (chapter_index, raw_text, extractor) in &chapters {
+            process_chapter_with_map_conflict_judge(
+                book_id,
+                *chapter_index,
+                raw_text,
+                &pool,
+                extractor,
+                Some("real-ai-phase5-map-fixture"),
+                Some(&relationship_judge),
+                Some(&identity_judge),
+                None,
+                Some(&map_judge),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("Phase 5 map smoke chapter {chapter_index} failed: {err}"));
+        }
+
+        let overview = crate::service::v4::place_projection::project_map_overview(book_id, &pool)
+            .await
+            .unwrap();
+        let places = crate::service::v4::place_projection::project_all_places(book_id, &pool)
+            .await
+            .unwrap();
+        let graph = crate::service::v4::place_projection::project_map_graph(book_id, &pool)
+            .await
+            .unwrap();
+        let layout = crate::service::v4::place_projection::rebuild_layout_snapshot(book_id, 2, &pool)
+            .await
+            .unwrap();
+        let conflicts: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM place_edge_conflicts WHERE book_id = ? AND status = 'open'",
+        )
+        .bind(book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let map_judge_runs: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM ai_runs WHERE book_id = ? AND run_type = 'map_conflict_judge' AND status = 'success' AND output_json IS NOT NULL",
+        )
+        .bind(book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let false_positive_edges: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)
+             FROM place_edges e
+             JOIN entities a ON a.id = e.from_place_id
+             JOIN entities b ON b.id = e.to_place_id
+             WHERE e.book_id = ?
+               AND (a.display_name IN ('林澈', '苏晚') OR b.display_name IN ('林澈', '苏晚'))",
+        )
+        .bind(book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let relationship_count = RelationshipRepo::new(pool.clone())
+            .count_active_by_book(book_id)
+            .await
+            .unwrap();
+        let org_place_links: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM entity_links WHERE book_id = ? AND link_type = 'organization_place_pair' AND status = 'active'",
+        )
+        .bind(book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let character_cards: Vec<_> = EntityRepo::new(pool.clone())
+            .list_by_book(book_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entity| entity.entity_type == "character")
+            .collect();
+        let first_card_ok = if let Some(entity) = character_cards.first() {
+            crate::service::v4::projection::project_character_card(&entity.id, book_id, 2, &pool)
+                .await
+                .is_ok()
+        } else {
+            false
+        };
+        let map_run_rows = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT status, output_json, error FROM ai_runs WHERE book_id = ? AND run_type = 'map_conflict_judge' ORDER BY started_at, id",
+        )
+        .bind(book_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (status, output_json, error) in &map_run_rows {
+            println!(
+                "[MAP_SMOKE] map_judge_run status={} output={} error={}",
+                status,
+                output_json.as_deref().unwrap_or(""),
+                error.as_deref().unwrap_or("")
+            );
+        }
+        println!(
+            "[MAP_SMOKE] places={} active_edges={} conflicts={} layout_nodes={} layout_edges={} real_calls={} scripted_conflicts={} relationships={} org_place_links={} false_positive_edges={}",
+            overview.place_count,
+            overview.active_edge_count,
+            conflicts.0,
+            layout.nodes.len(),
+            layout.edges.len(),
+            real_calls.load(std::sync::atomic::Ordering::SeqCst),
+            scripted_conflicts.load(std::sync::atomic::Ordering::SeqCst),
+            relationship_count,
+            org_place_links.0,
+            false_positive_edges.0
+        );
+        for place in &places {
+            println!(
+                "[MAP_SMOKE] place id={} name={} type={}",
+                place.id, place.name, place.place_type
+            );
+        }
+        for edge in &graph.edges {
+            println!(
+                "[MAP_SMOKE] edge {} {} -> {}",
+                edge.edge_type, edge.from_place_id, edge.to_place_id
+            );
+        }
+
+        let real_errors = real_errors.lock().unwrap().clone();
+        assert!(
+            real_errors.is_empty(),
+            "RealAiMapConflictJudge failed: {}",
+            real_errors.join("; ")
+        );
+        assert_eq!(
+            map_judge_runs.0, 1,
+            "RealAiMapConflictJudge should record a successful ai_run"
+        );
+        assert_eq!(overview.place_count, 5, "distractors must not create extra places");
+        assert_eq!(overview.active_edge_count, 3, "conflicting edge must not become active");
+        assert_eq!(conflicts.0, 1, "conflicting map statement should be recorded");
+        assert!(
+            real_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "smoke wrapper should call the real map judge"
+        );
+        assert_eq!(
+            scripted_conflicts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "fixture should exercise deterministic conflict path"
+        );
+        assert_eq!(false_positive_edges.0, 0, "character movement distractor must not enter map");
+        assert_eq!(relationship_count, 1, "Phase 2 relationship regression should still pass");
+        assert_eq!(org_place_links.0, 1, "organization/place same-name link should be active");
+        assert!(first_card_ok, "Phase 1 character card projection should still work");
+        assert!(!layout.nodes.is_empty(), "layout snapshot should include place nodes");
+        assert!(!layout.edges.is_empty(), "layout snapshot should include active edges");
     }
 
     #[tokio::test]

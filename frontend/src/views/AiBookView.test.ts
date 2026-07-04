@@ -85,6 +85,14 @@ vi.mock('../stores/reader', () => ({
   useReaderStore: () => readerStoreMock,
 }))
 
+vi.mock('../components/reader/V4MapPanel.vue', () => ({
+  default: {
+    name: 'V4MapPanel',
+    props: ['bookUrl'],
+    template: '<section data-test="v4-map-panel">V4 map panel · {{ bookUrl }}</section>',
+  },
+}))
+
 describe('AiBookView', () => {
   beforeEach(() => {
     pushMock.mockReset()
@@ -127,5 +135,17 @@ describe('AiBookView', () => {
     await flushPromises()
 
     expect(wrapper.findAll('.tabs button').map((button) => button.text())).toContain('知识')
+  })
+
+  it('renders the V4 map panel from the map tab', async () => {
+    aiStoreMock.load.mockResolvedValueOnce(aiStoreMock.memoryView)
+    aiStoreMock.loadChapterMemory.mockResolvedValueOnce(aiStoreMock.chapterMemory)
+
+    const wrapper = mount(await import('./AiBookView.vue').then((mod) => mod.default))
+    await flushPromises()
+
+    await wrapper.findAll('.tabs button').find((button) => button.text() === '地图')!.trigger('click')
+
+    expect(wrapper.get('[data-test="v4-map-panel"]').text()).toContain('book-1')
   })
 })
