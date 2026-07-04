@@ -4,21 +4,32 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use crate::api::{auth::AuthContext, AppState};
 use crate::error::error::{ApiResponse, AppError};
+use crate::service::v4::correction::{CorrectionCommand, CorrectionValidationService};
+use crate::service::v4::correction_applier::{CorrectionApplier, CorrectionApplyStatus};
 use crate::service::v4::knowledge_projection;
 use crate::service::v4::place_projection;
 use crate::service::v4::projection;
+use crate::service::v4::prompt_regression::{PromptRegressionRequest, PromptRegressionRunner};
+use crate::service::v4::quality_audit::QualityAuditService;
+use crate::service::v4::quality_metrics::QualityMetricsService;
+use crate::service::v4::quarantine_workflow::{
+    QuarantineActionKind, QuarantineActionRequest, QuarantineActionResult, QuarantineListFilter,
+    QuarantineWorkflowService,
+};
 use crate::service::v4::relationship_projection;
+use crate::service::v4::reprocess::{ReprocessRequest, ReprocessService};
 use crate::storage::db::v4::entity_repo::EntityRepo;
 use crate::storage::db::v4::identity_repo::{
     IdentityLinkRecord, IdentityRepo, MergeOperationRecord,
 };
 use crate::storage::db::v4::place_repo::{PlaceEdgeConflictRecord, PlaceRepo};
 use crate::storage::db::v4::progress_repo::ProgressRepo;
+use crate::storage::db::v4::quality_repo::QualityRepo;
 use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
 use crate::storage::db::v4::reset_v4;
 use crate::util::text::repair_encoded_url;
@@ -66,6 +77,87 @@ pub struct V4RelationshipsRequest {
     pub group: Option<String>,
     #[serde(rename = "minImportance", alias = "min_importance")]
     pub min_importance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct V4QualityQuery {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+    pub status: Option<String>,
+    pub reason_code: Option<String>,
+    pub claim_type: Option<String>,
+    pub audit_type: Option<String>,
+    pub finding_type: Option<String>,
+    pub severity: Option<String>,
+    pub target_type: Option<String>,
+    pub correction_type: Option<String>,
+    pub target_id: Option<String>,
+    pub mode: Option<String>,
+    pub fixture_set: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct V4QualityActionRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+    pub action: Option<String>,
+    pub actor: Option<String>,
+    pub note: Option<String>,
+    pub reason_code: Option<String>,
+    pub suggested_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct V4AuditRunRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+    pub audit_type: Option<String>,
+    pub scope_json: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct V4CorrectionRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub correction_type: Option<String>,
+    pub correction_json: Option<Value>,
+    pub source: Option<String>,
+    pub source_claim_id: Option<String>,
+    pub source_span_id: Option<String>,
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct V4ReprocessJobRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+    pub scope_type: Option<String>,
+    pub scope_json: Option<Value>,
+    pub mode: Option<String>,
+    pub requested_by: Option<String>,
+    pub reason: Option<String>,
+    pub dry_run: Option<bool>,
+    pub prompt_version: Option<String>,
+    pub schema_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct V4PromptRegressionRunRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+    pub prompt_version: Option<String>,
+    pub schema_version: Option<String>,
+    pub model: Option<String>,
+    pub fixture_set: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1205,461 @@ pub async fn get_v4_map_conflicts(
     )))
 }
 
+/// GET /v4/quality — Phase 6 quality overview.
+pub async fn get_v4_quality(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4QualityQuery>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let book_url = req.book_url.clone().unwrap_or_default();
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let limit = quality_limit(req.limit);
+    let quality_repo = QualityRepo::new(state.pool.clone());
+    let metrics = QualityMetricsService::new(state.pool.clone())
+        .latest_summary(&ctx.book_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let audit_runs = quality_repo
+        .list_audit_runs(&ctx.book_id, None, None, limit)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let findings = quality_repo
+        .list_audit_findings(&ctx.book_id, Some("open"), None, None, None, limit)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let corrections = quality_repo
+        .list_user_corrections(&ctx.book_id, None, None, None, None, limit)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let reprocess_jobs = quality_repo
+        .list_reprocess_jobs(&ctx.book_id, None, None, limit)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let prompt_regression_runs = quality_repo
+        .list_prompt_regression_runs(&ctx.book_id, None, None, limit)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    Ok(Json(ApiResponse::ok(json!({
+        "bookUrl": book_url,
+        "qualityMetrics": metrics_to_value(&metrics.metrics),
+        "auditRuns": audit_runs.iter().map(audit_run_to_value).collect::<Vec<_>>(),
+        "findings": findings.iter().map(audit_finding_to_value).collect::<Vec<_>>(),
+        "corrections": corrections.iter().map(correction_to_value).collect::<Vec<_>>(),
+        "reprocessJobs": reprocess_jobs.iter().map(reprocess_job_to_value).collect::<Vec<_>>(),
+        "promptRegressionRuns": prompt_regression_runs
+            .iter()
+            .map(prompt_regression_run_to_value)
+            .collect::<Vec<_>>(),
+    }))))
+}
+
+/// GET /v4/quality/quarantine — quarantined claim workflow list.
+pub async fn get_v4_quality_quarantine(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4QualityQuery>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let service = QuarantineWorkflowService::new(state.pool.clone());
+    let items = service
+        .list(
+            &ctx.book_id,
+            QuarantineListFilter {
+                status: req.status.or_else(|| Some("open".to_string())),
+                reason_code: req.reason_code,
+                claim_type: req.claim_type,
+                limit: quality_limit(req.limit),
+            },
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(json!({
+        "items": items.iter().map(quarantine_view_to_value).collect::<Vec<_>>(),
+        "total": items.len(),
+    }))))
+}
+
+/// POST /v4/quality/quarantine/:claim_id/action — update quarantine workflow.
+pub async fn post_v4_quality_quarantine_action(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Query(q): Query<V4QualityActionRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let action = parse_quarantine_action(req.action.as_deref())?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let claim_id = resolve_quarantine_action_claim_id(&state, &ctx.book_id, &id).await?;
+    let result = QuarantineWorkflowService::new(state.pool.clone())
+        .act_on_claim(
+            &ctx.book_id,
+            &claim_id,
+            QuarantineActionRequest {
+                action,
+                actor: req.actor.unwrap_or_else(|| "api".to_string()),
+                note: req.note,
+                reason_code: req.reason_code,
+                suggested_action: req.suggested_action,
+            },
+        )
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    refresh_quality_metrics(&state, &ctx.book_id).await?;
+    Ok(Json(ApiResponse::ok(quarantine_action_result_to_value(
+        &result,
+    ))))
+}
+
+/// GET /v4/quality/audit-runs — audit run list.
+pub async fn get_v4_quality_audit_runs(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4QualityQuery>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let audit_runs = QualityRepo::new(state.pool.clone())
+        .list_audit_runs(
+            &ctx.book_id,
+            req.audit_type.as_deref(),
+            req.status.as_deref(),
+            quality_limit(req.limit),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(json!({
+        "auditRuns": audit_runs.iter().map(audit_run_to_value).collect::<Vec<_>>(),
+        "total": audit_runs.len(),
+    }))))
+}
+
+/// POST /v4/quality/audit-runs — run a supported audit.
+pub async fn post_v4_quality_audit_runs(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4AuditRunRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let audit_type = req
+        .audit_type
+        .unwrap_or_else(|| "full_book_quality".to_string());
+    let scope_json = req.scope_json.unwrap_or_else(|| json!({})).to_string();
+    let service = QualityAuditService::new(state.pool.clone());
+    let result = match audit_type.as_str() {
+        "duplicate_entities" => service.audit_duplicate_entities(&ctx.book_id).await,
+        "relationship_pollution" => service.audit_relationship_pollution(&ctx.book_id).await,
+        "knowledge_topic_drift" | "knowledge_contradictions" => {
+            service.audit_knowledge_quality(&ctx.book_id).await
+        }
+        "map_conflicts" => service.audit_map_quality(&ctx.book_id).await,
+        _ => {
+            service
+                .run_with_findings(&ctx.book_id, &audit_type, &scope_json, Vec::new())
+                .await
+        }
+    }
+    .map_err(|e| AppError::Internal(e.into()))?;
+    refresh_quality_metrics(&state, &ctx.book_id).await?;
+    Ok(Json(ApiResponse::ok(json!({
+        "runId": result.run_id,
+        "status": result.status,
+        "findingCount": result.finding_count,
+        "error": result.error,
+    }))))
+}
+
+/// GET /v4/quality/audit-findings — audit finding list.
+pub async fn get_v4_quality_audit_findings(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4QualityQuery>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let findings = QualityRepo::new(state.pool.clone())
+        .list_audit_findings(
+            &ctx.book_id,
+            req.status.as_deref(),
+            req.finding_type.as_deref(),
+            req.severity.as_deref(),
+            req.target_type.as_deref(),
+            quality_limit(req.limit),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(json!({
+        "findings": findings.iter().map(audit_finding_to_value).collect::<Vec<_>>(),
+        "total": findings.len(),
+    }))))
+}
+
+/// POST /v4/quality/audit-findings/:finding_id/action — finding action.
+pub async fn post_v4_quality_audit_finding_action(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(finding_id): Path<String>,
+    Query(q): Query<V4QualityActionRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let action = req
+        .action
+        .unwrap_or_else(|| "convert_to_correction".to_string());
+    match action.as_str() {
+        "convert_to_correction" | "create_correction" => {
+            let correction = QualityAuditService::new(state.pool.clone())
+                .convert_finding_to_correction(&finding_id, req.actor.as_deref().unwrap_or("api"))
+                .await
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            refresh_quality_metrics(&state, &ctx.book_id).await?;
+            Ok(Json(ApiResponse::ok(json!({
+                "bookId": ctx.book_id,
+                "correction": correction_to_value(&correction),
+            }))))
+        }
+        _ => Err(AppError::BadRequest(format!(
+            "unsupported audit finding action: {action}"
+        ))),
+    }
+}
+
+/// GET /v4/quality/corrections — correction ledger list.
+pub async fn get_v4_quality_corrections(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4QualityQuery>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let corrections = QualityRepo::new(state.pool.clone())
+        .list_user_corrections(
+            &ctx.book_id,
+            req.status.as_deref(),
+            req.correction_type.as_deref(),
+            req.target_type.as_deref(),
+            req.target_id.as_deref(),
+            quality_limit(req.limit),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(json!({
+        "corrections": corrections.iter().map(correction_to_value).collect::<Vec<_>>(),
+        "total": corrections.len(),
+    }))))
+}
+
+/// POST /v4/quality/corrections — validate and create correction.
+pub async fn post_v4_quality_corrections(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4CorrectionRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let correction_json = req.correction_json.unwrap_or_else(|| json!({})).to_string();
+    let command = CorrectionCommand {
+        book_id: ctx.book_id,
+        target_type: required_field(req.target_type, "targetType")?,
+        target_id: required_field(req.target_id, "targetId")?,
+        correction_type: required_field(req.correction_type, "correctionType")?,
+        correction_json,
+        source: req.source.unwrap_or_else(|| "user".to_string()),
+        source_claim_id: req.source_claim_id,
+        source_span_id: req.source_span_id,
+        created_by: req.created_by.unwrap_or_else(|| "api".to_string()),
+    };
+    let correction = CorrectionValidationService::new(state.pool.clone())
+        .validate_and_create(command)
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    refresh_quality_metrics(&state, &correction.book_id).await?;
+    Ok(Json(ApiResponse::ok(correction_to_value(&correction))))
+}
+
+/// POST /v4/quality/corrections/:correction_id/apply — apply correction.
+pub async fn post_v4_quality_correction_apply(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(correction_id): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let result = CorrectionApplier::new(state.pool.clone())
+        .apply(&correction_id, "api")
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    refresh_quality_metrics(&state, &ctx.book_id).await?;
+    Ok(Json(ApiResponse::ok(json!({
+        "correctionId": result.correction_id,
+        "status": match result.status {
+            CorrectionApplyStatus::Applied => "applied",
+            CorrectionApplyStatus::AlreadyApplied => "alreadyApplied",
+            CorrectionApplyStatus::Failed => "failed",
+        },
+        "message": result.message,
+    }))))
+}
+
+/// GET /v4/quality/reprocess-jobs — reprocess job list.
+pub async fn get_v4_quality_reprocess_jobs(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4QualityQuery>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let jobs = QualityRepo::new(state.pool.clone())
+        .list_reprocess_jobs(
+            &ctx.book_id,
+            req.status.as_deref(),
+            req.mode.as_deref(),
+            quality_limit(req.limit),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(json!({
+        "reprocessJobs": jobs.iter().map(reprocess_job_to_value).collect::<Vec<_>>(),
+        "total": jobs.len(),
+    }))))
+}
+
+/// POST /v4/quality/reprocess-jobs — queue reprocess job.
+pub async fn post_v4_quality_reprocess_jobs(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4ReprocessJobRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let book_id = ctx.book_id.clone();
+    let job = ReprocessService::new(state.pool.clone())
+        .queue(ReprocessRequest {
+            book_id: ctx.book_id,
+            scope_type: required_field(req.scope_type, "scopeType")?,
+            scope_json: req.scope_json.unwrap_or_else(|| json!({})).to_string(),
+            mode: req.mode.unwrap_or_else(|| "dry_run_compare".to_string()),
+            requested_by: req.requested_by.unwrap_or_else(|| "api".to_string()),
+            reason: req.reason,
+            dry_run: req.dry_run.unwrap_or(true),
+            prompt_version: req.prompt_version,
+            schema_version: req.schema_version,
+        })
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    refresh_quality_metrics(&state, &book_id).await?;
+    Ok(Json(ApiResponse::ok(reprocess_job_to_value(&job))))
+}
+
+/// POST /v4/quality/reprocess-jobs/:job_id/cancel — mark job cancelled.
+pub async fn post_v4_quality_reprocess_job_cancel(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let _ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let mut tx = state.pool.begin().await.map_err(AppError::Db)?;
+    QualityRepo::update_reprocess_job_status_with_conn(&mut *tx, &job_id, "cancelled", None, None)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let job = QualityRepo::get_reprocess_job_with_conn(&mut *tx, &job_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?
+        .ok_or_else(|| AppError::NotFound("reprocess job not found".to_string()))?;
+    tx.commit().await.map_err(AppError::Db)?;
+    refresh_quality_metrics(&state, &job.book_id).await?;
+    Ok(Json(ApiResponse::ok(reprocess_job_to_value(&job))))
+}
+
+/// GET /v4/quality/prompt-regression-runs — prompt regression run list.
+pub async fn get_v4_quality_prompt_regression_runs(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4QualityQuery>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let runs = QualityRepo::new(state.pool.clone())
+        .list_prompt_regression_runs(
+            &ctx.book_id,
+            req.fixture_set.as_deref(),
+            req.status.as_deref(),
+            quality_limit(req.limit),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(json!({
+        "promptRegressionRuns": runs.iter().map(prompt_regression_run_to_value).collect::<Vec<_>>(),
+        "total": runs.len(),
+    }))))
+}
+
+/// POST /v4/quality/prompt-regression-runs — run prompt regression fixtures.
+pub async fn post_v4_quality_prompt_regression_runs(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<V4PromptRegressionRunRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let book_id = ctx.book_id.clone();
+    let run = PromptRegressionRunner::new(state.pool.clone())
+        .run_fixture_set(PromptRegressionRequest {
+            book_id: ctx.book_id,
+            prompt_version: req
+                .prompt_version
+                .unwrap_or_else(|| "phase6-api".to_string()),
+            schema_version: req.schema_version.unwrap_or_else(|| "1".to_string()),
+            model: req.model.unwrap_or_else(|| "deterministic".to_string()),
+            fixture_set: req.fixture_set.unwrap_or_else(|| "phase6".to_string()),
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    refresh_quality_metrics(&state, &book_id).await?;
+    Ok(Json(ApiResponse::ok(prompt_regression_run_to_value(&run))))
+}
+
+/// GET /v4/quality/prompt-regression-runs/:run_id/results — result list.
+pub async fn get_v4_quality_prompt_regression_results(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(run_id): Path<String>,
+    Query(q): Query<V4BookRequest>,
+    body: Bytes,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let req = parse_request(q, body)?;
+    let _ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
+    let results = QualityRepo::new(state.pool.clone())
+        .list_prompt_regression_results(&run_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(Json(ApiResponse::ok(json!({
+        "results": results.iter().map(prompt_regression_result_to_value).collect::<Vec<_>>(),
+        "total": results.len(),
+    }))))
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
@@ -1121,6 +1668,307 @@ struct V4BookCtx {
     book_id: String,
     #[allow(dead_code)]
     user_ns: String,
+}
+
+fn quality_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(50).clamp(1, 200)
+}
+
+fn required_field(value: Option<String>, field: &str) -> Result<String, AppError> {
+    value
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest(format!("{field} required")))
+}
+
+fn parse_quarantine_action(action: Option<&str>) -> Result<QuarantineActionKind, AppError> {
+    match action.unwrap_or_default() {
+        "accept" => Ok(QuarantineActionKind::Accept),
+        "reject" => Ok(QuarantineActionKind::Reject),
+        "retry" => Ok(QuarantineActionKind::Retry),
+        "reclassify" => Ok(QuarantineActionKind::Reclassify),
+        "ignore" => Ok(QuarantineActionKind::Ignore),
+        "" => Err(AppError::BadRequest("action required".to_string())),
+        other => Err(AppError::BadRequest(format!(
+            "unsupported quarantine action: {other}"
+        ))),
+    }
+}
+
+async fn resolve_quarantine_action_claim_id(
+    state: &AppState,
+    book_id: &str,
+    id: &str,
+) -> Result<String, AppError> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT claim_id FROM quarantined_claims WHERE book_id = ? AND (claim_id = ? OR id = ?) LIMIT 1",
+    )
+    .bind(book_id)
+    .bind(id)
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Db)?
+    .ok_or_else(|| AppError::BadRequest("quarantined claim workflow not found".to_string()))
+}
+
+fn json_value(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+fn optional_json_value(raw: &Option<String>) -> Value {
+    raw.as_deref().map(json_value).unwrap_or(Value::Null)
+}
+
+fn snake_to_camel(input: &str) -> String {
+    let mut output = String::new();
+    let mut upper_next = false;
+    for ch in input.chars() {
+        if ch == '_' {
+            upper_next = true;
+        } else if upper_next {
+            output.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn metrics_to_value(
+    metrics: &[crate::storage::db::v4::quality_repo::QualityMetricRecord],
+) -> Value {
+    let mut object = serde_json::Map::new();
+    for metric in metrics {
+        object.insert(
+            snake_to_camel(&metric.metric_type),
+            json!(metric.metric_value),
+        );
+    }
+    Value::Object(object)
+}
+
+fn claim_to_value(claim: &crate::storage::db::v4::claim_repo::ClaimRecord) -> Value {
+    json!({
+        "id": claim.id,
+        "bookId": claim.book_id,
+        "chapterIndex": claim.chapter_index,
+        "claimType": claim.claim_type,
+        "subjectMention": claim.subject_mention,
+        "objectMention": claim.object_mention,
+        "subjectEntityId": claim.subject_entity_id,
+        "objectEntityId": claim.object_entity_id,
+        "predicate": claim.predicate,
+        "valueJson": optional_json_value(&claim.value_json),
+        "valueText": claim.value_text,
+        "primarySourceSpanId": claim.primary_source_span_id,
+        "aiRunId": claim.ai_run_id,
+        "confidence": claim.confidence,
+        "riskLevel": claim.risk_level,
+        "status": claim.status,
+        "supersedesClaimId": claim.supersedes_claim_id,
+        "createdAt": claim.created_at,
+        "updatedAt": claim.updated_at,
+    })
+}
+
+fn source_span_to_value(span: &crate::storage::db::v4::claim_repo::SourceSpanRecord) -> Value {
+    json!({
+        "id": span.id,
+        "bookId": span.book_id,
+        "chapterId": span.chapter_id,
+        "chapterHash": span.chapter_hash,
+        "segmentId": span.segment_id,
+        "spanIndex": span.span_index,
+        "startOffset": span.start_offset,
+        "endOffset": span.end_offset,
+        "textExcerpt": span.text_excerpt,
+        "status": span.status,
+        "createdAt": span.created_at,
+    })
+}
+
+fn ai_run_to_value(run: &crate::storage::db::v4::ai_run_repo::AiRunRecord) -> Value {
+    json!({
+        "id": run.id,
+        "bookId": run.book_id,
+        "chapterId": run.chapter_id,
+        "segmentId": run.segment_id,
+        "runType": run.run_type,
+        "model": run.model,
+        "promptVersion": run.prompt_version,
+        "schemaVersion": run.schema_version,
+        "inputHash": run.input_hash,
+        "outputJson": optional_json_value(&run.output_json),
+        "status": run.status,
+        "error": run.error,
+        "startedAt": run.started_at,
+        "finishedAt": run.finished_at,
+    })
+}
+
+fn quarantine_record_to_value(
+    workflow: &crate::storage::db::v4::quality_repo::QuarantinedClaimRecord,
+) -> Value {
+    json!({
+        "id": workflow.id,
+        "bookId": workflow.book_id,
+        "claimId": workflow.claim_id,
+        "reasonCode": workflow.reason_code,
+        "reasonText": workflow.reason_text,
+        "suggestedAction": workflow.suggested_action,
+        "status": workflow.status,
+        "priority": workflow.priority,
+        "assignedTo": workflow.assigned_to,
+        "reviewedAt": workflow.reviewed_at,
+        "reviewDecision": workflow.review_decision,
+        "reviewNote": workflow.review_note,
+        "createdAt": workflow.created_at,
+        "updatedAt": workflow.updated_at,
+    })
+}
+
+fn quarantine_view_to_value(
+    view: &crate::service::v4::quarantine_workflow::QuarantinedClaimView,
+) -> Value {
+    json!({
+        "workflow": quarantine_record_to_value(&view.workflow),
+        "claim": claim_to_value(&view.claim),
+        "sourceSpans": view.source_spans.iter().map(source_span_to_value).collect::<Vec<_>>(),
+        "aiRun": view.ai_run.as_ref().map(ai_run_to_value),
+    })
+}
+
+fn quarantine_action_result_to_value(result: &QuarantineActionResult) -> Value {
+    match result {
+        QuarantineActionResult::CorrectionCreated(correction) => json!({
+            "kind": "correctionCreated",
+            "correction": correction_to_value(correction),
+        }),
+        QuarantineActionResult::ReprocessJobCreated(job) => json!({
+            "kind": "reprocessJobCreated",
+            "reprocessJob": reprocess_job_to_value(job),
+        }),
+        QuarantineActionResult::WorkflowUpdated(workflow) => json!({
+            "kind": "workflowUpdated",
+            "workflow": quarantine_record_to_value(workflow),
+        }),
+    }
+}
+
+fn audit_run_to_value(run: &crate::storage::db::v4::quality_repo::QualityAuditRunRecord) -> Value {
+    json!({
+        "id": run.id,
+        "bookId": run.book_id,
+        "auditType": run.audit_type,
+        "scopeJson": json_value(&run.scope_json),
+        "status": run.status,
+        "startedAt": run.started_at,
+        "finishedAt": run.finished_at,
+        "summaryJson": optional_json_value(&run.summary_json),
+        "error": run.error,
+    })
+}
+
+fn audit_finding_to_value(
+    finding: &crate::storage::db::v4::quality_repo::QualityAuditFindingRecord,
+) -> Value {
+    json!({
+        "id": finding.id,
+        "bookId": finding.book_id,
+        "auditRunId": finding.audit_run_id,
+        "findingType": finding.finding_type,
+        "severity": finding.severity,
+        "targetType": finding.target_type,
+        "targetId": finding.target_id,
+        "relatedTargetType": finding.related_target_type,
+        "relatedTargetId": finding.related_target_id,
+        "reasonCode": finding.reason_code,
+        "reasonText": finding.reason_text,
+        "evidenceJson": optional_json_value(&finding.evidence_json),
+        "suggestedAction": finding.suggested_action,
+        "status": finding.status,
+        "createdAt": finding.created_at,
+        "resolvedAt": finding.resolved_at,
+    })
+}
+
+fn correction_to_value(
+    correction: &crate::storage::db::v4::quality_repo::UserCorrectionRecord,
+) -> Value {
+    json!({
+        "id": correction.id,
+        "bookId": correction.book_id,
+        "targetType": correction.target_type,
+        "targetId": correction.target_id,
+        "correctionType": correction.correction_type,
+        "correctionJson": json_value(&correction.correction_json),
+        "status": correction.status,
+        "source": correction.source,
+        "sourceClaimId": correction.source_claim_id,
+        "sourceSpanId": correction.source_span_id,
+        "createdBy": correction.created_by,
+        "appliedBy": correction.applied_by,
+        "createdAt": correction.created_at,
+        "appliedAt": correction.applied_at,
+        "revertedAt": correction.reverted_at,
+        "error": correction.error,
+    })
+}
+
+fn reprocess_job_to_value(job: &crate::storage::db::v4::quality_repo::ReprocessJobRecord) -> Value {
+    json!({
+        "id": job.id,
+        "bookId": job.book_id,
+        "scopeType": job.scope_type,
+        "scopeJson": json_value(&job.scope_json),
+        "mode": job.mode,
+        "status": job.status,
+        "requestedBy": job.requested_by,
+        "reason": job.reason,
+        "dryRun": job.dry_run == 1,
+        "promptVersion": job.prompt_version,
+        "schemaVersion": job.schema_version,
+        "startedAt": job.started_at,
+        "finishedAt": job.finished_at,
+        "resultJson": optional_json_value(&job.result_json),
+        "error": job.error,
+    })
+}
+
+fn prompt_regression_run_to_value(
+    run: &crate::storage::db::v4::quality_repo::PromptRegressionRunRecord,
+) -> Value {
+    json!({
+        "id": run.id,
+        "bookId": run.book_id,
+        "promptVersion": run.prompt_version,
+        "schemaVersion": run.schema_version,
+        "model": run.model,
+        "fixtureSet": run.fixture_set,
+        "status": run.status,
+        "startedAt": run.started_at,
+        "finishedAt": run.finished_at,
+        "summaryJson": optional_json_value(&run.summary_json),
+        "error": run.error,
+    })
+}
+
+fn prompt_regression_result_to_value(
+    result: &crate::storage::db::v4::quality_repo::PromptRegressionResultRecord,
+) -> Value {
+    json!({
+        "id": result.id,
+        "runId": result.run_id,
+        "caseId": result.case_id,
+        "caseName": result.case_name,
+        "domain": result.domain,
+        "expectedJson": json_value(&result.expected_json),
+        "actualJson": json_value(&result.actual_json),
+        "pass": result.pass == 1,
+        "diffJson": optional_json_value(&result.diff_json),
+        "createdAt": result.created_at,
+    })
 }
 
 fn parse_request<T: serde::de::DeserializeOwned + Default>(
@@ -1217,6 +2065,14 @@ async fn resolve_v4_book(
         .map_err(|e| AppError::Internal(e.into()))?;
 
     Ok(V4BookCtx { book_id, user_ns })
+}
+
+async fn refresh_quality_metrics(state: &AppState, book_id: &str) -> Result<(), AppError> {
+    QualityMetricsService::new(state.pool.clone())
+        .compute_and_store(book_id)
+        .await
+        .map(|_| ())
+        .map_err(|e| AppError::Internal(e.into()))
 }
 
 async fn get_max_processed(state: &AppState, book_id: &str) -> Result<i64, AppError> {

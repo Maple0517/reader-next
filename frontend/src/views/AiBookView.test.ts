@@ -93,6 +93,14 @@ vi.mock('../components/reader/V4MapPanel.vue', () => ({
   },
 }))
 
+vi.mock('../components/reader/V4QualityPanel.vue', () => ({
+  default: {
+    name: 'V4QualityPanel',
+    props: ['bookUrl'],
+    template: '<section data-test="v4-quality-panel">V4 quality panel · {{ bookUrl }}</section>',
+  },
+}))
+
 describe('AiBookView', () => {
   beforeEach(() => {
     pushMock.mockReset()
@@ -147,5 +155,18 @@ describe('AiBookView', () => {
     await wrapper.findAll('.tabs button').find((button) => button.text() === '地图')!.trigger('click')
 
     expect(wrapper.get('[data-test="v4-map-panel"]').text()).toContain('book-1')
+  })
+
+  it('renders the V4 quality panel from the quality tab', async () => {
+    aiStoreMock.load.mockResolvedValueOnce(aiStoreMock.memoryView)
+    aiStoreMock.loadChapterMemory.mockResolvedValueOnce(aiStoreMock.chapterMemory)
+
+    const wrapper = mount(await import('./AiBookView.vue').then((mod) => mod.default))
+    await flushPromises()
+
+    expect(wrapper.findAll('.tabs button').map((button) => button.text())).toContain('质量')
+    await wrapper.findAll('.tabs button').find((button) => button.text() === '质量')!.trigger('click')
+
+    expect(wrapper.get('[data-test="v4-quality-panel"]').text()).toContain('book-1')
   })
 })

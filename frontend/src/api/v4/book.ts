@@ -20,6 +20,20 @@ import type {
   V4MapOverviewView,
   V4MapPlacesResponse,
   V4PlaceDetailView,
+  V4QualityActionRequest,
+  V4QualityAuditFindingsResponse,
+  V4QualityAuditRunRequest,
+  V4QualityAuditRunsResponse,
+  V4QualityCorrectionRequest,
+  V4QualityCorrectionsResponse,
+  V4QualityOverviewView,
+  V4QualityPromptRegressionResultsResponse,
+  V4QualityPromptRegressionRunRequest,
+  V4QualityPromptRegressionRunsResponse,
+  V4QualityQueryParams,
+  V4QualityQuarantineResponse,
+  V4QualityReprocessJobRequest,
+  V4QualityReprocessJobsResponse,
 } from '../../types/v4'
 
 export function getV4Memory(bookUrl: string) {
@@ -120,4 +134,68 @@ export function getV4MapLayout(bookUrl: string) {
 
 export function getV4MapConflicts(bookUrl: string) {
   return v4Http.get<V4MapConflictsResponse>('/map/conflicts', { params: { bookUrl } }).then((r) => r.data)
+}
+
+export function getV4Quality(bookUrl: string, params?: V4QualityQueryParams) {
+  return v4Http.get<V4QualityOverviewView>('/quality', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function getV4QualityQuarantine(bookUrl: string, params?: V4QualityQueryParams) {
+  return v4Http.get<V4QualityQuarantineResponse>('/quality/quarantine', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function runV4QualityQuarantineAction(bookUrl: string, id: string, request: V4QualityActionRequest) {
+  return v4Http.post(`/quality/quarantine/${encodeURIComponent(id)}/action`, { ...request, bookUrl }).then((r) => r.data)
+}
+
+export function getV4QualityAuditRuns(bookUrl: string, params?: V4QualityQueryParams) {
+  return v4Http.get<V4QualityAuditRunsResponse>('/quality/audit-runs', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function createV4QualityAuditRun(bookUrl: string, request: V4QualityAuditRunRequest) {
+  return v4Http.post('/quality/audit-runs', { ...request, bookUrl }).then((r) => r.data)
+}
+
+export function getV4QualityAuditFindings(bookUrl: string, params?: V4QualityQueryParams) {
+  return v4Http.get<V4QualityAuditFindingsResponse>('/quality/audit-findings', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function runV4QualityAuditFindingAction(bookUrl: string, id: string, request: V4QualityActionRequest) {
+  return v4Http.post(`/quality/audit-findings/${encodeURIComponent(id)}/action`, { ...request, bookUrl }).then((r) => r.data)
+}
+
+export function getV4QualityCorrections(bookUrl: string, params?: V4QualityQueryParams) {
+  return v4Http.get<V4QualityCorrectionsResponse>('/quality/corrections', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function createV4QualityCorrection(bookUrl: string, request: V4QualityCorrectionRequest) {
+  return v4Http.post('/quality/corrections', { ...request, bookUrl }).then((r) => r.data)
+}
+
+export function applyV4QualityCorrection(bookUrl: string, id: string) {
+  return v4Http.post(`/quality/corrections/${encodeURIComponent(id)}/apply`, { bookUrl }).then((r) => r.data)
+}
+
+export function getV4QualityReprocessJobs(bookUrl: string, params?: V4QualityQueryParams) {
+  return v4Http.get<V4QualityReprocessJobsResponse>('/quality/reprocess-jobs', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function createV4QualityReprocessJob(bookUrl: string, request: V4QualityReprocessJobRequest) {
+  return v4Http.post('/quality/reprocess-jobs', { ...request, bookUrl }).then((r) => r.data)
+}
+
+export function cancelV4QualityReprocessJob(bookUrl: string, id: string) {
+  return v4Http.post(`/quality/reprocess-jobs/${encodeURIComponent(id)}/cancel`, { bookUrl }).then((r) => r.data)
+}
+
+export function getV4QualityPromptRegressionRuns(bookUrl: string, params?: V4QualityQueryParams) {
+  return v4Http.get<V4QualityPromptRegressionRunsResponse>('/quality/prompt-regression-runs', { params: { bookUrl, ...params } }).then((r) => r.data)
+}
+
+export function createV4QualityPromptRegressionRun(bookUrl: string, request: V4QualityPromptRegressionRunRequest) {
+  return v4Http.post('/quality/prompt-regression-runs', { ...request, bookUrl }).then((r) => r.data)
+}
+
+export function getV4QualityPromptRegressionResults(bookUrl: string, runId: string) {
+  return v4Http.get<V4QualityPromptRegressionResultsResponse>(`/quality/prompt-regression-runs/${encodeURIComponent(runId)}/results`, { params: { bookUrl } }).then((r) => r.data)
 }

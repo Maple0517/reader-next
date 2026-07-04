@@ -53,6 +53,24 @@ const V4_MAP_PLACE_DETAIL_ROUTE: &str = "/api/books/v4/map/places/:place_id";
 const V4_MAP_GRAPH_ROUTE: &str = "/api/books/v4/map/graph";
 const V4_MAP_LAYOUT_ROUTE: &str = "/api/books/v4/map/layout";
 const V4_MAP_CONFLICTS_ROUTE: &str = "/api/books/v4/map/conflicts";
+const V4_QUALITY_ROUTE: &str = "/api/books/v4/quality";
+const V4_QUALITY_QUARANTINE_ROUTE: &str = "/api/books/v4/quality/quarantine";
+const V4_QUALITY_QUARANTINE_ACTION_ROUTE: &str =
+    "/api/books/v4/quality/quarantine/:claim_id/action";
+const V4_QUALITY_AUDIT_RUNS_ROUTE: &str = "/api/books/v4/quality/audit-runs";
+const V4_QUALITY_AUDIT_FINDINGS_ROUTE: &str = "/api/books/v4/quality/audit-findings";
+const V4_QUALITY_AUDIT_FINDING_ACTION_ROUTE: &str =
+    "/api/books/v4/quality/audit-findings/:finding_id/action";
+const V4_QUALITY_CORRECTIONS_ROUTE: &str = "/api/books/v4/quality/corrections";
+const V4_QUALITY_CORRECTION_APPLY_ROUTE: &str =
+    "/api/books/v4/quality/corrections/:correction_id/apply";
+const V4_QUALITY_REPROCESS_JOBS_ROUTE: &str = "/api/books/v4/quality/reprocess-jobs";
+const V4_QUALITY_REPROCESS_JOB_CANCEL_ROUTE: &str =
+    "/api/books/v4/quality/reprocess-jobs/:job_id/cancel";
+const V4_QUALITY_PROMPT_REGRESSION_RUNS_ROUTE: &str =
+    "/api/books/v4/quality/prompt-regression-runs";
+const V4_QUALITY_PROMPT_REGRESSION_RESULTS_ROUTE: &str =
+    "/api/books/v4/quality/prompt-regression-runs/:run_id/results";
 
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
@@ -366,6 +384,53 @@ pub fn build_router(state: AppState) -> Router {
         .route(V4_MAP_GRAPH_ROUTE, get(handlers::get_v4_map_graph))
         .route(V4_MAP_LAYOUT_ROUTE, get(handlers::get_v4_map_layout))
         .route(V4_MAP_CONFLICTS_ROUTE, get(handlers::get_v4_map_conflicts))
+        .route(V4_QUALITY_ROUTE, get(handlers::get_v4_quality))
+        .route(
+            V4_QUALITY_QUARANTINE_ROUTE,
+            get(handlers::get_v4_quality_quarantine),
+        )
+        .route(
+            V4_QUALITY_QUARANTINE_ACTION_ROUTE,
+            post(handlers::post_v4_quality_quarantine_action),
+        )
+        .route(
+            V4_QUALITY_AUDIT_RUNS_ROUTE,
+            get(handlers::get_v4_quality_audit_runs).post(handlers::post_v4_quality_audit_runs),
+        )
+        .route(
+            V4_QUALITY_AUDIT_FINDINGS_ROUTE,
+            get(handlers::get_v4_quality_audit_findings),
+        )
+        .route(
+            V4_QUALITY_AUDIT_FINDING_ACTION_ROUTE,
+            post(handlers::post_v4_quality_audit_finding_action),
+        )
+        .route(
+            V4_QUALITY_CORRECTIONS_ROUTE,
+            get(handlers::get_v4_quality_corrections).post(handlers::post_v4_quality_corrections),
+        )
+        .route(
+            V4_QUALITY_CORRECTION_APPLY_ROUTE,
+            post(handlers::post_v4_quality_correction_apply),
+        )
+        .route(
+            V4_QUALITY_REPROCESS_JOBS_ROUTE,
+            get(handlers::get_v4_quality_reprocess_jobs)
+                .post(handlers::post_v4_quality_reprocess_jobs),
+        )
+        .route(
+            V4_QUALITY_REPROCESS_JOB_CANCEL_ROUTE,
+            post(handlers::post_v4_quality_reprocess_job_cancel),
+        )
+        .route(
+            V4_QUALITY_PROMPT_REGRESSION_RUNS_ROUTE,
+            get(handlers::get_v4_quality_prompt_regression_runs)
+                .post(handlers::post_v4_quality_prompt_regression_runs),
+        )
+        .route(
+            V4_QUALITY_PROMPT_REGRESSION_RESULTS_ROUTE,
+            get(handlers::get_v4_quality_prompt_regression_results),
+        )
         .route("/reader3/getReplaceRules", get(handlers::get_replace_rules))
         .route(
             "/reader3/saveReplaceRule",
@@ -672,6 +737,26 @@ mod tests {
             (Method::GET, V4_MAP_GRAPH_ROUTE.to_string()),
             (Method::GET, V4_MAP_LAYOUT_ROUTE.to_string()),
             (Method::GET, V4_MAP_CONFLICTS_ROUTE.to_string()),
+            (Method::GET, "/api/books/v4/quality".to_string()),
+            (Method::GET, "/api/books/v4/quality/quarantine".to_string()),
+            (Method::GET, "/api/books/v4/quality/audit-runs".to_string()),
+            (
+                Method::GET,
+                "/api/books/v4/quality/audit-findings".to_string(),
+            ),
+            (Method::GET, "/api/books/v4/quality/corrections".to_string()),
+            (
+                Method::GET,
+                "/api/books/v4/quality/reprocess-jobs".to_string(),
+            ),
+            (
+                Method::GET,
+                "/api/books/v4/quality/prompt-regression-runs".to_string(),
+            ),
+            (
+                Method::GET,
+                "/api/books/v4/quality/prompt-regression-runs/run-quality/results".to_string(),
+            ),
         ] {
             let response = client
                 .request(method.clone(), format!("{base_url}{path}"))
@@ -693,6 +778,26 @@ mod tests {
             (Method::POST, V4_CHAPTER_GENERATE_ROUTE),
             (Method::POST, V4_CATCHUP_START_ROUTE),
             (Method::POST, V4_CATCHUP_CANCEL_ROUTE),
+            (
+                Method::POST,
+                "/api/books/v4/quality/quarantine/workflow-quality/action",
+            ),
+            (Method::POST, "/api/books/v4/quality/audit-runs"),
+            (
+                Method::POST,
+                "/api/books/v4/quality/audit-findings/finding-quality/action",
+            ),
+            (Method::POST, "/api/books/v4/quality/corrections"),
+            (
+                Method::POST,
+                "/api/books/v4/quality/corrections/correction-quality/apply",
+            ),
+            (Method::POST, "/api/books/v4/quality/reprocess-jobs"),
+            (
+                Method::POST,
+                "/api/books/v4/quality/reprocess-jobs/job-quality/cancel",
+            ),
+            (Method::POST, "/api/books/v4/quality/prompt-regression-runs"),
         ] {
             let response = client
                 .request(method.clone(), format!("{base_url}{path}"))
@@ -721,6 +826,321 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_method_reset.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn v4_quality_api_returns_overview_and_group_lists() {
+        let (state, dir) = create_test_state().await;
+        db::v4::init_v4(&state.pool).await.unwrap();
+        let book_url = "quality-book";
+        let book_id = crate::util::hash::md5_hex(book_url);
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('chapter-quality-1', ?, 1, 'quality text', 'hash-quality', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('segment-quality-1', ?, 'chapter-quality-1', 'hash-quality', 0, datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('span-quality-1', ?, 'chapter-quality-1', 'hash-quality', 'segment-quality-1', 0, 0, 12, 'quality evidence', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run-quality-1', ?, 'chapter-quality-1', 'extract', 'test-model', 'prompt-v1', 1, 'input', 'completed', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, subject_mention, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('claim-quality-1', ?, 1, 'property_update', '张三', 'realm', 'span-quality-1', 'run-quality-1', 0.4, 'high', 'quarantined', datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO quarantined_claims (id, book_id, claim_id, reason_code, reason_text, suggested_action, status, priority, created_at, updated_at) VALUES ('workflow-quality', ?, 'claim-quality-1', 'low_confidence', 'needs review', 'accept', 'open', 5, datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO quality_audit_runs (id, book_id, audit_type, scope_json, status, started_at, finished_at, summary_json) VALUES ('audit-quality', ?, 'duplicate_entities', '{}', 'completed', datetime('now'), datetime('now'), '{\"findingCount\":1}')")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO quality_audit_findings (id, book_id, audit_run_id, finding_type, severity, target_type, target_id, reason_code, reason_text, evidence_json, suggested_action, status, created_at) VALUES ('finding-quality', ?, 'audit-quality', 'duplicate_entity_candidate', 'medium', 'entity', 'entity-quality-1', 'alias_overlap', 'same alias', '{\"score\":0.8}', 'merge_entities', 'open', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO user_corrections (id, book_id, target_type, target_id, correction_type, correction_json, status, source, source_claim_id, source_span_id, created_by, created_at) VALUES ('correction-quality', ?, 'claim', 'claim-quality-1', 'reject_claim', '{}', 'validated', 'test', 'claim-quality-1', 'span-quality-1', 'api-test', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO quality_metrics (id, book_id, metric_type, metric_value, metric_json, measured_at) VALUES ('metric-quality-1', ?, 'quarantined_claim_count', 1, NULL, datetime('now')), ('metric-quality-2', ?, 'duplicate_entity_candidate_count', 1, NULL, datetime('now'))")
+            .bind(&book_id)
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO reprocess_jobs (id, book_id, scope_type, scope_json, mode, status, requested_by, reason, dry_run, prompt_version, schema_version) VALUES ('job-quality', ?, 'claim', '{\"claimId\":\"claim-quality-1\"}', 'dry_run_compare', 'queued', 'api-test', 'quality smoke', 1, 'prompt-v1', '1')")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO prompt_regression_runs (id, book_id, prompt_version, schema_version, model, fixture_set, status, started_at, finished_at, summary_json) VALUES ('run-quality', ?, 'prompt-v1', '1', 'test-model', 'phase6', 'completed', datetime('now'), datetime('now'), '{\"total\":1,\"passed\":0}')")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO prompt_regression_results (id, run_id, case_id, case_name, domain, expected_json, actual_json, pass, diff_json, created_at) VALUES ('result-quality', 'run-quality', 'case-1', 'quality regression', 'quality', '{}', '{\"missing\":true}', 0, '{\"missing\":true}', datetime('now'))")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let client = Client::new();
+        let base_url = format!("http://{}", addr);
+
+        let overview: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(overview["data"]["bookUrl"], book_url);
+        assert_eq!(
+            overview["data"]["qualityMetrics"]["quarantinedClaimCount"],
+            1.0
+        );
+        assert_eq!(overview["data"]["auditRuns"].as_array().unwrap().len(), 1);
+        assert_eq!(overview["data"]["findings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            overview["data"]["reprocessJobs"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            overview["data"]["promptRegressionRuns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let quarantine: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality/quarantine?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(quarantine["data"]["total"], 1);
+        assert_eq!(
+            quarantine["data"]["items"][0]["workflow"]["reasonCode"],
+            "low_confidence"
+        );
+        assert_eq!(
+            quarantine["data"]["items"][0]["claim"]["primarySourceSpanId"],
+            "span-quality-1"
+        );
+
+        let audit_runs: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality/audit-runs?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            audit_runs["data"]["auditRuns"][0]["auditType"],
+            "duplicate_entities"
+        );
+
+        let findings: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality/audit-findings?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            findings["data"]["findings"][0]["suggestedAction"],
+            "merge_entities"
+        );
+
+        let corrections: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality/corrections?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            corrections["data"]["corrections"][0]["correctionType"],
+            "reject_claim"
+        );
+
+        let reprocess_jobs: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality/reprocess-jobs?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(reprocess_jobs["data"]["reprocessJobs"][0]["dryRun"], true);
+
+        let prompt_runs: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality/prompt-regression-runs?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            prompt_runs["data"]["promptRegressionRuns"][0]["fixtureSet"],
+            "phase6"
+        );
+
+        let prompt_results: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality/prompt-regression-runs/run-quality/results?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(prompt_results["data"]["results"][0]["caseId"], "case-1");
+        assert_eq!(prompt_results["data"]["results"][0]["pass"], false);
+
+        let apply_correction: serde_json::Value = client
+            .post(format!(
+                "{base_url}/api/books/v4/quality/corrections/correction-quality/apply"
+            ))
+            .json(&serde_json::json!({ "bookUrl": book_url }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(apply_correction["data"]["status"], "applied");
+
+        let updated_overview: serde_json::Value = client
+            .get(format!(
+                "{base_url}/api/books/v4/quality?bookUrl={book_url}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            updated_overview["data"]["qualityMetrics"]["rejectedClaimRate"],
+            1.0
+        );
+
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn v4_quality_quarantine_action_accepts_workflow_id_path() {
+        let (state, dir) = create_test_state().await;
+        db::v4::init_v4(&state.pool).await.unwrap();
+        let book_url = "quality-action-book";
+        let book_id = crate::util::hash::md5_hex(book_url);
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('chapter-quality-action-1', ?, 1, 'quality text', 'hash-quality-action', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('segment-quality-action-1', ?, 'chapter-quality-action-1', 'hash-quality-action', 0, datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('span-quality-action-1', ?, 'chapter-quality-action-1', 'hash-quality-action', 'segment-quality-action-1', 0, 0, 12, 'quality evidence', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run-quality-action-1', ?, 'chapter-quality-action-1', 'extract', 'test-model', 'prompt-v1', 1, 'input', 'completed', datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, subject_mention, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('claim-quality-action-1', ?, 1, 'property_update', '张三', 'realm', 'span-quality-action-1', 'run-quality-action-1', 0.4, 'high', 'quarantined', datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO quarantined_claims (id, book_id, claim_id, reason_code, reason_text, suggested_action, status, priority, created_at, updated_at) VALUES ('workflow-quality-action-1', ?, 'claim-quality-action-1', 'low_confidence', 'needs review', 'accept', 'open', 5, datetime('now'), datetime('now'))")
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let client = Client::new();
+        let base_url = format!("http://{}", addr);
+
+        let response: serde_json::Value = client
+            .post(format!(
+                "{base_url}/api/books/v4/quality/quarantine/workflow-quality-action-1/action"
+            ))
+            .json(&serde_json::json!({
+                "bookUrl": book_url,
+                "action": "ignore",
+                "actor": "api-test"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response["data"]["kind"], "workflowUpdated");
+        assert_eq!(response["data"]["workflow"]["status"], "ignored");
 
         server.abort();
         let _ = tokio::fs::remove_dir_all(dir).await;

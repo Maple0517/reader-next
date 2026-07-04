@@ -286,6 +286,13 @@
             :body-style="{}"
           />
         </section>
+
+        <section v-else-if="activeTab === 'quality' && book" class="stack-panel">
+          <V4QualityPanel
+            :book-url="book.bookUrl"
+            :body-style="{}"
+          />
+        </section>
       </main>
     </div>
 
@@ -311,6 +318,7 @@ import { getV4Characters } from '../api/v4/book'
 import V4IdentityPanel from '../components/reader/V4IdentityPanel.vue'
 import V4KnowledgePanel from '../components/reader/V4KnowledgePanel.vue'
 import V4MapPanel from '../components/reader/V4MapPanel.vue'
+import V4QualityPanel from '../components/reader/V4QualityPanel.vue'
 import V4RelationshipPanel from '../components/reader/V4RelationshipPanel.vue'
 import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
@@ -320,7 +328,7 @@ import type { V4CharacterListItem } from '../types/v4'
 import { describeCatchupDetail, describeCatchupProgress } from '../utils/aiBookCatchupStatus'
 import { collapseWhitespace, summarizeDisplayError } from '../utils/httpError'
 
-type AiTab = 'overview' | 'characters' | 'relationships' | 'knowledge' | 'identity' | 'map'
+type AiTab = 'overview' | 'characters' | 'relationships' | 'knowledge' | 'identity' | 'map' | 'quality'
 
 type DisplayCharacter = {
   id: string
@@ -388,6 +396,7 @@ const tabs: Array<{ key: AiTab; label: string }> = [
   { key: 'map', label: '地图' },
   { key: 'identity', label: '身份' },
   { key: 'knowledge', label: '知识' },
+  { key: 'quality', label: '质量' },
 ]
 
 const memoryView = computed(() => {

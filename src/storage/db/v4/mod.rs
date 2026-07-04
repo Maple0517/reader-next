@@ -8,6 +8,7 @@ pub mod knowledge_repo;
 pub mod place_repo;
 pub mod progress_repo;
 pub mod property_repo;
+pub mod quality_repo;
 pub mod relationship_repo;
 
 use sqlx::SqlitePool;
@@ -120,6 +121,44 @@ pub async fn reset_v4(pool: &SqlitePool, book_id: &str) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
 
     // FK-safe delete order (leaves first)
+    sqlx::query(
+        "DELETE FROM prompt_regression_results WHERE run_id IN (SELECT id FROM prompt_regression_runs WHERE book_id = ?)",
+    )
+    .bind(book_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM prompt_regression_runs WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM correction_events WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM user_corrections WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM quality_audit_findings WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM quality_audit_runs WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM quality_metrics WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM reprocess_jobs WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM quarantined_claims WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM view_model_cache WHERE book_id = ?")
         .bind(book_id)
         .execute(&mut *tx)
@@ -621,6 +660,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v4_quality_audit_tables_exist() {
+        let pool = setup_test_db().await;
+
+        for table in &[
+            "quarantined_claims",
+            "user_corrections",
+            "correction_events",
+            "quality_audit_runs",
+            "quality_audit_findings",
+            "quality_metrics",
+            "reprocess_jobs",
+            "prompt_regression_runs",
+            "prompt_regression_results",
+        ] {
+            assert_table_exists(&pool, table).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn v4_quality_audit_indexes_exist() {
+        let pool = setup_test_db().await;
+
+        let indexes = vec![
+            "idx_quarantined_claims_book_status",
+            "idx_quarantined_claims_claim",
+            "idx_user_corrections_book_status",
+            "idx_user_corrections_target",
+            "idx_correction_events_correction",
+            "idx_quality_audit_runs_book_type",
+            "idx_quality_audit_findings_book_status",
+            "idx_quality_audit_findings_target",
+            "idx_quality_metrics_latest",
+            "idx_reprocess_jobs_book_status",
+            "idx_prompt_regression_runs_book_status",
+            "idx_prompt_regression_results_run",
+        ];
+
+        for index in indexes {
+            let result: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(result.0, 1, "Index '{}' should exist", index);
+        }
+    }
+
+    #[tokio::test]
+    async fn quarantined_claims_enforces_unique_claim() {
+        let pool = setup_test_db().await;
+        init_v4(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'property_update', 'location', 'ss1', 'run1', 0.4, 'high', 'quarantined', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO quarantined_claims (id, book_id, claim_id, reason_code, reason_text, suggested_action, status, priority, created_at, updated_at) VALUES ('q1', 'b1', 'c1', 'low_confidence', 'test', 'needs_manual_review', 'open', 10, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        let duplicate = sqlx::query("INSERT INTO quarantined_claims (id, book_id, claim_id, reason_code, reason_text, suggested_action, status, priority, created_at, updated_at) VALUES ('q2', 'b1', 'c1', 'duplicate', 'test', 'needs_manual_review', 'open', 10, datetime('now'), datetime('now'))")
+            .execute(&pool).await;
+        assert!(duplicate.is_err(), "one workflow row per claim is required");
+    }
+
+    #[tokio::test]
     async fn place_details_schema() {
         let pool = setup_test_db().await;
         assert_table_exists(&pool, "place_details").await;
@@ -792,6 +904,74 @@ mod tests {
             "place_edges",
             "place_details",
             "entity_links",
+        ] {
+            let count: (i64,) = sqlx::query_as(&format!(
+                "SELECT COUNT(*) FROM {} WHERE book_id = 'b1'",
+                table
+            ))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count.0, 0, "{} should be cleared", table);
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_v4_clears_quality_audit_tables() {
+        let pool = setup_test_db().await;
+        init_v4(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('ch1', 'b1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES ('seg1', 'b1', 'ch1', 'hash', 0, datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES ('ss1', 'b1', 'ch1', 'hash', 'seg1', 0, 0, 10, 'text', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES ('run1', 'b1', 'ch1', 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES ('c1', 'b1', 1, 'property_update', 'location', 'ss1', 'run1', 0.4, 'high', 'quarantined', datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO quarantined_claims (id, book_id, claim_id, reason_code, reason_text, suggested_action, status, priority, created_at, updated_at) VALUES ('q1', 'b1', 'c1', 'low_confidence', 'test', 'needs_manual_review', 'open', 10, datetime('now'), datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_corrections (id, book_id, target_type, target_id, correction_type, correction_json, status, source, source_claim_id, source_span_id, created_by, created_at) VALUES ('uc1', 'b1', 'claim', 'c1', 'reject_claim', '{}', 'proposed', 'user', 'c1', 'ss1', 'test', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO correction_events (id, book_id, correction_id, event_type, before_json, after_json, actor, reason, created_at) VALUES ('ce1', 'b1', 'uc1', 'proposed', '{}', '{}', 'test', 'test', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO quality_audit_runs (id, book_id, audit_type, scope_json, status, started_at, finished_at, summary_json) VALUES ('ar1', 'b1', 'duplicate_entities', '{}', 'completed', datetime('now'), datetime('now'), '{}')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO quality_audit_findings (id, book_id, audit_run_id, finding_type, severity, target_type, target_id, reason_code, reason_text, evidence_json, suggested_action, status, created_at) VALUES ('af1', 'b1', 'ar1', 'low_confidence_accepted_fact', 'low', 'claim', 'c1', 'low_confidence', 'test', '{}', 'needs_manual_review', 'open', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO quality_metrics (id, book_id, metric_type, metric_value, metric_json, measured_at) VALUES ('qm1', 'b1', 'quarantined_claim_count', 1.0, '{}', datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO reprocess_jobs (id, book_id, scope_type, scope_json, mode, status, requested_by, reason, dry_run, result_json) VALUES ('rj1', 'b1', 'claim', '{\"claimId\":\"c1\"}', 'retry_failed', 'queued', 'test', 'test', 1, '{}')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO prompt_regression_runs (id, book_id, prompt_version, schema_version, model, fixture_set, status, started_at, finished_at, summary_json) VALUES ('pr1', 'b1', 'v1', 'v1', 'test', 'core', 'completed', datetime('now'), datetime('now'), '{}')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO prompt_regression_results (id, run_id, case_id, case_name, domain, expected_json, actual_json, pass, diff_json, created_at) VALUES ('pres1', 'pr1', 'case1', 'test', 'phase1', '{}', '{}', 1, '{}', datetime('now'))")
+            .execute(&pool).await.unwrap();
+
+        reset_v4(&pool, "b1").await.unwrap();
+
+        let prompt_result_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM prompt_regression_results WHERE run_id = 'pr1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            prompt_result_count.0, 0,
+            "prompt_regression_results should be cleared"
+        );
+
+        for table in &[
+            "prompt_regression_runs",
+            "correction_events",
+            "user_corrections",
+            "quality_audit_findings",
+            "quality_audit_runs",
+            "quality_metrics",
+            "reprocess_jobs",
+            "quarantined_claims",
         ] {
             let count: (i64,) = sqlx::query_as(&format!(
                 "SELECT COUNT(*) FROM {} WHERE book_id = 'b1'",

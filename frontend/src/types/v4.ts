@@ -334,3 +334,212 @@ export interface V4MapConflictsResponse {
   conflicts: V4MapConflictView[]
   total: number
 }
+
+// ─── Quality Types (Phase 6) ───
+
+export type V4QualityStatus = 'open' | 'accepted' | 'rejected' | 'converted_to_correction' | 'resolved' | string
+
+export interface V4QualityQueryParams {
+  status?: string
+  reasonCode?: string
+  claimType?: string
+  auditType?: string
+  findingType?: string
+  severity?: string
+  targetType?: string
+  correctionType?: string
+  targetId?: string
+  mode?: string
+  fixtureSet?: string
+  limit?: number
+}
+
+export interface V4QualityMetricView {
+  value?: number
+  measuredAt?: string
+  details?: unknown
+}
+
+export interface V4QualityClaimView {
+  id: string
+  claimType: string
+  status: string
+  chapterIndex: number
+  valueJson?: unknown
+}
+
+export interface V4QualitySourceSpanView {
+  id: string
+  chapterIndex: number
+  textExcerpt: string
+}
+
+export interface V4QualityAiRunView {
+  id: string
+  runType: string
+  promptVersion?: string
+}
+
+export interface V4QualityQuarantineView {
+  id: string
+  claimId: string
+  reasonCode: string
+  reasonText?: string | null
+  suggestedAction: string
+  status: V4QualityStatus
+  priority: number
+  claim?: V4QualityClaimView | null
+  sourceSpans?: V4QualitySourceSpanView[]
+  aiRun?: V4QualityAiRunView | null
+}
+
+export interface V4QualityAuditRunView {
+  id: string
+  auditType: string
+  status: string
+  summaryJson?: unknown
+  error?: string | null
+}
+
+export interface V4QualityAuditFindingView {
+  id: string
+  findingType: string
+  severity: string
+  targetType: string
+  targetId: string
+  relatedTargetType?: string | null
+  relatedTargetId?: string | null
+  reasonCode: string
+  reasonText?: string | null
+  evidenceJson?: unknown
+  suggestedAction: string
+  status: V4QualityStatus
+}
+
+export interface V4QualityCorrectionView {
+  id: string
+  targetType: string
+  targetId: string
+  correctionType: string
+  status: string
+  source: string
+  error?: string | null
+}
+
+export interface V4QualityReprocessJobView {
+  id: string
+  scopeType: string
+  mode: string
+  status: string
+  dryRun: boolean
+  reason?: string | null
+  error?: string | null
+}
+
+export interface V4QualityPromptRegressionRunView {
+  id: string
+  fixtureSet: string
+  status: string
+  summaryJson?: unknown
+  error?: string | null
+}
+
+export interface V4QualityPromptRegressionResultView {
+  id: string
+  caseId: string
+  caseName: string
+  domain: string
+  expectedJson: unknown
+  actualJson: unknown
+  pass: boolean
+  diffJson: unknown
+}
+
+export interface V4QualityOverviewView {
+  bookUrl: string
+  qualityMetrics: Record<string, number | V4QualityMetricView>
+  quarantine?: V4QualityQuarantineView[]
+  quarantinedClaims?: V4QualityQuarantineView[]
+  auditRuns: V4QualityAuditRunView[]
+  findings: V4QualityAuditFindingView[]
+  corrections: V4QualityCorrectionView[]
+  reprocessJobs: V4QualityReprocessJobView[]
+  promptRegressionRuns: V4QualityPromptRegressionRunView[]
+}
+
+export interface V4QualityQuarantineResponse {
+  quarantine: V4QualityQuarantineView[]
+  total: number
+}
+
+export interface V4QualityAuditRunsResponse {
+  auditRuns: V4QualityAuditRunView[]
+  total: number
+}
+
+export interface V4QualityAuditFindingsResponse {
+  findings: V4QualityAuditFindingView[]
+  total: number
+}
+
+export interface V4QualityCorrectionsResponse {
+  corrections: V4QualityCorrectionView[]
+  total: number
+}
+
+export interface V4QualityReprocessJobsResponse {
+  reprocessJobs: V4QualityReprocessJobView[]
+  total: number
+}
+
+export interface V4QualityPromptRegressionRunsResponse {
+  promptRegressionRuns: V4QualityPromptRegressionRunView[]
+  total: number
+}
+
+export interface V4QualityPromptRegressionResultsResponse {
+  results: V4QualityPromptRegressionResultView[]
+  total: number
+}
+
+export interface V4QualityActionRequest {
+  action: string
+  actor?: string
+  note?: string
+  reasonCode?: string
+  suggestedAction?: string
+}
+
+export interface V4QualityAuditRunRequest {
+  auditType: string
+  scopeJson?: unknown
+}
+
+export interface V4QualityCorrectionRequest {
+  targetType: string
+  targetId: string
+  correctionType: string
+  correctionJson: unknown
+  source: string
+  sourceClaimId?: string
+  sourceSpanId?: string
+  createdBy?: string
+}
+
+export interface V4QualityReprocessJobRequest {
+  scopeType: string
+  scopeJson: unknown
+  mode: string
+  requestedBy?: string
+  reason?: string
+  dryRun: boolean
+  promptVersion?: string
+  schemaVersion?: string
+}
+
+export interface V4QualityPromptRegressionRunRequest {
+  promptVersion: string
+  schemaVersion: string
+  model: string
+  fixtureSet: string
+}
