@@ -14,6 +14,7 @@ import type { Book, BookGroup, SearchBook } from '../types'
 import { deleteBrowserBookCache, listBrowserCacheSummary } from '../utils/browserCache'
 import { isLocalTxtBook } from '../utils/localBook'
 import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, removeRecentReadBook } from '../utils/recentBooks'
+import { syncProgressFromWebdav } from '../utils/webdavSync'
 
 type SearchScope = 'all' | 'group' | 'source'
 
@@ -114,6 +115,16 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
         browserCachedChapterCount: isLocalTxtBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
       }))
       await refreshRecentBooks()
+
+      // Sync reading progress from WebDAV (Legado compatible, fire-and-forget)
+      syncProgressFromWebdav(books.value).then((result) => {
+        if (result.updated > 0) {
+          books.value = result.books.map((book) => ({
+            ...book,
+            browserCachedChapterCount: isLocalTxtBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
+          }))
+        }
+      }).catch(() => undefined)
     } finally {
       loading.value = false
     }

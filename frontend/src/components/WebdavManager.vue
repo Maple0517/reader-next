@@ -29,11 +29,20 @@
                 <button class="action-btn primary" :disabled="working" @click="createBackup">
                   备份当前数据
                 </button>
+                <button class="action-btn" :disabled="working" @click="triggerLegadoImport">
+                  导入 Legado 备份
+                </button>
                 <button class="action-btn" :disabled="working || loading" @click="loadFiles(currentPath)">
                   刷新列表
                 </button>
                 <button class="action-btn" :disabled="working" @click="triggerUpload">
                   上传文件
+                </button>
+                <button class="action-btn" :disabled="working" @click="pullProgress">
+                  拉取进度
+                </button>
+                <button class="action-btn" :disabled="working" @click="pushProgress">
+                  推送进度
                 </button>
                 <input
                   ref="fileInputRef"
@@ -41,6 +50,13 @@
                   multiple
                   class="hidden-input"
                   @change="handleUpload"
+                />
+                <input
+                  ref="legadoImportRef"
+                  type="file"
+                  accept=".zip"
+                  class="hidden-input"
+                  @change="handleLegadoFileSelect"
                 />
               </div>
               <button
@@ -97,6 +113,14 @@
                     恢复
                   </button>
                   <button
+                    v-if="!entry.isDirectory && isLegadoZipFile(entry.name)"
+                    class="mini-btn"
+                    :disabled="working"
+                    @click="importLegadoFromServer(entry)"
+                  >
+                    导入
+                  </button>
+                  <button
                     v-if="!entry.isDirectory"
                     class="mini-btn"
                     :disabled="working"
@@ -119,12 +143,94 @@
         </section>
       </div>
     </Transition>
+
+    <!-- Legado import preview modal -->
+    <Transition name="scale">
+      <div v-if="legadoPreview" class="modal-container" @click.self="cancelLegadoImport">
+        <section class="webdav-modal legado-preview-modal">
+          <header class="modal-header">
+            <div>
+              <h2>导入 Legado 备份</h2>
+              <p class="subtitle">以下是从备份文件中解析出的数据，请确认后导入</p>
+            </div>
+            <button class="icon-btn" @click="cancelLegadoImport" aria-label="关闭">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </header>
+          <div class="legado-summary">
+            <div class="summary-grid">
+              <div class="summary-item">
+                <span class="summary-num">{{ legadoPreview.books.length }}</span>
+                <span class="summary-label">书籍</span>
+                <span v-if="legadoPreview.skippedBooks > 0" class="summary-skip">
+                  (跳过 {{ legadoPreview.skippedBooks }} 本本地书籍)
+                </span>
+                <span v-if="legadoPreview.incompleteBooks > 0" class="summary-skip">
+                  ({{ legadoPreview.incompleteBooks }} 本需手动搜索补全)
+                </span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-num">{{ legadoPreview.bookSources.length }}</span>
+                <span class="summary-label">书源</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-num">{{ legadoPreview.bookGroups.length }}</span>
+                <span class="summary-label">分组</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-num">{{ legadoPreview.bookmarks.length }}</span>
+                <span class="summary-label">书签</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-num">{{ legadoPreview.replaceRules.length }}</span>
+                <span class="summary-label">净化规则</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-num">{{ legadoPreview.rssSources.length }}</span>
+                <span class="summary-label">RSS 源</span>
+              </div>
+            </div>
+            <div class="notice warning">
+              <strong>注意</strong>
+              <span>导入会追加到当前数据中，不会覆盖已有内容。content:// 本地书籍（手机上的文件）会被跳过，data: 内联书籍会导入但需手动搜索补全书源。</span>
+            </div>
+          </div>
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <button class="action-btn primary" :disabled="working" @click="applyLegadoImport">
+                确认导入
+              </button>
+              <button class="action-btn" :disabled="working" @click="cancelLegadoImport">
+                取消
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
+import { useBookshelfStore } from '../stores/bookshelf'
+import {
+  tryParseLegadoBackupZip,
+  type LegadoImportResult,
+} from '../utils/legadoImport'
+import {
+  syncProgressFromWebdav,
+  writeAllProgressToWebdav,
+} from '../utils/webdavSync'
+import { saveBooks } from '../api/bookshelf'
+import { saveBookSources } from '../api/source'
+import { saveBookGroup } from '../api/bookshelf'
+import { saveBookmarks } from '../api/bookmark'
+import { saveReplaceRules } from '../api/replaceRule'
+import { saveRssSources } from '../api/rss'
 import {
   deleteWebdavFile,
   deleteWebdavFileList,
@@ -153,6 +259,7 @@ const emit = defineEmits<{
 }>()
 
 const appStore = useAppStore()
+const bookshelfStore = useBookshelfStore()
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const currentPath = ref('/')
 const entries = ref<EntryRow[]>([])
@@ -160,6 +267,8 @@ const selectedPaths = ref<string[]>([])
 const loading = ref(false)
 const working = ref(false)
 const errorMessage = ref('')
+const legadoImportRef = ref<HTMLInputElement | null>(null)
+const legadoPreview = ref<LegadoImportResult | null>(null)
 
 const webdavAvailable = computed(() => {
   if (!appStore.isSecureMode) return true
@@ -197,6 +306,10 @@ function close() {
 
 function isBackupFile(name: string) {
   return name.toLowerCase().endsWith('.json')
+}
+
+function isLegadoZipFile(name: string) {
+  return name.toLowerCase().endsWith('.zip')
 }
 
 function formatSize(size: number) {
@@ -269,6 +382,39 @@ function openEntry(entry: EntryRow) {
 
 function triggerUpload() {
   fileInputRef.value?.click()
+}
+
+function triggerLegadoImport() {
+  legadoImportRef.value?.click()
+}
+
+async function pullProgress() {
+  working.value = true
+  try {
+    const result = await syncProgressFromWebdav(bookshelfStore.books)
+    if (result.updated > 0) {
+      bookshelfStore.books = result.books
+      appStore.showToast(`已从 WebDAV 同步 ${result.updated} 本书的阅读进度`, 'success')
+    } else {
+      appStore.showToast('没有需要更新的阅读进度', 'warning')
+    }
+  } catch (error) {
+    appStore.showToast((error as Error).message || '拉取进度失败', 'error')
+  } finally {
+    working.value = false
+  }
+}
+
+async function pushProgress() {
+  working.value = true
+  try {
+    const written = await writeAllProgressToWebdav(bookshelfStore.books)
+    appStore.showToast(`已推送 ${written} 本书的阅读进度到 WebDAV`, 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '推送进度失败', 'error')
+  } finally {
+    working.value = false
+  }
 }
 
 async function handleUpload(event: Event) {
@@ -358,6 +504,93 @@ async function removeSelected() {
     await loadFiles(currentPath.value)
   } catch (error) {
     appStore.showToast((error as Error).message || '批量删除失败', 'error')
+  } finally {
+    working.value = false
+  }
+}
+async function handleLegadoFileSelect(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    appStore.showToast('请选择 .zip 格式的备份文件', 'error')
+    input.value = ''
+    return
+  }
+  working.value = true
+  try {
+    const result = await tryParseLegadoBackupZip(file)
+    if (!result) {
+      appStore.showToast('该 ZIP 文件不是 Legado 备份格式', 'error')
+      return
+    }
+    legadoPreview.value = result
+  } catch (error) {
+    appStore.showToast((error as Error).message || '解析备份文件失败', 'error')
+  } finally {
+    working.value = false
+    input.value = ''
+  }
+}
+
+async function applyLegadoImport() {
+  const data = legadoPreview.value
+  if (!data) return
+  working.value = true
+  const errors: string[] = []
+  try {
+    // Import in dependency order: sources → groups → books → bookmarks → rules → rss
+    if (data.bookSources.length) {
+      try { await saveBookSources(data.bookSources) } catch (e) { errors.push(`书源: ${(e as Error).message}`) }
+    }
+    for (const group of data.bookGroups) {
+      try { await saveBookGroup(group) } catch (e) { errors.push(`分组 ${group.groupName}: ${(e as Error).message}`) }
+    }
+    if (data.books.length) {
+      try { await saveBooks(data.books) } catch (e) { errors.push(`书籍: ${(e as Error).message}`) }
+    }
+    if (data.bookmarks.length) {
+      try { await saveBookmarks(data.bookmarks) } catch (e) { errors.push(`书签: ${(e as Error).message}`) }
+    }
+    if (data.replaceRules.length) {
+      try { await saveReplaceRules(data.replaceRules) } catch (e) { errors.push(`净化规则: ${(e as Error).message}`) }
+    }
+    if (data.rssSources.length) {
+      try { await saveRssSources(data.rssSources) } catch (e) { errors.push(`RSS源: ${(e as Error).message}`) }
+    }
+    legadoPreview.value = null
+    if (errors.length > 0) {
+      appStore.showToast(`部分导入失败: ${errors.join('; ')}`, 'error')
+      working.value = false
+    } else {
+      appStore.showToast('Legado 备份导入完成，正在刷新页面', 'success')
+      window.setTimeout(() => {
+        window.location.reload()
+      }, 800)
+    }
+  } catch (error) {
+    appStore.showToast((error as Error).message || '导入失败', 'error')
+    working.value = false
+  }
+}
+
+function cancelLegadoImport() {
+  legadoPreview.value = null
+}
+
+async function importLegadoFromServer(entry: EntryRow) {
+  if (!confirm(`确定从 ${entry.name} 导入 Legado 备份数据吗？`)) return
+  working.value = true
+  try {
+    const blob = await getWebdavFileBlob(entry.path)
+    const result = await tryParseLegadoBackupZip(blob)
+    if (!result) {
+      appStore.showToast('该文件不是 Legado 备份格式', 'error')
+      return
+    }
+    legadoPreview.value = result
+  } catch (error) {
+    appStore.showToast((error as Error).message || '解析失败', 'error')
   } finally {
     working.value = false
   }
@@ -635,6 +868,46 @@ async function restoreBackup(entry: EntryRow) {
 
 .hidden-input {
   display: none;
+}
+
+.legado-preview-modal {
+  max-width: 640px;
+}
+
+.legado-summary {
+  padding: var(--space-4) var(--space-6);
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+}
+
+.summary-num {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.summary-label {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.summary-skip {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
 }
 
 @media (max-width: 768px) {
