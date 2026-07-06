@@ -240,3 +240,38 @@ Implemented Phase 6 quality/audit/reprocess/correction workflow, ran backend/fro
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: AI Book Memory V4 finish
+
+**Date**: 2026-07-06
+**Task**: AI Book Memory V4 finish
+**Branch**: `maple/ai-redesign`
+
+### Summary
+
+Finalized Phase 6 report wording, stabilized V4 frontend/projection bug fixes, updated local compose storage mapping, archived ai-redesign task.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f4cbd83a` | (see git log) |
+| `eb48eab3` | (see git log) |
+| `502df830` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
