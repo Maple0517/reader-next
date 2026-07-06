@@ -15,7 +15,7 @@ services:
     ports:
       - "${READER_PORT:-28080}:18080"
     volumes:
-      - ../storage:/app/storage
+      - ../storage-docker:/app/storage
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18080/ >/dev/null"]
       interval: 30s
