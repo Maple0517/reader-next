@@ -100,6 +100,7 @@ describe('AiBookView catchup task controls', () => {
   })
 
   it('keeps AI book load errors visible instead of rendering a blank page', async () => {
+    readerStoreMock.book = null
     getShelfBookMock.mockRejectedValueOnce(new Error('书籍不存在'))
     const wrapper = mount(AiBookView)
     await flushPromises()

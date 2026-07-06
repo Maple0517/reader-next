@@ -14,6 +14,10 @@
     <p v-else-if="error" class="quality-state">质量数据加载失败。</p>
 
     <div v-else class="quality-content">
+      <p v-if="isQualityEmpty" class="quality-state quality-empty-callout">
+        尚未运行质量审计 / metrics。catchup 不会自动生成审计结果；可先运行 review audit 或 dry-run reprocess。
+      </p>
+
       <section class="quality-section">
         <div class="section-head">
           <strong>Overview</strong>
@@ -210,6 +214,15 @@ const metrics = computed<MetricItem[]>(() => Object.entries(qualityMetrics.value
 
 const openFindingCount = computed(() => findings.value.filter((finding) => finding.status === 'open').length)
 const overviewText = computed(() => `${quarantine.value.length} quarantined · ${findings.value.length} findings · ${corrections.value.length} corrections`)
+const isQualityEmpty = computed(() => (
+  metrics.value.length === 0
+  && quarantine.value.length === 0
+  && auditRuns.value.length === 0
+  && findings.value.length === 0
+  && corrections.value.length === 0
+  && reprocessJobs.value.length === 0
+  && promptRegressionRuns.value.length === 0
+))
 
 async function load() {
   if (!props.bookUrl) return

@@ -601,6 +601,7 @@ impl Extractor for RealAiExtractor {
              identity reveal 的 reveal_type 必须是以下之一：{}\n\n\
              knowledge category 必须是以下之一：{}\n\n\
              knowledge status_hint 只能是 fact / rumor / uncertain / false_belief；secret / prophecy 必须用 category 表达。\n\n\
+             importance_score 如果出现，必须使用 0 到 1 之间的小数；不要使用 1 到 10 的整数打分。\n\n\
              place_type 必须是以下之一：{}\n\n\
              location_edge.edge_type 必须是以下之一：{}\n\n\
              evidence_span_ids 必须使用以下可用 span IDs：{}\n\n\
@@ -727,32 +728,15 @@ pub fn parse_observations_from_json(
 ) -> anyhow::Result<Vec<Observation>> {
     let cleaned = strip_markdown_fences(raw);
 
-    // Try parsing as array first, then as object with "observations" key
-    let arr: Vec<serde_json::Value> = serde_json::from_str(&cleaned)
-        .or_else(|_| {
-            // Try extracting array from wrapper object
-            let obj: serde_json::Value = serde_json::from_str(&cleaned)?;
-            if let Some(arr) = obj.get("observations").and_then(|v| v.as_array()) {
-                Ok(arr.clone())
-            } else if let Some(arr) = obj.get("data").and_then(|v| v.as_array()) {
-                Ok(arr.clone())
-            } else if let Some(arr) = obj.get("results").and_then(|v| v.as_array()) {
-                Ok(arr.clone())
-            } else {
-                // Single object → wrap in array
-                if obj.is_object() {
-                    Ok(vec![obj])
-                } else {
-                    Err(serde_json::from_str::<serde_json::Value>("").unwrap_err())
-                }
-            }
-        })
+    // Parse the first complete JSON root so valid payloads with trailing model text
+    // still succeed, then keep the truncated-payload repair as fallback.
+    let arr: Vec<serde_json::Value> = extract_observation_array(&cleaned)
         .or_else(|_: serde_json::Error| {
             // Try to repair truncated JSON by finding the last complete object
             let trimmed = cleaned.trim_end();
             if let Some(pos) = trimmed.rfind('}') {
                 let attempt = format!("{}]", &trimmed[..=pos]);
-                serde_json::from_str(&attempt)
+                extract_observation_array(&attempt)
             } else {
                 Err(serde_json::from_str::<serde_json::Value>(&cleaned).unwrap_err())
             }
@@ -761,38 +745,56 @@ pub fn parse_observations_from_json(
     let mut observations = Vec::new();
     let span_set: std::collections::HashSet<&String> = valid_span_ids.iter().collect();
 
-    for item in &arr {
-        let obs_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    for raw_item in &arr {
+        let mut item_value = raw_item.clone();
+        let obs_type = item_value
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         // Normalize type: accept both snake_case and PascalCase
         let normalized_type = match obs_type {
             "entity_introduction" | "EntityIntroduction" | "entityIntroduction" => {
-                "entity_introduction"
+                "entity_introduction".to_string()
             }
-            "alias" | "Alias" => "alias",
-            "property_update" | "PropertyUpdate" | "propertyUpdate" => "property_update",
-            "minor_event" | "MinorEvent" | "minorEvent" => "minor_event",
+            "alias" | "Alias" => "alias".to_string(),
+            "property_update" | "PropertyUpdate" | "propertyUpdate" => "property_update".to_string(),
+            "minor_event" | "MinorEvent" | "minorEvent" => "minor_event".to_string(),
             "relationship_update" | "RelationshipUpdate" | "relationshipUpdate" => {
-                "relationship_update"
+                "relationship_update".to_string()
             }
             "knowledge_assertion" | "KnowledgeAssertion" | "knowledgeAssertion" => {
-                "knowledge_assertion"
+                "knowledge_assertion".to_string()
             }
             "location_introduction" | "LocationIntroduction" | "locationIntroduction" => {
-                "location_introduction"
+                "location_introduction".to_string()
             }
-            "location_edge" | "LocationEdge" | "locationEdge" => "location_edge",
-            "identity_reveal" | "IdentityReveal" | "identityReveal" => "identity_reveal",
+            "location_edge" | "LocationEdge" | "locationEdge" => "location_edge".to_string(),
+            "identity_reveal" | "IdentityReveal" | "identityReveal" => "identity_reveal".to_string(),
             "entity_merge_candidate" | "EntityMergeCandidate" | "entityMergeCandidate" => {
-                "entity_merge_candidate"
+                "entity_merge_candidate".to_string()
             }
             "entity_split_candidate" | "EntitySplitCandidate" | "entitySplitCandidate" => {
-                "entity_split_candidate"
+                "entity_split_candidate".to_string()
             }
-            "not_same_identity" | "NotSameIdentity" | "notSameIdentity" => "not_same_identity",
-            "summary" | "Summary" => "summary",
-            other => other,
+            "not_same_identity" | "NotSameIdentity" | "notSameIdentity" => {
+                "not_same_identity".to_string()
+            }
+            "summary" | "Summary" => "summary".to_string(),
+            other => other.to_string(),
         };
-        match normalized_type {
+        if !is_known_observation_type(&normalized_type) {
+            anyhow::bail!("Unknown observation type: {}", normalized_type);
+        }
+        if normalized_type != "summary" && !sanitize_evidence_span_ids(&mut item_value, &span_set)
+        {
+            tracing::warn!(
+                "Skipping V4 observation with no valid evidence_span_ids: {}",
+                normalized_type
+            );
+            continue;
+        }
+        let item = &item_value;
+        match normalized_type.as_str() {
             "entity_introduction" => {
                 let subject_mention = required_str(item, "subject_mention")?;
                 let entity_type = optional_str(item, "entity_type").unwrap_or("character");
@@ -1089,6 +1091,38 @@ pub fn parse_observations_from_json(
     Ok(observations)
 }
 
+fn extract_observation_array(cleaned: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+    let value = parse_first_json_value(cleaned)?;
+    value_to_observation_array(value)
+}
+
+fn parse_first_json_value(cleaned: &str) -> Result<serde_json::Value, serde_json::Error> {
+    use serde::Deserialize;
+
+    let mut deserializer = serde_json::Deserializer::from_str(cleaned);
+    serde_json::Value::deserialize(&mut deserializer)
+}
+
+fn value_to_observation_array(
+    value: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+    match value {
+        serde_json::Value::Array(arr) => Ok(arr),
+        serde_json::Value::Object(obj) => {
+            if let Some(arr) = obj.get("observations").and_then(|v| v.as_array()) {
+                Ok(arr.clone())
+            } else if let Some(arr) = obj.get("data").and_then(|v| v.as_array()) {
+                Ok(arr.clone())
+            } else if let Some(arr) = obj.get("results").and_then(|v| v.as_array()) {
+                Ok(arr.clone())
+            } else {
+                Ok(vec![serde_json::Value::Object(obj)])
+            }
+        }
+        _ => Err(serde_json::from_str::<serde_json::Value>("").unwrap_err()),
+    }
+}
+
 fn strip_markdown_fences(s: &str) -> String {
     let trimmed = s.trim();
     let stripped = if trimmed.starts_with("```") {
@@ -1226,6 +1260,44 @@ fn validate_evidence_spans(
     Ok(spans)
 }
 
+fn sanitize_evidence_span_ids(
+    item: &mut serde_json::Value,
+    valid: &std::collections::HashSet<&String>,
+) -> bool {
+    let spans = optional_str_array(item, "evidence_span_ids");
+    if spans.is_empty() {
+        return false;
+    }
+    let valid_spans: Vec<String> = spans
+        .into_iter()
+        .filter(|span_id| valid.contains(span_id))
+        .collect();
+    if valid_spans.is_empty() {
+        return false;
+    }
+    item["evidence_span_ids"] = serde_json::json!(valid_spans);
+    true
+}
+
+fn is_known_observation_type(observation_type: &str) -> bool {
+    matches!(
+        observation_type,
+        "entity_introduction"
+            | "alias"
+            | "property_update"
+            | "minor_event"
+            | "relationship_update"
+            | "knowledge_assertion"
+            | "location_introduction"
+            | "location_edge"
+            | "identity_reveal"
+            | "entity_merge_candidate"
+            | "entity_split_candidate"
+            | "not_same_identity"
+            | "summary"
+    )
+}
+
 fn validate_confidence(item: &serde_json::Value) -> anyhow::Result<f64> {
     let c = item
         .get("confidence")
@@ -1239,6 +1311,12 @@ fn validate_confidence(item: &serde_json::Value) -> anyhow::Result<f64> {
 
 fn validate_unit_f64(item: &serde_json::Value, key: &str, default: f64) -> anyhow::Result<f64> {
     let value = item.get(key).and_then(|v| v.as_f64()).unwrap_or(default);
+    if key == "importance_score"
+        && (2.0..=10.0).contains(&value)
+        && (value.fract().abs() < f64::EPSILON)
+    {
+        return Ok(value / 10.0);
+    }
     if !(0.0..=1.0).contains(&value) {
         anyhow::bail!("{} out of range: {}", key, value);
     }
@@ -1559,6 +1637,18 @@ mod tests {
     }
 
     #[test]
+    fn location_introduction_integer_importance_score_normalized_from_ten_scale() {
+        let json = r#"[{"type":"location_introduction","place_mention":"青云城","place_type":"city","description":"东域重城","importance_score":8,"map_visible_hint":true,"evidence_span_ids":["s1"],"confidence":0.9}]"#;
+        let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
+        match &parsed[0] {
+            Observation::LocationIntroduction {
+                importance_score, ..
+            } => assert_eq!(*importance_score, 0.8),
+            _ => panic!("expected location introduction"),
+        }
+    }
+
+    #[test]
     fn location_edge_parser() {
         let json = r#"[{"type":"location_edge","from_place_mention":"黑风谷","to_place_mention":"青云城","edge_type":"north_of","direction_hint":"north","distance_hint":"百里","is_topological_hint":true,"evidence_span_ids":["s1"],"confidence":0.86}]"#;
         let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
@@ -1585,9 +1675,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_place_evidence_rejected() {
+    fn missing_place_evidence_skipped() {
         let json = r#"[{"type":"location_introduction","place_mention":"青云城","place_type":"city","evidence_span_ids":[],"confidence":0.8}]"#;
-        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
+        let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
+        assert!(parsed.is_empty());
     }
 
     #[test]
@@ -1684,25 +1775,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_missing_evidence_span_ids_rejected() {
+    fn parse_missing_evidence_span_ids_skipped() {
         let json = r#"[{"type":"alias","subject_mention":"张三","alias":"小张","alias_type":"nickname","evidence_span_ids":[],"confidence":0.8}]"#;
         let span_ids = vec!["s1".to_string()];
-        let result = parse_observations_from_json(json, &span_ids);
-        assert!(
-            result.is_err(),
-            "empty evidence_span_ids should be rejected"
-        );
+        let result = parse_observations_from_json(json, &span_ids).unwrap();
+        assert!(result.is_empty(), "empty evidence_span_ids should be skipped");
     }
 
     #[test]
-    fn parse_invalid_evidence_span_id_rejected() {
+    fn parse_invalid_evidence_span_id_skipped() {
         let json = r#"[{"type":"alias","subject_mention":"张三","alias":"小张","alias_type":"nickname","evidence_span_ids":["bad_id"],"confidence":0.8}]"#;
         let span_ids = vec!["s1".to_string()];
-        let result = parse_observations_from_json(json, &span_ids);
-        assert!(
-            result.is_err(),
-            "invalid evidence_span_id should be rejected"
-        );
+        let result = parse_observations_from_json(json, &span_ids).unwrap();
+        assert!(result.is_empty(), "invalid evidence_span_id should be skipped");
+    }
+
+    #[test]
+    fn parse_mixed_valid_and_invalid_evidence_span_ids_keeps_valid_ids() {
+        let json = r#"[{"type":"alias","subject_mention":"张三","alias":"小张","alias_type":"nickname","evidence_span_ids":["s1","bad_id"],"confidence":0.8}]"#;
+        let span_ids = vec!["s1".to_string()];
+        let result = parse_observations_from_json(json, &span_ids).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].evidence_span_ids(), &["s1".to_string()]);
     }
 
     #[test]
@@ -1729,6 +1823,21 @@ mod tests {
         let span_ids = vec!["s1".to_string()];
         let result = parse_observations_from_json(json, &span_ids).unwrap();
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn parse_trailing_characters_after_valid_json() {
+        let json = concat!(
+            r#"{"observations":[{"type":"summary","summary":"test","key_points":[],"has_important_changes":false}]}"#,
+            "\n补充说明：以上是抽取结果。"
+        );
+        let span_ids = vec!["s1".to_string()];
+        let result = parse_observations_from_json(json, &span_ids);
+        assert!(
+            result.is_ok(),
+            "valid first JSON payload with trailing text should still parse"
+        );
+        assert_eq!(result.unwrap().len(), 1);
     }
 
     #[test]
@@ -1873,6 +1982,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_knowledge_assertion_integer_importance_score_normalized_from_ten_scale() {
+        let json = r#"[
+            {
+              "type": "knowledge_assertion",
+              "category": "history",
+              "topic": "古代大战",
+              "assertion_text": "古代曾爆发持续百年的大战。",
+              "confidence": 0.9,
+              "importance_score": 8,
+              "evidence_span_ids": ["s1"]
+            }
+        ]"#;
+        let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
+        match &parsed[0] {
+            Observation::KnowledgeAssertion {
+                importance_score, ..
+            } => assert_eq!(*importance_score, 0.8),
+            _ => panic!("expected knowledge assertion"),
+        }
+    }
+
+    #[test]
     fn parse_knowledge_assertion_skips_incomplete_entity_refs() {
         let json = r#"[
             {
@@ -1911,9 +2042,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_knowledge_assertion_missing_evidence_rejected() {
+    fn parse_knowledge_assertion_missing_evidence_skipped() {
         let json = r#"[{"type":"knowledge_assertion","category":"history","topic":"x","assertion_text":"x","confidence":0.8,"importance_score":0.7}]"#;
-        assert!(parse_observations_from_json(json, &["s1".to_string()]).is_err());
+        let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
+        assert!(parsed.is_empty());
     }
 
     #[test]

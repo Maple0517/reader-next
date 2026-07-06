@@ -428,13 +428,19 @@ impl UserService {
                             return Ok(ns.to_string());
                         }
                     }
-                    return Ok("default".to_string());
                 }
             }
         }
         if let Some(token) = access_token {
             if let Ok(Some(user)) = self.check_auth(token).await {
                 return Ok(user.username);
+            }
+        }
+        if self.cfg.secure {
+            if let Some(key) = secure_key {
+                if self.secure_key_matches(key) {
+                    return Ok("default".to_string());
+                }
             }
         }
         if !self.cfg.secure {
@@ -1041,6 +1047,50 @@ mod tests {
         assert_eq!(logged_in_ns, "reader1");
         assert_eq!(anonymous_ns, "default");
         assert_eq!(invalid_token_ns, "default");
+
+        let _ = fs::remove_dir_all(temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn logged_in_namespace_wins_over_secure_key_default_fallback() {
+        let (mut service, temp_dir) = create_user_service().await;
+        service.cfg.secure = true;
+        service.cfg.secure_key = "manage-key".to_string();
+
+        let login = service
+            .login("reader1", "password123", false, None)
+            .await
+            .unwrap();
+        let access_token = login["accessToken"].as_str().unwrap().to_string();
+
+        let resolved = service
+            .resolve_user_ns_with_override(Some(&access_token), Some("manage-key"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, "reader1");
+
+        let _ = fs::remove_dir_all(temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn secure_key_with_explicit_user_ns_still_overrides_namespace() {
+        let (mut service, temp_dir) = create_user_service().await;
+        service.cfg.secure = true;
+        service.cfg.secure_key = "manage-key".to_string();
+
+        let login = service
+            .login("reader1", "password123", false, None)
+            .await
+            .unwrap();
+        let access_token = login["accessToken"].as_str().unwrap().to_string();
+
+        let resolved = service
+            .resolve_user_ns_with_override(Some(&access_token), Some("manage-key"), Some("admin"))
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, "admin");
 
         let _ = fs::remove_dir_all(temp_dir).await;
     }

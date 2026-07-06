@@ -228,8 +228,9 @@ pub fn parse_judge_output(raw: &str) -> anyhow::Result<JudgeOutput> {
     let cleaned = strip_markdown_fences_judge(raw);
 
     let normalized = normalize_judge_json(&cleaned)?;
-    let output: JudgeOutput = serde_json::from_str(&normalized)
+    let mut output: JudgeOutput = serde_json::from_str(&normalized)
         .map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+    output.importance_score = output.importance_score.map(normalize_unit_score);
 
     validate_judge_output_fields(&output)?;
 
@@ -278,8 +279,9 @@ pub fn parse_judge_output_with_repair(raw: &str) -> anyhow::Result<JudgeOutput> 
     // Try repair
     let cleaned = strip_markdown_fences_judge(raw);
     let repaired = try_repair_judge_json(&cleaned)?;
-    let output: JudgeOutput = serde_json::from_str(&repaired)
+    let mut output: JudgeOutput = serde_json::from_str(&repaired)
         .map_err(|e| anyhow::anyhow!("JSON parse error after repair: {}", e))?;
+    output.importance_score = output.importance_score.map(normalize_unit_score);
 
     validate_judge_output_fields(&output)?;
 
@@ -314,7 +316,28 @@ fn validate_judge_output_fields(output: &JudgeOutput) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(importance_score) = output.importance_score {
+        if !(0.0..=1.0).contains(&importance_score) {
+            anyhow::bail!("importance_score out of range: {}", importance_score);
+        }
+    }
+
     Ok(())
+}
+
+fn normalize_unit_score(value: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    if value > 1.0 && value.fract().abs() < f64::EPSILON {
+        if value <= 10.0 {
+            return value / 10.0;
+        }
+        if value <= 100.0 {
+            return value / 100.0;
+        }
+    }
+    value
 }
 
 /// Validate decision constraints based on object resolve status.
@@ -472,6 +495,7 @@ pub fn build_judge_prompt(
          关系组枚举：{}\n\
          方向性枚举：directed / undirected\n\
          极性枚举：positive / negative / mixed / neutral / unknown\n\n\
+         importance_score 如果出现，必须使用 0 到 1 之间的小数；不要使用 0 到 100 或 1 到 10 的整数分数。\n\n\
          输出严格 JSON 对象，字段：\n\
          decision, reason_code, confidence, normalized_relation_group, normalized_relation_label,\n\
          directionality, current_state, strength, polarity, importance_score,\n\
@@ -1211,6 +1235,28 @@ mod tests {
         assert_eq!(output.importance_score, Some(0.9));
         assert!(output.redirect_to.is_none());
         assert!(output.redirect_dimension_key.is_none());
+    }
+
+    #[test]
+    fn parse_judge_output_normalizes_percentage_importance_score() {
+        let json = r#"{
+            "decision": "accept",
+            "reason_code": "long_term_relationship",
+            "confidence": 0.91,
+            "normalized_relation_group": "mentorship",
+            "normalized_relation_label": "师徒",
+            "directionality": "directed",
+            "current_state": "活跃",
+            "strength": 0.8,
+            "polarity": "positive",
+            "importance_score": 72,
+            "redirect_to": null,
+            "redirect_dimension_key": null,
+            "explanation_for_log": "这是一段长期的师徒关系"
+        }"#;
+
+        let output = parse_judge_output(json).unwrap();
+        assert_eq!(output.importance_score, Some(0.72));
     }
 
     #[test]

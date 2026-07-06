@@ -88,13 +88,13 @@ describe('v4 book api', () => {
   })
 
   it('startV4Catchup calls POST /catchup/start', async () => {
-    postMock.mockResolvedValueOnce({ data: { ok: true, targetChapter: 10 } })
+    postMock.mockResolvedValueOnce({ data: { ok: true, target_chapter: 10 } })
     const result = await api.startV4Catchup({ bookUrl: 'b1', targetChapterIndex: 10 })
     expect(postMock).toHaveBeenCalledWith('/catchup/start', {
       bookUrl: 'b1',
-      targetChapterIndex: 10,
+      target_chapter_index: 10,
     })
-    expect(result.targetChapter).toBe(10)
+    expect(result.target_chapter).toBe(10)
   })
 
   it('getV4CatchupStatus calls GET /catchup/status', async () => {

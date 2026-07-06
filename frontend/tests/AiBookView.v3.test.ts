@@ -46,6 +46,13 @@ vi.mock('../src/stores/aiBook', () => ({
   useAiBookStore: () => aiStoreMock,
 }))
 
+vi.mock('../src/components/reader/V4MapPanel.vue', () => ({
+  default: {
+    props: ['bookUrl'],
+    template: '<section class="v4-map-panel" aria-label="V4 地图">V4 地图 {{ bookUrl }}</section>',
+  },
+}))
+
 describe('AiBookView v3 behavior', () => {
   beforeEach(() => {
     routerBackMock.mockReset()
@@ -100,7 +107,7 @@ describe('AiBookView v3 behavior', () => {
 
 
 
-  it('disables generate and map actions while ai store is busy', async () => {
+  it('disables generate action while ai store is busy and keeps map on V4 cutover panel', async () => {
     aiStoreMock.isBusy = true
     const wrapper = mount(AiBookView)
     await flushPromises()
@@ -114,10 +121,8 @@ describe('AiBookView v3 behavior', () => {
     await wrapper.get('nav.tabs button:nth-child(4)').trigger('click')
     await flushPromises()
 
-    const mapButton = wrapper.get('.map-head .secondary-btn')
-    expect(mapButton.attributes('disabled')).toBeDefined()
-    await mapButton.trigger('click')
-    await flushPromises()
+    expect(wrapper.get('.v4-map-panel').text()).toContain('V4 地图 book-1')
+    expect(wrapper.find('.map-head .secondary-btn').exists()).toBe(false)
     expect(aiStoreMock.generateMap).not.toHaveBeenCalled()
   })
 
@@ -149,29 +154,26 @@ describe('AiBookView v3 behavior', () => {
     expect(wrapper.text()).toContain('当前章节还没有摘要')
   })
 
-  it('shows disabled map notice in V3 cutover', async () => {
+  it('mounts the V4 map panel after map cutover instead of the old disabled V3 notice', async () => {
     const wrapper = mount(AiBookView)
     await flushPromises()
 
     await wrapper.get('nav.tabs button:nth-child(4)').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('地图生成功能已暂时禁用')
-    expect(wrapper.text()).toContain('V3 切换期间，地图生成与持久化暂未接入')
+    expect(wrapper.get('.v4-map-panel').text()).toContain('V4 地图 book-1')
+    expect(wrapper.text()).not.toContain('地图生成功能已暂时禁用')
+    expect(wrapper.text()).not.toContain('V3 切换期间，地图生成与持久化暂未接入')
   })
 
-  it('disables map action during V3 cutover', async () => {
+  it('does not expose the legacy map generation action after V4 map cutover', async () => {
     const wrapper = mount(AiBookView)
     await flushPromises()
 
     await wrapper.get('nav.tabs button:nth-child(4)').trigger('click')
     await flushPromises()
 
-    const button = wrapper.get('.map-head .secondary-btn')
-    expect(button.attributes('disabled')).toBeDefined()
-    await button.trigger('click')
-    await flushPromises()
-
+    expect(wrapper.find('.map-head .secondary-btn').exists()).toBe(false)
     expect(aiStoreMock.generateMap).not.toHaveBeenCalled()
   })
 })

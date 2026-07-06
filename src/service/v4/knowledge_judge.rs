@@ -42,6 +42,23 @@ pub struct KnowledgeJudgeOutput {
     pub explanation_for_log: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawKnowledgeJudgeOutput {
+    pub decision: String,
+    pub card_action: String,
+    #[serde(default)]
+    pub target_card_id: Option<String>,
+    #[serde(default)]
+    pub affected_assertion_ids: Vec<String>,
+    #[serde(default)]
+    pub assertion_status: Option<String>,
+    #[serde(default)]
+    pub current_summary: Option<String>,
+    pub confidence: f64,
+    pub reason_code: String,
+    pub explanation_for_log: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KnowledgeJudgeInput {
     pub book_id: String,
@@ -168,6 +185,8 @@ impl KnowledgeRevisionJudge for RealAiKnowledgeRevisionJudge {
 
         let ai_run_id =
             create_knowledge_judge_run(&self.pool, input, &endpoint.model, &prompt).await?;
+        let captured_output = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let captured_output_for_request = captured_output.clone();
 
         let result = async {
             let path = if endpoint.path.trim().is_empty() {
@@ -202,6 +221,8 @@ impl KnowledgeRevisionJudge for RealAiKnowledgeRevisionJudge {
                 anyhow::bail!("AI model returned error {}: {}", status, text);
             }
             let value: serde_json::Value = response.json().await?;
+            *captured_output_for_request.lock().unwrap() =
+                Some(serde_json::to_string(&value).unwrap_or_default());
             let content = extract_model_content(path, &value)?;
             let output = parse_judge_output_with_repair(&content)?;
             validate_judge_output_for_context(&output, matching_topic_candidate_count(input))?;
@@ -221,8 +242,14 @@ impl KnowledgeRevisionJudge for RealAiKnowledgeRevisionJudge {
                     .await?;
             }
             Err(err) => {
+                let raw_output = captured_output.lock().unwrap().clone();
                 AiRunRepo::new(self.pool.clone())
-                    .update_run_status(&ai_run_id, "failed", None, Some(&err.to_string()))
+                    .update_run_status(
+                        &ai_run_id,
+                        "failed",
+                        raw_output.as_deref(),
+                        Some(&err.to_string()),
+                    )
                     .await?;
             }
         }
@@ -235,11 +262,9 @@ const KNOWLEDGE_JUDGE_SYSTEM_PROMPT: &str = "你是小说世界观知识修订�
 
 pub fn parse_judge_output(raw: &str) -> anyhow::Result<KnowledgeJudgeOutput> {
     let cleaned = strip_markdown_fences(raw);
-    let mut output: KnowledgeJudgeOutput =
+    let output: RawKnowledgeJudgeOutput =
         serde_json::from_str(&cleaned).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
-    normalize_judge_output_fields(&mut output);
-    validate_judge_output_fields(&output)?;
-    Ok(output)
+    materialize_judge_output(output)
 }
 
 pub fn parse_judge_output_with_repair(raw: &str) -> anyhow::Result<KnowledgeJudgeOutput> {
@@ -247,19 +272,95 @@ pub fn parse_judge_output_with_repair(raw: &str) -> anyhow::Result<KnowledgeJudg
         Ok(output) => Ok(output),
         Err(_) => {
             let repaired = try_repair_json(&strip_markdown_fences(raw))?;
-            let mut output: KnowledgeJudgeOutput = serde_json::from_str(&repaired)
+            let output: RawKnowledgeJudgeOutput = serde_json::from_str(&repaired)
                 .map_err(|e| anyhow::anyhow!("JSON parse error after repair: {}", e))?;
-            normalize_judge_output_fields(&mut output);
-            validate_judge_output_fields(&output)?;
-            Ok(output)
+            materialize_judge_output(output)
         }
     }
 }
 
-fn normalize_judge_output_fields(output: &mut KnowledgeJudgeOutput) {
-    if output.assertion_status == "fact" {
-        output.assertion_status = "active".to_string();
+fn materialize_judge_output(raw: RawKnowledgeJudgeOutput) -> anyhow::Result<KnowledgeJudgeOutput> {
+    let decision = parse_decision(&raw.decision)?;
+    let card_action = parse_card_action(&raw.card_action)?;
+    let no_write = decision == KnowledgeJudgeDecision::Reject
+        || card_action == KnowledgeCardAction::Uncertain;
+    let assertion_status = if no_write {
+        normalize_no_write_assertion_status(raw.assertion_status.as_deref())
+    } else {
+        normalize_write_assertion_status(raw.assertion_status.as_deref())?
+    };
+
+    let output = KnowledgeJudgeOutput {
+        decision,
+        card_action,
+        target_card_id: raw.target_card_id,
+        affected_assertion_ids: raw.affected_assertion_ids,
+        assertion_status,
+        current_summary: raw.current_summary,
+        confidence: raw.confidence,
+        reason_code: raw.reason_code,
+        explanation_for_log: raw.explanation_for_log,
+    };
+    validate_judge_output_fields(&output)?;
+    Ok(output)
+}
+
+fn parse_decision(value: &str) -> anyhow::Result<KnowledgeJudgeDecision> {
+    match value.trim() {
+        "add_new" => Ok(KnowledgeJudgeDecision::AddNew),
+        "supplement" => Ok(KnowledgeJudgeDecision::Supplement),
+        "revise_existing" => Ok(KnowledgeJudgeDecision::ReviseExisting),
+        "contradict_existing" => Ok(KnowledgeJudgeDecision::ContradictExisting),
+        "mark_rumor" => Ok(KnowledgeJudgeDecision::MarkRumor),
+        "mark_uncertain" => Ok(KnowledgeJudgeDecision::MarkUncertain),
+        "mark_false_in_world" => Ok(KnowledgeJudgeDecision::MarkFalseInWorld),
+        "reject" => Ok(KnowledgeJudgeDecision::Reject),
+        other => anyhow::bail!("invalid decision: {}", other),
     }
+}
+
+fn parse_card_action(value: &str) -> anyhow::Result<KnowledgeCardAction> {
+    match value.trim() {
+        "use_existing_card" => Ok(KnowledgeCardAction::UseExistingCard),
+        "create_new_card" => Ok(KnowledgeCardAction::CreateNewCard),
+        "uncertain" => Ok(KnowledgeCardAction::Uncertain),
+        other => anyhow::bail!("invalid card_action: {}", other),
+    }
+}
+
+fn normalize_assertion_status_value(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "fact" {
+        return Some("active".to_string());
+    }
+    Some(trimmed.to_string())
+}
+
+fn normalize_no_write_assertion_status(value: Option<&str>) -> String {
+    match normalize_assertion_status_value(value) {
+        Some(status)
+            if matches!(
+                status.as_str(),
+                "active" | "rumor" | "uncertain" | "false_in_world"
+            ) =>
+        {
+            status
+        }
+        _ => "uncertain".to_string(),
+    }
+}
+
+fn normalize_write_assertion_status(value: Option<&str>) -> anyhow::Result<String> {
+    normalize_assertion_status_value(value)
+        .ok_or_else(|| anyhow::anyhow!("assertion_status is required"))
+}
+
+fn is_no_write_output(output: &KnowledgeJudgeOutput) -> bool {
+    output.decision == KnowledgeJudgeDecision::Reject
+        || output.card_action == KnowledgeCardAction::Uncertain
 }
 
 fn validate_judge_output_fields(output: &KnowledgeJudgeOutput) -> anyhow::Result<()> {
@@ -271,6 +372,9 @@ fn validate_judge_output_fields(output: &KnowledgeJudgeOutput) -> anyhow::Result
     }
     if output.explanation_for_log.trim().is_empty() {
         anyhow::bail!("explanation_for_log is required");
+    }
+    if is_no_write_output(output) {
+        return Ok(());
     }
     if !matches!(
         output.assertion_status.as_str(),
@@ -286,6 +390,15 @@ pub fn validate_judge_output_for_context(
     matching_candidate_count: usize,
 ) -> anyhow::Result<()> {
     validate_judge_output_fields(output)?;
+
+    if is_no_write_output(output) {
+        if output.decision == KnowledgeJudgeDecision::Reject
+            && output.card_action != KnowledgeCardAction::Uncertain
+        {
+            anyhow::bail!("reject decision requires card_action=uncertain");
+        }
+        return Ok(());
+    }
 
     match output.card_action {
         KnowledgeCardAction::UseExistingCard => {
@@ -303,7 +416,7 @@ pub fn validate_judge_output_for_context(
                 anyhow::bail!("create_new_card requires no matching candidates");
             }
         }
-        KnowledgeCardAction::Uncertain => {}
+        KnowledgeCardAction::Uncertain => unreachable!("no-write branch already returned"),
     }
 
     match output.decision {
@@ -322,11 +435,7 @@ pub fn validate_judge_output_for_context(
         KnowledgeJudgeDecision::MarkRumor => require_status(output, "rumor")?,
         KnowledgeJudgeDecision::MarkUncertain => require_status(output, "uncertain")?,
         KnowledgeJudgeDecision::MarkFalseInWorld => require_status(output, "false_in_world")?,
-        KnowledgeJudgeDecision::Reject => {
-            if output.card_action != KnowledgeCardAction::Uncertain {
-                anyhow::bail!("reject decision requires card_action=uncertain");
-            }
-        }
+        KnowledgeJudgeDecision::Reject => unreachable!("no-write branch already returned"),
     }
 
     Ok(())
@@ -403,6 +512,9 @@ pub fn build_judge_prompt(input: &KnowledgeJudgeInput) -> anyhow::Result<String>
          判断新 knowledge assertion 如何进入同一 topic/card 的知识状态。\n\
          decision: add_new, supplement, revise_existing, contradict_existing, mark_rumor, mark_uncertain, mark_false_in_world, reject。\n\
          card_action: use_existing_card, create_new_card, uncertain。\n\
+         write path allowed assertion_status: active, rumor, uncertain, false_in_world。\n\
+         decision=reject 时不会创建 assertion；如果必须填 assertion_status 占位，请使用 uncertain。\n\
+         不要输出 unsupported。\n\
          revise_existing / contradict_existing 必须指定 affected_assertion_ids。\n\
          create_new_card 只能在没有匹配 candidate_cards 时使用。\n\
          输出严格 json 对象，字段：decision, card_action, target_card_id, affected_assertion_ids, assertion_status, current_summary, confidence, reason_code, explanation_for_log。",
@@ -945,6 +1057,53 @@ mod tests {
     }
 
     #[test]
+    fn reject_with_unsupported_assertion_status_parses_and_validates_for_no_write() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_judge_output_json("reject", "uncertain")).unwrap();
+        value["assertion_status"] = serde_json::Value::String("unsupported".to_string());
+
+        let output = parse_judge_output(&value.to_string()).unwrap();
+
+        assert_eq!(output.decision, KnowledgeJudgeDecision::Reject);
+        assert_eq!(output.card_action, KnowledgeCardAction::Uncertain);
+        validate_judge_output_for_context(&output, 0).unwrap();
+    }
+
+    #[test]
+    fn reject_with_missing_assertion_status_parses_and_validates_for_no_write() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_judge_output_json("reject", "uncertain")).unwrap();
+        value.as_object_mut().unwrap().remove("assertion_status");
+
+        let output = parse_judge_output(&value.to_string()).unwrap();
+
+        assert_eq!(output.decision, KnowledgeJudgeDecision::Reject);
+        assert_eq!(output.card_action, KnowledgeCardAction::Uncertain);
+        validate_judge_output_for_context(&output, 0).unwrap();
+    }
+
+    #[test]
+    fn uncertain_card_action_with_unsupported_status_validates_for_no_write() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_judge_output_json("add_new", "uncertain")).unwrap();
+        value["assertion_status"] = serde_json::Value::String("unsupported".to_string());
+
+        let output = parse_judge_output(&value.to_string()).unwrap();
+
+        assert_eq!(output.card_action, KnowledgeCardAction::Uncertain);
+        validate_judge_output_for_context(&output, 0).unwrap();
+    }
+
+    #[test]
+    fn write_path_with_unsupported_assertion_status_fails() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&valid_judge_output_json("add_new", "create_new_card")).unwrap();
+        value["assertion_status"] = serde_json::Value::String("unsupported".to_string());
+
+        assert!(parse_judge_output(&value.to_string()).is_err());
+    }
+
+    #[test]
     fn invalid_output_repairs_once() {
         let raw = valid_judge_output_json("supplement", "use_existing_card");
         let truncated = raw.trim_end_matches('}').to_string();
@@ -998,6 +1157,18 @@ mod tests {
             prompt.contains("json") || KNOWLEDGE_JUDGE_SYSTEM_PROMPT.contains("json"),
             "json_object response format requires input messages to contain lowercase json"
         );
+    }
+
+    #[test]
+    fn build_judge_prompt_mentions_assertion_status_enum_and_reject_placeholder_rule() {
+        let prompt = build_judge_prompt(&KnowledgeJudgeInput::for_test()).unwrap();
+
+        assert!(prompt.contains("active"));
+        assert!(prompt.contains("rumor"));
+        assert!(prompt.contains("uncertain"));
+        assert!(prompt.contains("false_in_world"));
+        assert!(prompt.contains("reject"));
+        assert!(prompt.contains("unsupported"));
     }
 
     #[test]
@@ -1075,5 +1246,83 @@ mod tests {
         assert_eq!(run.status, "success");
         assert_eq!(run.model, "test-model");
         assert!(run.output_json.unwrap().contains("add_new"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_judge_ai_run_failure_preserves_raw_output() {
+        use crate::model::ai_model::{AiModelConfig, AiModelEndpointConfig};
+        use crate::service::ai_model_service::AiModelService;
+        use crate::service::json_document_service::JsonDocumentService;
+        use crate::storage::db;
+        use crate::storage::db::v4::ai_run_repo::AiRunRepo;
+        use axum::{routing::post, Json, Router};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "reader-knowledge-judge-failure-run-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
+        let pool = db::init_pool(&database_url).await.unwrap();
+        crate::storage::db::v4::init_v4(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, raw_text, text_hash, created_at) VALUES ('chapter1', 'book1', 1, 'text', 'hash', datetime('now'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async move {
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "content": serde_json::json!({
+                                "decision": "add_new",
+                                "card_action": "create_new_card",
+                                "target_card_id": null,
+                                "affected_assertion_ids": [],
+                                "assertion_status": "unsupported",
+                                "current_summary": "bad status",
+                                "confidence": 0.9,
+                                "reason_code": "bad_status",
+                                "explanation_for_log": "write path invalid status"
+                            }).to_string()
+                        }
+                    }]
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let docs = Arc::new(JsonDocumentService::new(pool.clone(), dir.to_str().unwrap()));
+        let ai_service = AiModelService::new(docs, dir.to_str().unwrap());
+        let mut config = AiModelConfig::default();
+        config.text = AiModelEndpointConfig {
+            enabled: true,
+            base_url: format!("http://{}", addr),
+            api_key: String::new(),
+            model: "test-model".to_string(),
+            path: String::new(),
+            use_full_url: false,
+        };
+        ai_service.save(config).await.unwrap();
+
+        let judge = RealAiKnowledgeRevisionJudge::new(Arc::new(ai_service), pool.clone());
+        let err = judge.judge(&KnowledgeJudgeInput::for_test()).await.unwrap_err();
+        assert!(err.to_string().contains("invalid assertion_status"));
+
+        let runs = AiRunRepo::new(pool)
+            .list_runs_by_chapter("book1", "chapter1")
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "failed");
+        assert!(runs[0].output_json.as_deref().unwrap_or_default().contains("unsupported"));
+        assert!(runs[0].error.as_deref().unwrap_or_default().contains("invalid assertion_status"));
     }
 }

@@ -16,7 +16,7 @@ const router = createRouter({
     {
       path: '/ai-book',
       name: 'ai-book',
-      component: () => import('../views/AiBookView.vue'),
+      component: () => import('../views/AiBookV4View.vue'),
     },
     {
       path: '/explore',

@@ -126,4 +126,25 @@ describe('V4QualityPanel', () => {
     expect(cancelReprocessJobMock).toHaveBeenCalledWith('book-1', 'job-1')
     expect(promptRegressionMock).toHaveBeenCalledWith('book-1', expect.objectContaining({ fixtureSet: 'phase6' }))
   })
+
+  it('renders an honest empty quality state before audits or metrics exist', async () => {
+    getV4QualityMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      qualityMetrics: {},
+      quarantine: [],
+      auditRuns: [],
+      findings: [],
+      corrections: [],
+      reprocessJobs: [],
+      promptRegressionRuns: [],
+    })
+
+    const wrapper = mount(await import('./V4QualityPanel.vue').then((mod) => mod.default), {
+      props: { bookUrl: 'book-1' },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('尚未运行质量审计 / metrics')
+    expect(wrapper.text()).toContain('catchup 不会自动生成审计结果')
+  })
 })

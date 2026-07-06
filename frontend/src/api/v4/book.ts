@@ -69,7 +69,10 @@ export function generateV4ChapterMemory(params: { bookUrl: string; chapterIndex:
 }
 
 export function startV4Catchup(params: { bookUrl: string; targetChapterIndex: number }) {
-  return v4Http.post<{ ok: boolean; targetChapter: number }>('/catchup/start', params).then((r) => r.data)
+  return v4Http.post<{ ok: boolean; target_chapter: number }>('/catchup/start', {
+    bookUrl: params.bookUrl,
+    target_chapter_index: params.targetChapterIndex,
+  }).then((r) => r.data)
 }
 
 export function getV4CatchupStatus(bookUrl: string) {

@@ -1,5 +1,5 @@
 use crate::storage::db::v4::cache_repo::CacheRepo;
-use crate::storage::db::v4::entity_repo::EntityRepo;
+use crate::storage::db::v4::entity_repo::{EntityRecord, EntityRepo};
 use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::property_repo::PropertyRepo;
 use sqlx::SqlitePool;
@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 /// Character card view model for a single entity.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CharacterCardView {
     pub id: String,
     pub name: String,
@@ -20,6 +21,7 @@ pub struct CharacterCardView {
 
 /// State of a single dimension for a character.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DimensionState {
     pub label: String,
     pub value: String,
@@ -29,6 +31,7 @@ pub struct DimensionState {
 
 /// Character list item for book-level view.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CharacterListItem {
     pub id: String,
     pub name: String,
@@ -38,6 +41,105 @@ pub struct CharacterListItem {
     pub first_seen_chapter: i64,
     pub last_seen_chapter: i64,
     pub visibility_score: f64,
+}
+
+const GENERIC_CHARACTER_LABELS: &[&str] = &[
+    "男人",
+    "女人",
+    "男孩",
+    "女孩",
+    "少年",
+    "少女",
+    "老人",
+    "妇人",
+    "孩子",
+    "青年",
+    "中年男子",
+    "中年女人",
+];
+
+const GENERIC_CHARACTER_SUFFIXES: &[&str] = &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
+
+fn normalize_unit_score(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let normalized = if value > 1.0 && value.fract().abs() < f64::EPSILON {
+        if value <= 10.0 {
+            value / 10.0
+        } else if value <= 100.0 {
+            value / 100.0
+        } else {
+            1.0
+        }
+    } else {
+        value
+    };
+    normalized.clamp(0.0, 1.0)
+}
+
+fn looks_generic_character_label(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    GENERIC_CHARACTER_LABELS.contains(&trimmed)
+        || GENERIC_CHARACTER_SUFFIXES
+            .iter()
+            .any(|suffix| trimmed.ends_with(suffix))
+        || trimmed.starts_with("一位")
+}
+
+fn alias_display_rank(alias: &str) -> (i32, usize, usize) {
+    let trimmed = alias.trim();
+    let generic_penalty = if looks_generic_character_label(trimmed) { 1 } else { 0 };
+    let honorific_penalty =
+        if trimmed.ends_with("叔叔") || trimmed.ends_with("先生") || trimmed.ends_with("大人") {
+            1
+        } else {
+            0
+        };
+    (generic_penalty, honorific_penalty, trimmed.chars().count())
+}
+
+fn preferred_character_name(
+    display_name: &str,
+    canonical_name: &str,
+    aliases: &[String],
+) -> String {
+    if !looks_generic_character_label(display_name) {
+        return display_name.to_string();
+    }
+
+    let mut candidates: Vec<&str> = aliases
+        .iter()
+        .map(String::as_str)
+        .filter(|alias| {
+            let trimmed = alias.trim();
+            !trimmed.is_empty() && trimmed != display_name.trim() && trimmed != canonical_name.trim()
+        })
+        .collect();
+    candidates.sort_by_key(|alias| alias_display_rank(alias));
+
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or(display_name)
+        .to_string()
+}
+
+fn compute_visibility_score(entity: &EntityRecord, max_last_seen_chapter: i64) -> f64 {
+    let normalized_importance = normalize_unit_score(entity.importance_score);
+    let chapter_window = (max_last_seen_chapter.max(entity.last_seen_chapter) + 1).max(1) as f64;
+    let span = (entity.last_seen_chapter - entity.first_seen_chapter + 1).max(1) as f64;
+    let span_score = (span + 1.0).ln() / (chapter_window + 1.0).ln();
+    let recency_score = if chapter_window <= 1.0 {
+        1.0
+    } else {
+        (entity.last_seen_chapter.max(0) as f64 / (chapter_window - 1.0)).clamp(0.0, 1.0)
+    };
+
+    (0.6 * span_score + 0.25 * recency_score + 0.15 * normalized_importance).clamp(0.0, 1.0)
 }
 
 /// Project a character card for a single entity.
@@ -102,6 +204,8 @@ async fn project_character_card_from_db(
     // Get aliases
     let aliases = entity_repo.list_aliases_by_entity(entity_id).await?;
     let alias_names: Vec<String> = aliases.iter().map(|a| a.alias.clone()).collect();
+    let display_name =
+        preferred_character_name(&entity.display_name, &entity.canonical_name, &alias_names);
 
     // Get current properties
     let properties = property_repo
@@ -131,10 +235,10 @@ async fn project_character_card_from_db(
 
     Ok(CharacterCardView {
         id: entity.id,
-        name: entity.display_name,
+        name: display_name,
         aliases: alias_names,
         summary: entity.short_summary,
-        importance: entity.importance_score,
+        importance: normalize_unit_score(entity.importance_score),
         first_seen_chapter: entity.first_seen_chapter,
         last_seen_chapter: entity.last_seen_chapter,
         current_states,
@@ -183,8 +287,17 @@ async fn project_character_list_from_db(
 
     let entities = entity_repo.list_by_book(book_id).await?;
     let mut items = Vec::new();
+    let max_last_seen_chapter = entities
+        .iter()
+        .filter(|entity| entity.entity_type == "character")
+        .map(|entity| entity.last_seen_chapter)
+        .max()
+        .unwrap_or(0);
 
     for entity in entities {
+        if entity.entity_type != "character" {
+            continue;
+        }
         if identity_repo
             .resolve_redirect_target(book_id, &entity.id)
             .await?
@@ -194,18 +307,31 @@ async fn project_character_list_from_db(
         }
         let aliases = entity_repo.list_aliases_by_entity(&entity.id).await?;
         let alias_names: Vec<String> = aliases.iter().map(|a| a.alias.clone()).collect();
+        let display_name =
+            preferred_character_name(&entity.display_name, &entity.canonical_name, &alias_names);
+        let visibility_score = compute_visibility_score(&entity, max_last_seen_chapter);
 
         items.push(CharacterListItem {
             id: entity.id,
-            name: entity.display_name,
+            name: display_name,
             aliases: alias_names,
             summary: entity.short_summary,
-            importance: entity.importance_score,
+            importance: normalize_unit_score(entity.importance_score),
             first_seen_chapter: entity.first_seen_chapter,
             last_seen_chapter: entity.last_seen_chapter,
-            visibility_score: entity.importance_score, // Simple heuristic for now
+            visibility_score,
         });
     }
+
+    items.sort_by(|left, right| {
+        right
+            .visibility_score
+            .partial_cmp(&left.visibility_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.last_seen_chapter.cmp(&left.last_seen_chapter))
+            .then_with(|| left.first_seen_chapter.cmp(&right.first_seen_chapter))
+            .then_with(|| left.name.cmp(&right.name))
+    });
 
     Ok(items)
 }
@@ -327,26 +453,111 @@ mod tests {
         assert_eq!(card.current_states["realm"].value, "筑基期");
     }
 
+    #[test]
+    fn character_projection_serializes_public_api_fields_as_camel_case() {
+        let mut current_states = HashMap::new();
+        current_states.insert(
+            "realm".to_string(),
+            DimensionState {
+                label: "境界".to_string(),
+                value: "筑基期".to_string(),
+                updated_chapter: 3,
+                confidence: 0.91,
+            },
+        );
+        let card = CharacterCardView {
+            id: "char-1".to_string(),
+            name: "张三".to_string(),
+            aliases: vec!["小张".to_string()],
+            summary: Some("主角".to_string()),
+            importance: 0.9,
+            first_seen_chapter: 1,
+            last_seen_chapter: 5,
+            current_states,
+        };
+        let value = serde_json::to_value(card).unwrap();
+
+        assert!(value.get("firstSeenChapter").is_some());
+        assert!(value.get("lastSeenChapter").is_some());
+        assert!(value.get("currentStates").is_some());
+        assert!(value.get("first_seen_chapter").is_none());
+        assert!(value.get("current_states").is_none());
+        assert!(value["currentStates"]["realm"].get("updatedChapter").is_some());
+        assert!(value["currentStates"]["realm"].get("updated_chapter").is_none());
+
+        let item = CharacterListItem {
+            id: "char-1".to_string(),
+            name: "张三".to_string(),
+            aliases: vec![],
+            summary: None,
+            importance: 0.9,
+            first_seen_chapter: 1,
+            last_seen_chapter: 5,
+            visibility_score: 0.9,
+        };
+        let item_value = serde_json::to_value(item).unwrap();
+        assert!(item_value.get("firstSeenChapter").is_some());
+        assert!(item_value.get("lastSeenChapter").is_some());
+        assert!(item_value.get("visibilityScore").is_some());
+        assert!(item_value.get("first_seen_chapter").is_none());
+    }
+
     #[tokio::test]
     async fn project_character_list_basic() {
         let (pool, entity_repo, _property_repo) = setup().await;
 
         // Create entities
+        let side = entity_repo
+            .create_entity("b1", "character", "张三", "张三", None, 0.99, 8)
+            .await
+            .unwrap();
+        let lead = entity_repo
+            .create_entity("b1", "character", "李四", "李四", None, 0.7, 1)
+            .await
+            .unwrap();
+        entity_repo.update_last_seen(&lead.id, 18).await.unwrap();
+        entity_repo.update_last_seen(&side.id, 8).await.unwrap();
         entity_repo
-            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
+            .create_entity("b1", "place", "阿尔托", "阿尔托", None, 0.95, 1)
             .await
             .unwrap();
         entity_repo
-            .create_entity("b1", "character", "李四", "李四", None, 0.7, 2)
+            .create_entity("b1", "organization", "神圣海尔兹帝国", "神圣海尔兹帝国", None, 0.8, 1)
             .await
             .unwrap();
 
         let list = project_character_list_from_db("b1", &pool).await.unwrap();
 
         assert_eq!(list.len(), 2);
-        // Sorted by importance DESC
-        assert_eq!(list[0].name, "张三");
-        assert_eq!(list[1].name, "李四");
+        assert_eq!(list[0].name, "李四");
+        assert_eq!(list[1].name, "张三");
+        assert!(list[0].visibility_score > list[1].visibility_score);
+    }
+
+    #[tokio::test]
+    async fn project_character_list_prefers_specific_alias_for_generic_display_name() {
+        let (pool, entity_repo, _property_repo) = setup().await;
+
+        let entity = entity_repo
+            .create_entity("b1", "character", "中年男子", "中年男子", None, 0.91, 1)
+            .await
+            .unwrap();
+        entity_repo
+            .create_alias("b1", &entity.id, "乔尔", "ai_extracted", 1, 0.91, None)
+            .await
+            .unwrap();
+        entity_repo
+            .create_alias("b1", &entity.id, "乔尔叔叔", "ai_extracted", 7, 0.96, None)
+            .await
+            .unwrap();
+
+        let list = project_character_list_from_db("b1", &pool).await.unwrap();
+        assert_eq!(list[0].name, "乔尔");
+
+        let card = project_character_card_from_db(&entity.id, "b1", &pool)
+            .await
+            .unwrap();
+        assert_eq!(card.name, "乔尔");
     }
 
     #[tokio::test]

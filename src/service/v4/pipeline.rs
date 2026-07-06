@@ -296,6 +296,7 @@ async fn process_chapter_with_all_judges(
         }
     } else {
         // Create new segments and spans
+        let mut next_span_index: i64 = 0;
         for (seg_template, spans_data) in &segments_data {
             let segment = chapter_repo
                 .create_segment(
@@ -313,20 +314,21 @@ async fn process_chapter_with_all_judges(
                 .await?;
 
             let mut span_ids = Vec::new();
-            for (span_index, (start, end, excerpt)) in spans_data.iter().enumerate() {
+            for (start, end, excerpt) in spans_data {
                 let span = claim_repo
                     .create_span(
                         book_id,
                         &chapter.id,
                         &text_hash,
                         &segment.id,
-                        span_index as i64,
+                        next_span_index,
                         *start,
                         *end,
                         excerpt,
                     )
                     .await?;
                 span_ids.push(span.id);
+                next_span_index += 1;
             }
 
             // Reconstruct segment text from spans
@@ -2220,6 +2222,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_long_chapter_creates_unique_source_spans() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let paragraphs: Vec<String> = (0..140)
+            .map(|i| format!("第{}段，张三在大殿里观察灵纹，李四记录阵法变化。", i))
+            .collect();
+        let raw_text = paragraphs.join("\n\n");
+        assert!(raw_text.chars().count() > 3000);
+
+        let extractor = empty_extractor();
+        process_chapter("b1", 1, &raw_text, &pool, &extractor, None, None)
+            .await
+            .unwrap();
+
+        let chapter_repo = ChapterRepo::new(pool.clone());
+        let chapter = chapter_repo
+            .get_chapter("b1", 1)
+            .await
+            .unwrap()
+            .expect("chapter should exist");
+        let segments = chapter_repo
+            .list_active_segments(&chapter.id)
+            .await
+            .unwrap();
+        assert!(segments.len() > 1, "long chapter should split into segments");
+
+        let claim_repo = ClaimRepo::new(pool.clone());
+        let mut all_span_indexes = Vec::new();
+        for segment in &segments {
+            let spans = claim_repo.list_spans_by_segment(&segment.id).await.unwrap();
+            assert!(!spans.is_empty(), "segment should have spans");
+            all_span_indexes.extend(spans.into_iter().map(|span| span.span_index));
+        }
+        all_span_indexes.sort_unstable();
+        all_span_indexes.dedup();
+        assert_eq!(all_span_indexes.len(), paragraphs.len());
+    }
+
+    #[tokio::test]
     async fn process_chapter_idempotent_skip() {
         let pool = setup_pool().await;
         let progress_repo = ProgressRepo::new(pool.clone());
@@ -2443,7 +2486,7 @@ mod tests {
         .await
         .unwrap();
 
-        let knowledge_repo = crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool);
+        let knowledge_repo = crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
         let cards = knowledge_repo
             .list_cards("b1", Some("power_system"), Some("active"))
             .await
@@ -2454,6 +2497,131 @@ mod tests {
             cards[0].current_summary.as_deref(),
             Some("Cultivation has stable realm tiers.")
         );
+        let claim_repo = ClaimRepo::new(pool);
+        let claims = claim_repo.list_claims_by_chapter("b1", 1).await.unwrap();
+        let knowledge_claim = claims
+            .into_iter()
+            .find(|claim| claim.claim_type == "knowledge_assertion")
+            .expect("knowledge claim");
+        assert_eq!(knowledge_claim.status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn phase4_uncertain_knowledge_judge_with_unsupported_status_skips_reducer() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let extractor = MockExtractor::new(vec![make_knowledge_obs(
+            "power_system",
+            "Cultivation Realms",
+            "Cultivation has stable realm tiers.",
+        )]);
+        let knowledge_judge = crate::service::v4::knowledge_judge::MockKnowledgeRevisionJudge::new(
+            crate::service::v4::knowledge_judge::KnowledgeJudgeOutput {
+                decision: crate::service::v4::knowledge_judge::KnowledgeJudgeDecision::AddNew,
+                card_action: crate::service::v4::knowledge_judge::KnowledgeCardAction::Uncertain,
+                target_card_id: None,
+                affected_assertion_ids: vec![],
+                assertion_status: "unsupported".to_string(),
+                current_summary: None,
+                confidence: 0.35,
+                reason_code: "test_uncertain".to_string(),
+                explanation_for_log: "test uncertain unsupported".to_string(),
+            },
+        );
+
+        process_chapter_with_knowledge_judge(
+            "b1",
+            1,
+            "修炼境界是否稳定还不确定。",
+            &pool,
+            &extractor,
+            None,
+            None,
+            None,
+            Some(&knowledge_judge),
+        )
+        .await
+        .unwrap();
+
+        let knowledge_repo = crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
+        let cards = knowledge_repo
+            .list_cards("b1", Some("power_system"), Some("active"))
+            .await
+            .unwrap();
+        assert!(cards.is_empty());
+
+        let claim_repo = ClaimRepo::new(pool);
+        let claims = claim_repo.list_claims_by_chapter("b1", 1).await.unwrap();
+        let knowledge_claim = claims
+            .into_iter()
+            .find(|claim| claim.claim_type == "knowledge_assertion")
+            .expect("knowledge claim");
+        assert_eq!(knowledge_claim.status, "uncertain");
+    }
+
+    #[tokio::test]
+    async fn phase4_write_path_with_unsupported_status_creates_no_canonical_write() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+
+        let extractor = MockExtractor::new(vec![make_knowledge_obs(
+            "power_system",
+            "Cultivation Realms",
+            "Cultivation has stable realm tiers.",
+        )]);
+        let knowledge_judge = crate::service::v4::knowledge_judge::MockKnowledgeRevisionJudge::new(
+            crate::service::v4::knowledge_judge::KnowledgeJudgeOutput {
+                decision: crate::service::v4::knowledge_judge::KnowledgeJudgeDecision::AddNew,
+                card_action:
+                    crate::service::v4::knowledge_judge::KnowledgeCardAction::CreateNewCard,
+                target_card_id: None,
+                affected_assertion_ids: vec![],
+                assertion_status: "unsupported".to_string(),
+                current_summary: Some("bad status".to_string()),
+                confidence: 0.91,
+                reason_code: "test_bad_status".to_string(),
+                explanation_for_log: "write path invalid status".to_string(),
+            },
+        );
+
+        process_chapter_with_knowledge_judge(
+            "b1",
+            1,
+            "修炼境界有稳定层级。",
+            &pool,
+            &extractor,
+            None,
+            None,
+            None,
+            Some(&knowledge_judge),
+        )
+        .await
+        .unwrap();
+
+        let unsupported_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_assertions WHERE status = 'unsupported'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unsupported_count, 0);
+
+        let knowledge_repo = crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
+        let cards = knowledge_repo
+            .list_cards("b1", Some("power_system"), Some("active"))
+            .await
+            .unwrap();
+        assert!(cards.is_empty());
+
+        let claim_repo = ClaimRepo::new(pool);
+        let claims = claim_repo.list_claims_by_chapter("b1", 1).await.unwrap();
+        let knowledge_claim = claims
+            .into_iter()
+            .find(|claim| claim.claim_type == "knowledge_assertion")
+            .expect("knowledge claim");
+        assert_eq!(knowledge_claim.status, "rejected");
     }
 
     #[tokio::test]

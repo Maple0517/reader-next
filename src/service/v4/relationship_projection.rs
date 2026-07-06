@@ -5,7 +5,7 @@ use crate::storage::db::v4::relationship_repo::{
     RelationshipEventRepo, RelationshipRecord, RelationshipRepo,
 };
 use sqlx::SqlitePool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const RELATIONSHIP_GRAPH_CACHE_TYPE: &str = "relationship_graph";
 const RELATIONSHIP_LIST_CACHE_TYPE: &str = "relationship_list";
@@ -53,6 +53,188 @@ pub struct RelationshipEdge {
     pub event_count: usize,
     pub latest_source_claim_id: String,
     pub evidence_available: bool,
+}
+
+const GENERIC_CHARACTER_LABELS: &[&str] = &[
+    "男人",
+    "女人",
+    "男孩",
+    "女孩",
+    "少年",
+    "少女",
+    "老人",
+    "妇人",
+    "孩子",
+    "青年",
+    "中年男子",
+    "中年女人",
+];
+
+const GENERIC_CHARACTER_SUFFIXES: &[&str] = &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
+
+fn normalize_unit_score(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let normalized = if value > 1.0 && value.fract().abs() < f64::EPSILON {
+        if value <= 10.0 {
+            value / 10.0
+        } else if value <= 100.0 {
+            value / 100.0
+        } else {
+            1.0
+        }
+    } else {
+        value
+    };
+    normalized.clamp(0.0, 1.0)
+}
+
+fn looks_generic_character_label(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    GENERIC_CHARACTER_LABELS.contains(&trimmed)
+        || GENERIC_CHARACTER_SUFFIXES
+            .iter()
+            .any(|suffix| trimmed.ends_with(suffix))
+        || trimmed.starts_with("一位")
+}
+
+fn alias_display_rank(alias: &str) -> (i32, usize, usize) {
+    let trimmed = alias.trim();
+    let generic_penalty = if looks_generic_character_label(trimmed) { 1 } else { 0 };
+    let honorific_penalty =
+        if trimmed.ends_with("叔叔") || trimmed.ends_with("先生") || trimmed.ends_with("大人") {
+            1
+        } else {
+            0
+        };
+    (generic_penalty, honorific_penalty, trimmed.chars().count())
+}
+
+fn preferred_character_name(
+    display_name: &str,
+    canonical_name: &str,
+    aliases: &[String],
+) -> String {
+    if !looks_generic_character_label(display_name) {
+        return display_name.to_string();
+    }
+
+    let mut candidates: Vec<&str> = aliases
+        .iter()
+        .map(String::as_str)
+        .filter(|alias| {
+            let trimmed = alias.trim();
+            !trimmed.is_empty() && trimmed != display_name.trim() && trimmed != canonical_name.trim()
+        })
+        .collect();
+    candidates.sort_by_key(|alias| alias_display_rank(alias));
+
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or(display_name)
+        .to_string()
+}
+
+fn normalized_family_signature(label: &str) -> Option<&'static str> {
+    let lowered = label.trim().to_lowercase();
+    match lowered.as_str() {
+        "夫妻" | "夫妇" | "配偶" | "spouse" | "spouses" | "husband-wife" => Some("spouse"),
+        "兄弟" | "姐妹" | "兄妹" | "姐弟" | "sibling" | "siblings" => Some("sibling"),
+        "母子" | "父子" | "母女" | "父女" | "母亲" | "父亲" | "mother" | "father"
+        | "parent-child" | "parent" => Some("parent_child"),
+        _ => None,
+    }
+}
+
+fn canonical_family_label(signature: &str) -> &'static str {
+    match signature {
+        "spouse" => "夫妻",
+        "sibling" => "兄弟姐妹",
+        "parent_child" => "亲子",
+        _ => "家族",
+    }
+}
+
+fn is_edge_preferred(candidate: &RelationshipEdge, current: &RelationshipEdge) -> bool {
+    candidate.last_seen_chapter > current.last_seen_chapter
+        || (candidate.last_seen_chapter == current.last_seen_chapter
+            && normalize_unit_score(candidate.importance_score)
+                > normalize_unit_score(current.importance_score))
+        || (candidate.last_seen_chapter == current.last_seen_chapter
+            && (normalize_unit_score(candidate.importance_score)
+                - normalize_unit_score(current.importance_score))
+            .abs()
+                < f64::EPSILON
+            && candidate.confidence > current.confidence)
+}
+
+fn dedupe_relationship_edges(edges: Vec<RelationshipEdge>) -> Vec<RelationshipEdge> {
+    let mut merged = Vec::new();
+    let mut family_map: HashMap<String, RelationshipEdge> = HashMap::new();
+
+    for edge in edges {
+        if edge.group != "family" {
+            merged.push(edge);
+            continue;
+        }
+        let Some(signature) = normalized_family_signature(&edge.label) else {
+            merged.push(edge);
+            continue;
+        };
+
+        let (left, right) = if edge.source_id <= edge.target_id {
+            (&edge.source_id, &edge.target_id)
+        } else {
+            (&edge.target_id, &edge.source_id)
+        };
+        let key = format!("family::{signature}::{left}::{right}");
+        match family_map.remove(&key) {
+            None => {
+                family_map.insert(key, edge);
+            }
+            Some(existing) => {
+                let preferred = if is_edge_preferred(&edge, &existing) {
+                    edge.clone()
+                } else {
+                    existing.clone()
+                };
+                let mut combined = preferred;
+                combined.label = canonical_family_label(signature).to_string();
+                combined.directionality = "undirected".to_string();
+                combined.importance_score =
+                    normalize_unit_score(existing.importance_score.max(edge.importance_score));
+                combined.confidence = existing.confidence.max(edge.confidence);
+                combined.first_seen_chapter =
+                    existing.first_seen_chapter.min(edge.first_seen_chapter);
+                combined.last_changed_chapter =
+                    existing.last_changed_chapter.max(edge.last_changed_chapter);
+                combined.last_seen_chapter = existing.last_seen_chapter.max(edge.last_seen_chapter);
+                combined.event_count = existing.event_count + edge.event_count;
+                combined.evidence_available =
+                    existing.evidence_available || edge.evidence_available;
+                family_map.insert(key, combined);
+            }
+        }
+    }
+
+    merged.extend(family_map.into_values());
+    merged.sort_by(|left, right| {
+        left.group
+            .cmp(&right.group)
+            .then_with(|| right.last_seen_chapter.cmp(&left.last_seen_chapter))
+            .then_with(|| {
+                normalize_unit_score(right.importance_score)
+                    .partial_cmp(&normalize_unit_score(left.importance_score))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    merged
 }
 
 // --- Projection Functions ---
@@ -166,7 +348,32 @@ pub async fn project_relationship_edges_for_character(
         }
     }
 
-    Ok(edges)
+    Ok(dedupe_relationship_edges(edges))
+}
+
+pub async fn project_relationship_edges_for_chapter(
+    book_id: &str,
+    chapter_index: i64,
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<RelationshipEdge>> {
+    let rel_repo = RelationshipRepo::new(pool.clone());
+    let identity_repo = IdentityRepo::new(pool.clone());
+    let event_repo = RelationshipEventRepo::new(pool.clone());
+
+    let relationship_pairs = rel_repo
+        .list_relationships_by_chapter(book_id, chapter_index)
+        .await?;
+    let mut edges = Vec::new();
+    for (_event, rel) in relationship_pairs {
+        let Some(edge) =
+            build_edge_for_relationship_in_book(book_id, &rel, &event_repo, &identity_repo).await?
+        else {
+            continue;
+        };
+        edges.push(edge);
+    }
+
+    Ok(dedupe_relationship_edges(edges))
 }
 
 /// Build `RelationshipEdge` for a relationship record, fetching event count and latest claim ID.
@@ -192,7 +399,7 @@ pub async fn build_edge_for_relationship(
         strength: rel.strength,
         polarity: rel.polarity.clone(),
         confidence: rel.confidence,
-        importance_score: rel.importance_score,
+        importance_score: normalize_unit_score(rel.importance_score),
         first_seen_chapter: rel.first_seen_chapter,
         last_changed_chapter: rel.last_changed_chapter,
         last_seen_chapter: rel.last_seen_chapter,
@@ -265,9 +472,13 @@ async fn project_relationship_graph_from_db(
             let alias_names: Vec<String> = aliases.iter().map(|a| a.alias.clone()).collect();
             nodes.push(RelationshipNode {
                 id: entity.id,
-                name: entity.display_name,
+                name: preferred_character_name(
+                    &entity.display_name,
+                    &entity.canonical_name,
+                    &alias_names,
+                ),
                 aliases: alias_names,
-                importance: entity.importance_score,
+                importance: normalize_unit_score(entity.importance_score),
                 first_seen_chapter: entity.first_seen_chapter,
                 last_seen_chapter: entity.last_seen_chapter,
             });
@@ -282,15 +493,17 @@ async fn project_relationship_graph_from_db(
         let edge = build_edge_for_relationship(rel, &event_repo).await?;
         edges.push(edge);
     }
+    let edges = dedupe_relationship_edges(edges);
+    groups = edges.iter().map(|edge| edge.group.clone()).collect();
 
     let mut groups_vec: Vec<String> = groups.into_iter().collect();
     groups_vec.sort();
 
     Ok(RelationshipGraphView {
         nodes,
+        total: edges.len(),
         edges,
         groups: groups_vec,
-        total: resolved_relationships.len(),
     })
 }
 
@@ -448,6 +661,235 @@ mod tests {
         // Should have 1 group
         assert_eq!(graph.groups, vec!["friendship"]);
         assert_eq!(graph.total, 1);
+    }
+
+    #[tokio::test]
+    async fn project_relationship_graph_dedupes_inverse_family_edges_and_prefers_specific_alias() {
+        let pool = setup().await;
+        let (_, _, claim_id_1) = seed_full(&pool, 16).await;
+        let claim_id_2 = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at)
+             SELECT ?, book_id, ?, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at
+             FROM claims
+             WHERE id = ?",
+        )
+        .bind(&claim_id_2)
+        .bind(17)
+        .bind(&claim_id_1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let entity_repo = EntityRepo::new(pool.clone());
+        let rel_repo = RelationshipRepo::new(pool.clone());
+        let ev_repo = RelationshipEventRepo::new(pool.clone());
+
+        let generic = entity_repo
+            .create_entity("b1", "character", "中年男子", "中年男子", None, 0.91, 1)
+            .await
+            .unwrap();
+        entity_repo
+            .create_alias("b1", &generic.id, "乔尔", "ai_extracted", 1, 0.91, None)
+            .await
+            .unwrap();
+        let child = entity_repo
+            .create_entity("b1", "character", "路西恩", "路西恩", None, 0.98, 1)
+            .await
+            .unwrap();
+
+        let rel1 = rel_repo
+            .create_relationship(
+                "b1",
+                &generic.id,
+                &child.id,
+                "family",
+                "mother",
+                "directed",
+                None,
+                0.85,
+                "positive",
+                0.9,
+                82.0,
+                16,
+            )
+            .await
+            .unwrap();
+        ev_repo
+            .create_event(
+                "b1",
+                &rel1.id,
+                "creation",
+                "family",
+                "mother",
+                None,
+                Some(0.8),
+                Some("positive"),
+                16,
+                &claim_id_1,
+                0.9,
+            )
+            .await
+            .unwrap();
+
+        let rel2 = rel_repo
+            .create_relationship(
+                "b1",
+                &child.id,
+                &generic.id,
+                "family",
+                "母亲",
+                "directed",
+                None,
+                0.86,
+                "positive",
+                0.92,
+                0.98,
+                17,
+            )
+            .await
+            .unwrap();
+        ev_repo
+            .create_event(
+                "b1",
+                &rel2.id,
+                "update",
+                "family",
+                "母亲",
+                None,
+                Some(0.82),
+                Some("positive"),
+                17,
+                &claim_id_2,
+                0.92,
+            )
+            .await
+            .unwrap();
+
+        let graph = project_relationship_graph_from_db("b1", &pool)
+            .await
+            .unwrap();
+
+        let node_names: Vec<&str> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        assert!(node_names.contains(&"乔尔"));
+        assert!(!node_names.contains(&"中年男子"));
+
+        assert_eq!(graph.edges.len(), 1);
+        let edge = &graph.edges[0];
+        assert_eq!(edge.group, "family");
+        assert_eq!(edge.label, "亲子");
+        assert_eq!(edge.directionality, "undirected");
+        assert!((edge.importance_score - 0.98).abs() < f64::EPSILON);
+        assert_eq!(edge.event_count, 2);
+    }
+
+    #[tokio::test]
+    async fn project_relationship_edges_for_character_dedupes_inverse_family_edges() {
+        let pool = setup().await;
+        let (_, _, claim_id_1) = seed_full(&pool, 16).await;
+        let claim_id_2 = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at)
+             SELECT ?, book_id, ?, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at
+             FROM claims
+             WHERE id = ?",
+        )
+        .bind(&claim_id_2)
+        .bind(17)
+        .bind(&claim_id_1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let entity_repo = EntityRepo::new(pool.clone());
+        let rel_repo = RelationshipRepo::new(pool.clone());
+        let ev_repo = RelationshipEventRepo::new(pool.clone());
+        let parent = entity_repo
+            .create_entity("b1", "character", "艾丽萨", "艾丽萨", None, 0.91, 1)
+            .await
+            .unwrap();
+        let child = entity_repo
+            .create_entity("b1", "character", "路西恩", "路西恩", None, 0.98, 1)
+            .await
+            .unwrap();
+
+        let rel1 = rel_repo
+            .create_relationship(
+                "b1",
+                &parent.id,
+                &child.id,
+                "family",
+                "mother",
+                "directed",
+                None,
+                0.85,
+                "positive",
+                0.9,
+                0.82,
+                16,
+            )
+            .await
+            .unwrap();
+        ev_repo
+            .create_event(
+                "b1",
+                &rel1.id,
+                "creation",
+                "family",
+                "mother",
+                None,
+                Some(0.8),
+                Some("positive"),
+                16,
+                &claim_id_1,
+                0.9,
+            )
+            .await
+            .unwrap();
+
+        let rel2 = rel_repo
+            .create_relationship(
+                "b1",
+                &child.id,
+                &parent.id,
+                "family",
+                "母亲",
+                "directed",
+                None,
+                0.86,
+                "positive",
+                0.92,
+                0.98,
+                17,
+            )
+            .await
+            .unwrap();
+        ev_repo
+            .create_event(
+                "b1",
+                &rel2.id,
+                "update",
+                "family",
+                "母亲",
+                None,
+                Some(0.82),
+                Some("positive"),
+                17,
+                &claim_id_2,
+                0.92,
+            )
+            .await
+            .unwrap();
+
+        let edges = project_relationship_edges_for_character("b1", &child.id, &pool)
+            .await
+            .unwrap();
+
+        assert_eq!(edges.len(), 1);
+        let edge = &edges[0];
+        assert_eq!(edge.group, "family");
+        assert_eq!(edge.label, "亲子");
+        assert_eq!(edge.directionality, "undirected");
+        assert_eq!(edge.event_count, 2);
     }
 
     #[tokio::test]

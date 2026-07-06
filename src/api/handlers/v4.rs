@@ -11,6 +11,9 @@ use crate::api::{auth::AuthContext, AppState};
 use crate::error::error::{ApiResponse, AppError};
 use crate::service::v4::correction::{CorrectionCommand, CorrectionValidationService};
 use crate::service::v4::correction_applier::{CorrectionApplier, CorrectionApplyStatus};
+use crate::service::v4::identity_judge::RealAiIdentityJudge;
+use crate::service::v4::knowledge_judge::RealAiKnowledgeRevisionJudge;
+use crate::service::v4::map_conflict_judge::RealAiMapConflictJudge;
 use crate::service::v4::knowledge_projection;
 use crate::service::v4::place_projection;
 use crate::service::v4::projection;
@@ -21,16 +24,16 @@ use crate::service::v4::quarantine_workflow::{
     QuarantineActionKind, QuarantineActionRequest, QuarantineActionResult, QuarantineListFilter,
     QuarantineWorkflowService,
 };
+use crate::service::v4::relationship_judge::RealAiRelationshipJudge;
 use crate::service::v4::relationship_projection;
 use crate::service::v4::reprocess::{ReprocessRequest, ReprocessService};
-use crate::storage::db::v4::entity_repo::EntityRepo;
 use crate::storage::db::v4::identity_repo::{
     IdentityLinkRecord, IdentityRepo, MergeOperationRecord,
 };
 use crate::storage::db::v4::place_repo::{PlaceEdgeConflictRecord, PlaceRepo};
 use crate::storage::db::v4::progress_repo::ProgressRepo;
 use crate::storage::db::v4::quality_repo::QualityRepo;
-use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
+use crate::storage::db::v4::relationship_repo::RelationshipRepo;
 use crate::storage::db::v4::reset_v4;
 use crate::util::text::repair_encoded_url;
 
@@ -481,28 +484,14 @@ pub async fn get_v4_chapter_memory(
         (None, vec![])
     };
 
-    // Fetch relationships that occurred in this chapter
-    let relationship_repo = RelationshipRepo::new(state.pool.clone());
-    let relationship_pairs = relationship_repo
-        .list_relationships_by_chapter(&ctx.book_id, chapter_index)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-    let event_repo = RelationshipEventRepo::new(state.pool.clone());
-    let identity_repo = IdentityRepo::new(state.pool.clone());
-    let mut relationships_in_chapter = Vec::new();
-    for (_ev, rel) in &relationship_pairs {
-        let edge = relationship_projection::build_edge_for_relationship_in_book(
+    let relationships_in_chapter =
+        relationship_projection::project_relationship_edges_for_chapter(
             &ctx.book_id,
-            rel,
-            &event_repo,
-            &identity_repo,
+            chapter_index,
+            &state.pool,
         )
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
-        if let Some(edge) = edge {
-            relationships_in_chapter.push(edge);
-        }
-    }
     let relationship_count = relationships_in_chapter.len() as i64;
     let knowledge_count = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*)
@@ -632,22 +621,8 @@ pub async fn post_v4_chapter_generate(
     // Verify V4 is enabled
     ensure_v4_enabled(&state, &ctx.book_id).await?;
 
-    // Get raw_text from chapters table
-    let chapter_repo = crate::storage::db::v4::chapter_repo::ChapterRepo::new(state.pool.clone());
-    let chapter = chapter_repo
-        .get_chapter(&ctx.book_id, chapter_index)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-
-    let raw_text = match chapter {
-        Some(ch) => ch.raw_text,
-        None => {
-            return Err(AppError::BadRequest(format!(
-                "Chapter {} not found. Ensure reading progress is up to date.",
-                chapter_index
-            )));
-        }
-    };
+    let chapter = get_or_load_v4_chapter(&state, &ctx, chapter_index).await?;
+    let raw_text = chapter.raw_text;
 
     // Run pipeline
     let extractor =
@@ -658,14 +633,18 @@ pub async fn post_v4_chapter_generate(
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
     let model_name = model_config.text.model.clone();
-    crate::service::v4::pipeline::process_chapter(
+    let judges = build_real_v4_pipeline_judges(state.ai_model_service.clone(), state.pool.clone());
+    crate::service::v4::pipeline::process_chapter_with_map_conflict_judge(
         &ctx.book_id,
         chapter_index,
         &raw_text,
         &state.pool,
         &extractor,
         Some(&model_name),
-        None, // TODO: wire real AI judge when AiModelService integration is ready
+        Some(&judges.relationship),
+        Some(&judges.identity),
+        Some(&judges.knowledge),
+        Some(&judges.map),
     )
     .await
     .map_err(|e| AppError::Internal(e.into()))?;
@@ -723,11 +702,9 @@ pub async fn post_v4_catchup_start(
         .map_err(|e| AppError::Internal(e.into()))?;
 
     // Spawn background worker
-    let pool = state.pool.clone();
-    let book_id = ctx.book_id.clone();
-    let ai_model_service = state.ai_model_service.clone();
+    let worker_state = state.clone();
     tokio::spawn(async move {
-        run_catchup_worker(&book_id, target_chapter, &pool, ai_model_service).await;
+        run_catchup_worker_with_source(ctx, target_chapter, worker_state).await;
     });
 
     Ok(Json(ApiResponse::ok(serde_json::json!({
@@ -819,69 +796,37 @@ pub async fn get_v4_relationships(
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let req: V4RelationshipsRequest = parse_request(q, body)?;
     let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
-
-    let rel_repo = RelationshipRepo::new(state.pool.clone());
-    let relationships = rel_repo
-        .list_by_book(&ctx.book_id, req.group.as_deref(), req.min_importance)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-
-    let event_repo = RelationshipEventRepo::new(state.pool.clone());
-    let identity_repo = IdentityRepo::new(state.pool.clone());
-    let mut edges = Vec::new();
-    let mut entity_ids: HashSet<String> = HashSet::new();
-    let mut groups_set: HashSet<String> = HashSet::new();
-    for rel in &relationships {
-        if let Some(edge) = relationship_projection::build_edge_for_relationship_in_book(
-            &ctx.book_id,
-            rel,
-            &event_repo,
-            &identity_repo,
-        )
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?
-        {
-            entity_ids.insert(edge.source_id.clone());
-            entity_ids.insert(edge.target_id.clone());
-            groups_set.insert(edge.group.clone());
-            edges.push(edge);
-        }
-    }
-
-    // Build nodes from entities
-    let entity_repo = EntityRepo::new(state.pool.clone());
-    let mut nodes = Vec::new();
-    for eid in &entity_ids {
-        if let Some(entity) = entity_repo
-            .get_by_id(eid)
+    let max_processed = get_max_processed(&state, &ctx.book_id).await?;
+    let mut view =
+        relationship_projection::project_relationship_graph(&ctx.book_id, max_processed, &state.pool)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?
-        {
-            let aliases = entity_repo
-                .list_aliases_by_entity(eid)
-                .await
-                .map_err(|e| AppError::Internal(e.into()))?;
-            nodes.push(relationship_projection::RelationshipNode {
-                id: entity.id,
-                name: entity.display_name,
-                aliases: aliases.into_iter().map(|a| a.alias).collect(),
-                importance: entity.importance_score,
-                first_seen_chapter: entity.first_seen_chapter,
-                last_seen_chapter: entity.last_seen_chapter,
-            });
-        }
+            .map_err(|e| AppError::Internal(e.into()))?;
+
+    if let Some(group) = req.group.as_deref() {
+        view.edges.retain(|edge| edge.group == group);
+    }
+    if let Some(min_importance) = req.min_importance {
+        view.edges
+            .retain(|edge| edge.importance_score >= min_importance);
     }
 
-    let mut groups: Vec<String> = groups_set.into_iter().collect();
-    groups.sort();
-    let total = edges.len();
+    let entity_ids: HashSet<String> = view
+        .edges
+        .iter()
+        .flat_map(|edge| [edge.source_id.clone(), edge.target_id.clone()])
+        .collect();
+    view.nodes.retain(|node| entity_ids.contains(&node.id));
 
-    let view = relationship_projection::RelationshipGraphView {
-        nodes,
-        edges,
-        groups,
-        total,
-    };
+    let mut groups: Vec<String> = view
+        .edges
+        .iter()
+        .map(|edge| edge.group.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    groups.sort();
+    view.groups = groups;
+    view.total = view.edges.len();
 
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(view).unwrap_or_default(),
@@ -1666,8 +1611,8 @@ pub async fn get_v4_quality_prompt_regression_results(
 
 struct V4BookCtx {
     book_id: String,
-    #[allow(dead_code)]
     user_ns: String,
+    book_url: String,
 }
 
 fn quality_limit(limit: Option<i64>) -> i64 {
@@ -2064,7 +2009,11 @@ async fn resolve_v4_book(
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
 
-    Ok(V4BookCtx { book_id, user_ns })
+    Ok(V4BookCtx {
+        book_id,
+        user_ns,
+        book_url,
+    })
 }
 
 async fn refresh_quality_metrics(state: &AppState, book_id: &str) -> Result<(), AppError> {
@@ -2129,11 +2078,54 @@ async fn ensure_v4_enabled(state: &AppState, book_id: &str) -> Result<(), AppErr
 
 /// Background worker that processes chapters sequentially.
 /// Checks `processing_progress.status` for cooperative cancellation.
+#[cfg(test)]
 async fn run_catchup_worker(
     book_id: &str,
     target_chapter: i64,
     pool: &sqlx::SqlitePool,
     ai_model_service: std::sync::Arc<crate::service::ai_model_service::AiModelService>,
+) {
+    run_catchup_worker_inner(book_id, target_chapter, pool, ai_model_service, None).await;
+}
+
+async fn run_catchup_worker_with_source(ctx: V4BookCtx, target_chapter: i64, state: AppState) {
+    let pool = state.pool.clone();
+    let ai_model_service = state.ai_model_service.clone();
+    run_catchup_worker_inner(
+        &ctx.book_id,
+        target_chapter,
+        &pool,
+        ai_model_service,
+        Some((&state, &ctx)),
+    )
+    .await;
+}
+
+struct V4PipelineJudges {
+    relationship: RealAiRelationshipJudge,
+    identity: RealAiIdentityJudge,
+    knowledge: RealAiKnowledgeRevisionJudge,
+    map: RealAiMapConflictJudge,
+}
+
+fn build_real_v4_pipeline_judges(
+    ai_model_service: std::sync::Arc<crate::service::ai_model_service::AiModelService>,
+    pool: sqlx::SqlitePool,
+) -> V4PipelineJudges {
+    V4PipelineJudges {
+        relationship: RealAiRelationshipJudge::new(ai_model_service.clone(), pool.clone()),
+        identity: RealAiIdentityJudge::new(ai_model_service.clone(), pool.clone()),
+        knowledge: RealAiKnowledgeRevisionJudge::new(ai_model_service.clone(), pool.clone()),
+        map: RealAiMapConflictJudge::new(ai_model_service, pool),
+    }
+}
+
+async fn run_catchup_worker_inner(
+    book_id: &str,
+    target_chapter: i64,
+    pool: &sqlx::SqlitePool,
+    ai_model_service: std::sync::Arc<crate::service::ai_model_service::AiModelService>,
+    source_ctx: Option<(&AppState, &V4BookCtx)>,
 ) {
     let progress_repo = ProgressRepo::new(pool.clone());
     let chapter_repo = crate::storage::db::v4::chapter_repo::ChapterRepo::new(pool.clone());
@@ -2143,6 +2135,7 @@ async fn run_catchup_worker(
         .await
         .map(|c| c.text.model)
         .unwrap_or_default();
+    let judges = build_real_v4_pipeline_judges(ai_model_service, pool.clone());
 
     // Get current progress
     let start_chapter = match progress_repo.get_progress(book_id).await {
@@ -2192,12 +2185,56 @@ async fn run_catchup_worker(
         let chapter = match chapter_repo.get_chapter(book_id, chapter_index).await {
             Ok(Some(ch)) => ch,
             Ok(None) => {
-                tracing::warn!(
-                    "Chapter {} not found for book {}, skipping",
-                    chapter_index,
-                    book_id
-                );
-                continue;
+                match source_ctx {
+                    Some((state, ctx)) => {
+                        match get_or_load_v4_chapter(state, ctx, chapter_index).await {
+                            Ok(chapter) => chapter,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to load chapter {} for {}: {}",
+                                    chapter_index,
+                                    book_id,
+                                    e
+                                );
+                                let _ = progress_repo
+                                    .set_status(
+                                        book_id,
+                                        "failed",
+                                        Some(target_chapter),
+                                        Some(chapter_index),
+                                        None,
+                                        Some(&format!(
+                                            "Chapter load failed at chapter {}: {}",
+                                            chapter_index, e
+                                        )),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "Chapter {} not found in V4 chapter cache for book {}",
+                            chapter_index,
+                            book_id
+                        );
+                        let _ = progress_repo
+                            .set_status(
+                                book_id,
+                                "failed",
+                                Some(target_chapter),
+                                Some(chapter_index),
+                                None,
+                                Some(&format!(
+                                    "Chapter {} not found in V4 chapter cache",
+                                    chapter_index
+                                )),
+                            )
+                            .await;
+                        return;
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!(
@@ -2221,14 +2258,17 @@ async fn run_catchup_worker(
         };
 
         // Process chapter through pipeline
-        match crate::service::v4::pipeline::process_chapter(
+        match crate::service::v4::pipeline::process_chapter_with_map_conflict_judge(
             book_id,
             chapter_index,
             &chapter.raw_text,
             pool,
             &extractor,
             Some(&model_name),
-            None, // TODO: wire real AI judge
+            Some(&judges.relationship),
+            Some(&judges.identity),
+            Some(&judges.knowledge),
+            Some(&judges.map),
         )
         .await
         {
@@ -2265,10 +2305,158 @@ async fn run_catchup_worker(
         .await;
 }
 
+async fn get_or_load_v4_chapter(
+    state: &AppState,
+    ctx: &V4BookCtx,
+    chapter_index: i64,
+) -> Result<crate::storage::db::v4::chapter_repo::ChapterRecord, AppError> {
+    let chapter_repo = crate::storage::db::v4::chapter_repo::ChapterRepo::new(state.pool.clone());
+    if let Some(chapter) = chapter_repo
+        .get_chapter(&ctx.book_id, chapter_index)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?
+    {
+        return Ok(chapter);
+    }
+
+    let chapter_index_i32 = i32::try_from(chapter_index)
+        .map_err(|_| AppError::BadRequest("chapterIndex out of range".to_string()))?;
+    let shelf_book = state
+        .book_service
+        .get_shelf_book(&ctx.user_ns, &ctx.book_url)
+        .await?;
+    let book_url = repair_encoded_url(&ctx.book_url);
+
+    let (title, _chapter_url, raw_text) =
+        if shelf_book
+            .as_ref()
+            .is_some_and(|book| crate::service::local_txt_book::is_local_txt_origin(&book.origin))
+            || book_url.starts_with("local-txt:")
+        {
+            let chapters = state
+                .local_txt_book_service
+                .get_chapter_list(&ctx.user_ns, &book_url)
+                .await?;
+            let chapter = chapters
+                .into_iter()
+                .find(|chapter| chapter.index == chapter_index_i32)
+                .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
+            let raw_text = state
+                .local_txt_book_service
+                .get_content(&ctx.user_ns, &chapter.url)
+                .await?;
+            (chapter.title, chapter.url, raw_text)
+        } else {
+            let book_source_url = shelf_book.as_ref().map(|book| book.origin.clone());
+            let source = crate::api::handlers::book::resolve_book_source(
+                state,
+                &ctx.user_ns,
+                book_source_url,
+                None,
+                Some(&book_url),
+            )
+            .await?;
+            let toc_url = if let Some(toc_url) =
+                shelf_book.as_ref().and_then(|book| book.toc_url.clone())
+            {
+                toc_url
+            } else {
+                state
+                    .book_service
+                    .get_book_info(&ctx.user_ns, &source, &book_url)
+                    .await?
+                    .toc_url
+                    .unwrap_or_else(|| book_url.clone())
+            };
+            load_network_chapter_with_refresh_retry(|refresh| {
+                let source = source.clone();
+                let toc_url = toc_url.clone();
+                let book_url = book_url.clone();
+                async move {
+                    if refresh {
+                        let _ = state
+                            .book_service
+                            .delete_chapter_list_cache(&ctx.user_ns, &toc_url)
+                            .await;
+                        let _ = state
+                            .book_service
+                            .delete_book_cache(&ctx.user_ns, &book_url)
+                            .await;
+                    }
+                    let chapters = state
+                        .book_service
+                        .get_chapter_list_with_cache(&ctx.user_ns, &source, &toc_url, refresh)
+                        .await?;
+                    let chapter = chapters
+                        .into_iter()
+                        .find(|chapter| chapter.index == chapter_index_i32)
+                        .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
+                    let raw_text = state
+                        .book_service
+                        .get_content(&ctx.user_ns, &book_url, &source, &chapter.url)
+                        .await?;
+                    Ok((chapter.title, chapter.url, raw_text))
+                }
+            })
+            .await?
+        };
+
+    if raw_text.trim().is_empty() {
+        return Err(AppError::BadRequest("章节内容为空".to_string()));
+    }
+
+    let text_hash = crate::util::hash::md5_hex(&raw_text);
+    chapter_repo
+        .upsert_chapter(
+            &ctx.book_id,
+            chapter_index,
+            Some(&title),
+            &raw_text,
+            &text_hash,
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.into()))
+}
+
+async fn load_network_chapter_with_refresh_retry<F, Fut>(
+    mut loader: F,
+) -> Result<(String, String, String), AppError>
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<(String, String, String), AppError>>,
+{
+    for refresh in [false, true] {
+        let loaded = loader(refresh).await?;
+        if !loaded.2.trim().is_empty() {
+            return Ok(loaded);
+        }
+    }
+
+    Err(AppError::BadRequest("章节内容为空".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::{
+        ai_book_catchup_service::AiBookCatchupService,
+        ai_book_generation_service::AiBookGenerationService, ai_book_service::AiBookService,
+        ai_model_service::AiModelService, book_group_service::BookGroupService,
+        book_service::BookService, book_source_service::BookSourceService,
+        chapter_summary_service::ChapterSummaryService,
+        json_document_service::JsonDocumentService, local_epub_book::LocalEpubBookService,
+        local_mobi_book::LocalMobiBookService, local_pdf_book::LocalPdfBookService,
+        local_txt_book::LocalTxtBookService, update_service::UpdateService,
+        user_service::UserService,
+    };
     use crate::storage::db;
+    use crate::storage::cache::file_cache::FileCache;
+    use crate::storage::db::repo::BookSourceRepo;
+    use crate::storage::db::v4::entity_repo::EntityRepo;
+    use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     async fn setup_pool() -> sqlx::SqlitePool {
         let dir = std::env::temp_dir().join(format!("v4-api-test-{}", uuid::Uuid::new_v4()));
@@ -2277,6 +2465,96 @@ mod tests {
         let pool = db::init_pool(&database_url).await.unwrap();
         db::v4::init_v4(&pool).await.unwrap();
         pool
+    }
+
+    async fn setup_ai_model_service(
+        pool: sqlx::SqlitePool,
+    ) -> std::sync::Arc<crate::service::ai_model_service::AiModelService> {
+        let dir = std::env::temp_dir().join(format!("v4-ai-model-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let docs = std::sync::Arc::new(crate::service::json_document_service::JsonDocumentService::new(
+            pool,
+            dir.to_str().unwrap(),
+        ));
+        std::sync::Arc::new(crate::service::ai_model_service::AiModelService::new(
+            docs,
+            dir.to_str().unwrap(),
+        ))
+    }
+
+    async fn create_test_state() -> (AppState, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("reader-v4-handler-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
+        let pool = db::init_pool(&database_url).await.unwrap();
+        db::v4::init_v4(&pool).await.unwrap();
+        let cfg = crate::app::config::AppConfig {
+            storage_dir: dir.to_string_lossy().to_string(),
+            assets_dir: dir.join("assets").to_string_lossy().to_string(),
+            web_root: dir.join("web").to_string_lossy().to_string(),
+            database_url,
+            ..crate::app::config::AppConfig::default()
+        };
+        let http =
+            crate::crawler::http_client::HttpClient::new(cfg.request_timeout_secs, None).unwrap();
+        let parser = crate::parser::rule_engine::RuleEngine::new().unwrap();
+        let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
+        let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
+        let book_source_service = Arc::new(BookSourceService::new(
+            BookSourceRepo::new(pool.clone()),
+            &cfg.storage_dir,
+        ));
+        let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
+        let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));
+        let local_mobi_book_service = Arc::new(LocalMobiBookService::new(&cfg.storage_dir));
+        let local_pdf_book_service = Arc::new(LocalPdfBookService::new(&cfg.storage_dir));
+        let json_document_service =
+            Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
+        let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
+        user_service.migrate_legacy_users_from_json().await.unwrap();
+        let book_group_service = Arc::new(BookGroupService::new(json_document_service.clone()));
+        let ai_book_service = Arc::new(AiBookService::new(pool.clone(), &cfg.storage_dir));
+        let ai_book_generation_service = Arc::new(AiBookGenerationService::new(
+            ai_book_service.clone(),
+            book_service.clone(),
+            book_source_service.clone(),
+            local_txt_book_service.clone(),
+        ));
+        let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
+        let ai_model_service = Arc::new(AiModelService::new(
+            json_document_service.clone(),
+            &cfg.storage_dir,
+        ));
+        let chapter_summary_service =
+            Arc::new(ChapterSummaryService::new(json_document_service.clone()));
+        let update_service = Arc::new(
+            UpdateService::new(
+                json_document_service.clone(),
+                cfg.request_timeout_secs,
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+            )
+            .unwrap(),
+        );
+        let state = AppState {
+            config: cfg,
+            book_service,
+            book_source_service,
+            user_service,
+            book_group_service,
+            local_txt_book_service,
+            local_epub_book_service,
+            local_mobi_book_service,
+            local_pdf_book_service,
+            json_document_service,
+            ai_book_service,
+            ai_book_generation_service,
+            ai_book_catchup_service,
+            ai_model_service,
+            chapter_summary_service,
+            update_service,
+            pool,
+        };
+        (state, dir)
     }
 
     #[tokio::test]
@@ -2457,6 +2735,91 @@ mod tests {
         let p = progress_repo.get_progress("b1").await.unwrap().unwrap();
         assert_eq!(p.status, "completed");
         assert_eq!(p.max_processed_chapter, 3);
+    }
+
+    #[tokio::test]
+    async fn catchup_worker_fails_when_chapter_text_is_missing() {
+        let pool = setup_pool().await;
+        let progress_repo = ProgressRepo::new(pool.clone());
+        progress_repo.init_progress("b1").await.unwrap();
+        progress_repo
+            .set_status("b1", "running", Some(1), None, None, None)
+            .await
+            .unwrap();
+
+        let ai_model_service = setup_ai_model_service(pool.clone()).await;
+        run_catchup_worker("b1", 1, &pool, ai_model_service).await;
+
+        let p = progress_repo.get_progress("b1").await.unwrap().unwrap();
+        assert_eq!(p.status, "failed");
+        assert_eq!(p.current_chapter, Some(1));
+        assert_eq!(
+            p.last_error.as_deref(),
+            Some("Chapter 1 not found in V4 chapter cache")
+        );
+        assert_eq!(p.max_processed_chapter, 0);
+    }
+
+    #[tokio::test]
+    async fn network_chapter_retry_recovers_after_empty_first_load() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_loader = attempts.clone();
+
+        let loaded = load_network_chapter_with_refresh_retry(move |_refresh| {
+            let attempts = attempts_for_loader.clone();
+            async move {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt == 0 {
+                    Ok(("第十三章".to_string(), "u1".to_string(), "   ".to_string()))
+                } else {
+                    Ok((
+                        "第十三章".to_string(),
+                        "u1".to_string(),
+                        "真实正文".to_string(),
+                    ))
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(loaded.2, "真实正文");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn network_chapter_retry_still_fails_after_second_empty_load() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_loader = attempts.clone();
+
+        let err = load_network_chapter_with_refresh_retry(move |_refresh| {
+            let attempts = attempts_for_loader.clone();
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(("第十三章".to_string(), "u1".to_string(), "\n\t ".to_string()))
+            }
+        })
+        .await
+        .unwrap_err();
+
+        match err {
+            AppError::BadRequest(message) => assert_eq!(message, "章节内容为空"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn v4_catchup_builds_real_pipeline_judges() {
+        let pool = setup_pool().await;
+        let ai_model_service = setup_ai_model_service(pool.clone()).await;
+
+        let judges = build_real_v4_pipeline_judges(ai_model_service, pool);
+        let _relationship: &dyn crate::service::v4::pipeline::Judge = &judges.relationship;
+        let _identity: &dyn crate::service::v4::identity_judge::IdentityJudge = &judges.identity;
+        let _knowledge: &dyn crate::service::v4::knowledge_judge::KnowledgeRevisionJudge =
+            &judges.knowledge;
+        let _map: &dyn crate::service::v4::map_conflict_judge::MapConflictJudge = &judges.map;
     }
 
     #[tokio::test]
@@ -2749,5 +3112,270 @@ mod tests {
                 .unwrap();
         assert_eq!(req.book_url.as_deref(), Some("http://example.com/book.txt"));
         assert_eq!(req.group.as_deref(), Some("rivalry"));
+    }
+
+    #[tokio::test]
+    async fn get_v4_relationships_uses_unified_projection_for_book_graph() {
+        let (state, _dir) = create_test_state().await;
+        let book_url = "book://v4-relationship-graph";
+        let book_id = crate::util::hash::md5_hex(book_url);
+        let entity_repo = EntityRepo::new(state.pool.clone());
+        let relationship_repo = RelationshipRepo::new(state.pool.clone());
+
+        let alisa = entity_repo
+            .create_entity(&book_id, "character", "艾丽萨", "艾丽萨", None, 0.80, 1)
+            .await
+            .unwrap();
+        let lucien = entity_repo
+            .create_entity(&book_id, "character", "路西恩", "路西恩", None, 0.98, 1)
+            .await
+            .unwrap();
+        let joel = entity_repo
+            .create_entity(&book_id, "character", "中年男子", "中年男子", None, 0.70, 1)
+            .await
+            .unwrap();
+        entity_repo
+            .create_alias(&book_id, &joel.id, "乔尔", "identity", 1, 0.99, None)
+            .await
+            .unwrap();
+
+        relationship_repo
+            .create_relationship(
+                &book_id,
+                &alisa.id,
+                &lucien.id,
+                "family",
+                "mother",
+                "directed",
+                None,
+                0.8,
+                "positive",
+                0.95,
+                0.82,
+                1,
+            )
+            .await
+            .unwrap();
+        relationship_repo
+            .create_relationship(
+                &book_id,
+                &lucien.id,
+                &alisa.id,
+                "family",
+                "母亲",
+                "directed",
+                None,
+                0.8,
+                "positive",
+                0.95,
+                0.81,
+                1,
+            )
+            .await
+            .unwrap();
+        relationship_repo
+            .create_relationship(
+                &book_id,
+                &joel.id,
+                &lucien.id,
+                "social",
+                "叔侄",
+                "undirected",
+                None,
+                0.4,
+                "positive",
+                0.88,
+                0.55,
+                1,
+            )
+            .await
+            .unwrap();
+
+        let response = get_v4_relationships(
+            State(state),
+            AuthContext::default(),
+            Query(V4RelationshipsRequest {
+                book_url: Some(book_url.to_string()),
+                group: None,
+                min_importance: None,
+            }),
+            Bytes::new(),
+        )
+        .await
+        .unwrap();
+
+        let payload = serde_json::to_value(response.0).unwrap();
+        assert_eq!(payload["isSuccess"], json!(true));
+        assert_eq!(payload["data"]["total"], json!(2));
+
+        let names = payload["data"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|node| node["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"乔尔"));
+        assert!(!names.contains(&"中年男子"));
+
+        let family_edges = payload["data"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|edge| edge["group"] == json!("family"))
+            .count();
+        assert_eq!(family_edges, 1);
+    }
+
+    #[tokio::test]
+    async fn get_v4_chapter_memory_dedupes_inverse_family_relationships() {
+        let (state, _dir) = create_test_state().await;
+        let book_url = "book://v4-chapter-relationships";
+        let book_id = crate::util::hash::md5_hex(book_url);
+        let chapter_id = uuid::Uuid::new_v4().to_string();
+        let segment_id = uuid::Uuid::new_v4().to_string();
+        let span_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let claim_id_1 = uuid::Uuid::new_v4().to_string();
+        let claim_id_2 = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query("INSERT INTO chapters (id, book_id, chapter_index, title, raw_text, text_hash, created_at) VALUES (?, ?, 16, '第十七章', 'text', 'hash', datetime('now'))")
+            .bind(&chapter_id)
+            .bind(&book_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chapter_segments (id, book_id, chapter_id, chapter_hash, segment_index, created_at) VALUES (?, ?, ?, 'hash', 0, datetime('now'))")
+            .bind(&segment_id)
+            .bind(&book_id)
+            .bind(&chapter_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES (?, ?, ?, 'hash', ?, 0, 0, 10, 'text', datetime('now'))")
+            .bind(&span_id)
+            .bind(&book_id)
+            .bind(&chapter_id)
+            .bind(&segment_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ai_runs (id, book_id, chapter_id, run_type, model, prompt_version, schema_version, input_hash, status, started_at) VALUES (?, ?, ?, 'extract', 'test', 'v1', 1, 'hash', 'completed', datetime('now'))")
+            .bind(&run_id)
+            .bind(&book_id)
+            .bind(&chapter_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        for claim_id in [&claim_id_1, &claim_id_2] {
+            sqlx::query("INSERT INTO claims (id, book_id, chapter_index, claim_type, predicate, primary_source_span_id, ai_run_id, confidence, risk_level, status, created_at, updated_at) VALUES (?, ?, 16, 'relationship_update', 'test', ?, ?, 0.9, 'low', 'accepted', datetime('now'), datetime('now'))")
+                .bind(claim_id)
+                .bind(&book_id)
+                .bind(&span_id)
+                .bind(&run_id)
+                .execute(&state.pool)
+                .await
+                .unwrap();
+        }
+
+        let entity_repo = EntityRepo::new(state.pool.clone());
+        let relationship_repo = RelationshipRepo::new(state.pool.clone());
+        let event_repo = RelationshipEventRepo::new(state.pool.clone());
+        let parent = entity_repo
+            .create_entity(&book_id, "character", "艾丽萨", "艾丽萨", None, 0.91, 1)
+            .await
+            .unwrap();
+        let child = entity_repo
+            .create_entity(&book_id, "character", "路西恩", "路西恩", None, 0.98, 1)
+            .await
+            .unwrap();
+
+        let rel1 = relationship_repo
+            .create_relationship(
+                &book_id,
+                &parent.id,
+                &child.id,
+                "family",
+                "mother",
+                "directed",
+                None,
+                0.85,
+                "positive",
+                0.9,
+                0.82,
+                16,
+            )
+            .await
+            .unwrap();
+        event_repo
+            .create_event(
+                &book_id,
+                &rel1.id,
+                "creation",
+                "family",
+                "mother",
+                None,
+                Some(0.8),
+                Some("positive"),
+                16,
+                &claim_id_1,
+                0.9,
+            )
+            .await
+            .unwrap();
+
+        let rel2 = relationship_repo
+            .create_relationship(
+                &book_id,
+                &child.id,
+                &parent.id,
+                "family",
+                "母亲",
+                "directed",
+                None,
+                0.86,
+                "positive",
+                0.92,
+                0.98,
+                16,
+            )
+            .await
+            .unwrap();
+        event_repo
+            .create_event(
+                &book_id,
+                &rel2.id,
+                "update",
+                "family",
+                "母亲",
+                None,
+                Some(0.82),
+                Some("positive"),
+                16,
+                &claim_id_2,
+                0.92,
+            )
+            .await
+            .unwrap();
+
+        let response = get_v4_chapter_memory(
+            State(state),
+            AuthContext::default(),
+            Query(V4ChapterMemoryRequest {
+                book_url: Some(book_url.to_string()),
+                chapter_index: Some(16),
+            }),
+            Bytes::new(),
+        )
+        .await
+        .unwrap();
+
+        let payload = serde_json::to_value(response.0).unwrap();
+        assert_eq!(payload["isSuccess"], json!(true));
+        assert_eq!(payload["data"]["relationshipCount"], json!(1));
+        assert_eq!(payload["data"]["relationshipsInChapter"][0]["label"], json!("亲子"));
+        assert_eq!(
+            payload["data"]["relationshipsInChapter"][0]["directionality"],
+            json!("undirected")
+        );
     }
 }
