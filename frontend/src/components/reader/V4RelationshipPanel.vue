@@ -1,114 +1,122 @@
 <template>
-  <section class="v4-relationship-panel panel-card" :style="bodyStyle" role="tabpanel" aria-label="V4 人物关系">
-    <div class="panel-head">
-      <div>
-        <h2>人物关系</h2>
-        <p v-if="total > 0">{{ total }} 条关系，{{ groups.length }} 个分组</p>
-        <p v-else>V4 关系数据</p>
+  <section class="v4-relationship-panel" :style="bodyStyle" role="tabpanel" aria-label="人物关系">
+    <V4PanelShell
+      title="人物关系"
+      :subtitle="panelSubtitle"
+      :loading="listState.loading.value"
+      :error="listState.error.value"
+      :empty="listState.empty.value"
+      empty-title="暂无关系"
+      empty-message="当前资料还没有可展示的人物关系。"
+      @retry="listState.reload()"
+    >
+      <template #toolbar>
+        <button
+          class="v4-relationship-refresh"
+          type="button"
+          :disabled="listState.loading.value"
+          @click="listState.reload()"
+        >刷新</button>
+      </template>
+
+      <!-- Group filter pills -->
+      <div v-if="groups.length > 1" class="group-filter">
+        <button
+          :class="['group-pill', { active: !activeGroup }]"
+          @click="activeGroup = null"
+        >全部</button>
+        <button
+          v-for="g in groups"
+          :key="g"
+          :class="['group-pill', `group-color-${g}`, { active: activeGroup === g }]"
+          @click="activeGroup = activeGroup === g ? null : g"
+        >{{ groupLabel(g) }} ({{ groupCount(g) }})</button>
       </div>
-    </div>
 
-    <!-- Group filter pills -->
-    <div v-if="groups.length > 1" class="group-filter">
-      <button
-        :class="['filter-pill', { active: !activeGroup }]"
-        @click="activeGroup = null"
-      >全部</button>
-      <button
-        v-for="g in groups"
-        :key="g"
-        :class="['filter-pill', `group-${g}`, { active: activeGroup === g }]"
-        @click="activeGroup = activeGroup === g ? null : g"
-      >{{ groupLabel(g) }} ({{ groupCount(g) }})</button>
-    </div>
+      <!-- Empty from filter -->
+      <p v-if="!filteredEdges.length && total > 0" class="rel-filter-empty">
+        当前筛选无匹配关系
+      </p>
 
-    <!-- Loading -->
-    <div v-if="loading" class="rel-state rel-loading">
-      <span></span><span></span><span></span>
-    </div>
-
-    <!-- Error -->
-    <p v-else-if="error" class="rel-state rel-empty">关系数据加载失败。</p>
-
-    <!-- Empty -->
-    <p v-else-if="!filteredEdges.length" class="rel-state rel-empty">
-      {{ total > 0 ? '当前筛选无匹配关系' : '暂无关系数据' }}
-    </p>
-
-    <!-- Relationship list grouped -->
-    <div v-else class="rel-list">
-      <section v-for="group in displayGroups" :key="group.name" class="rel-group">
-        <div :class="['rel-group-header', `group-${group.name}`]">
-          <span :class="['rel-dot', `group-${group.name}`]" aria-hidden="true"></span>
-          <strong>{{ groupLabel(group.name) }}</strong>
-          <span class="rel-group-count">{{ group.edges.length }}</span>
-        </div>
-        <div class="rel-items">
-          <article
-            v-for="edge in group.edges"
-            :key="edge.id"
-            :class="['rel-item', { collapsed: isCollapsed(edge) }]"
-            @click="toggleExpand(edge.id)"
-          >
-            <div class="rel-item-head">
-              <span class="rel-source">{{ nodeName(edge.sourceId) }}</span>
-              <span :class="['rel-arrow', { directed: edge.directionality === 'directed' }]">
-                {{ edge.directionality === 'directed' ? '→' : '↔' }}
-              </span>
-              <span class="rel-target">{{ nodeName(edge.targetId) }}</span>
-              <span class="rel-label">{{ edge.label }}</span>
-            </div>
-            <div class="rel-item-meta">
-              <span v-if="edge.currentState" class="rel-state-text">{{ edge.currentState }}</span>
-              <span :class="['rel-polarity', `polarity-${edge.polarity}`]">{{ polarityLabel(edge.polarity) }}</span>
-              <span class="rel-strength">强度 {{ formatStrength(edge.strength) }}</span>
-              <span v-if="edge.importanceScore < 0.3" class="rel-low-importance">低重要度</span>
-            </div>
-            <div v-if="expandedIds.has(edge.id)" class="rel-item-detail">
-              <div class="rel-detail-row">
-                <span>置信度：{{ (edge.confidence * 100).toFixed(0) }}%</span>
-                <span>重要度：{{ edge.importanceScore.toFixed(2) }}</span>
-                <span>事件数：{{ edge.eventCount }}</span>
+      <!-- Relationship list grouped -->
+      <div v-else-if="filteredEdges.length" class="rel-list">
+        <section v-for="group in displayGroups" :key="group.name" class="rel-group">
+          <div :class="['rel-group-header', `group-color-${group.name}`]">
+            <span :class="['rel-dot', `group-color-${group.name}`]" aria-hidden="true"></span>
+            <strong>{{ groupLabel(group.name) }}</strong>
+            <span class="rel-group-count">{{ group.edges.length }}</span>
+          </div>
+          <div class="rel-items">
+            <article
+              v-for="edge in group.edges"
+              :key="edge.id"
+              :data-edge-id="edge.id"
+              :class="['rel-item', { 'low-importance': edge.importanceScore < 0.3 }]"
+              @click="toggleExpand(edge.id)"
+            >
+              <div class="rel-item-head">
+                <span class="rel-source">{{ nodeName(edge.sourceId) }}</span>
+                <span class="rel-arrow">{{ edge.directionality === 'directed' ? '→' : '↔' }}</span>
+                <span class="rel-target">{{ nodeName(edge.targetId) }}</span>
+                <span class="rel-label">{{ edge.label }}</span>
+                <span :class="['rel-polarity', `polarity-${edge.polarity}`]">{{ polarityLabel(edge.polarity) }}</span>
+                <span class="rel-strength">{{ formatStrength(edge.strength) }}</span>
               </div>
-              <div class="rel-detail-row">
-                <span>首次出现：第{{ edge.firstSeenChapter }}章</span>
-                <span v-if="edge.lastChangedChapter !== edge.firstSeenChapter">变更：第{{ edge.lastChangedChapter }}章</span>
-                <span>最近：第{{ edge.lastSeenChapter }}章</span>
+              <div
+                v-if="expandedIds.has(edge.id)"
+                :data-edge-detail="edge.id"
+                class="rel-item-detail"
+              >
+                <div v-if="edge.currentState" class="rel-detail-row">
+                  <span>{{ edge.currentState }}</span>
+                </div>
+                <div class="rel-detail-row">
+                  <span>置信度 {{ (edge.confidence * 100).toFixed(0) }}%</span>
+                  <span>第{{ edge.firstSeenChapter }}~{{ edge.lastSeenChapter }}章</span>
+                </div>
               </div>
-            </div>
-          </article>
-        </div>
-      </section>
-    </div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </V4PanelShell>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import type { CSSProperties } from 'vue'
-import type { V4RelationshipEdge, V4RelationshipNode, V4RelationshipGraphView } from '../../types/v4'
+import type { V4RelationshipEdge } from '../../types/v4'
 import { getV4Relationships } from '../../api/v4/book'
+import { useV4PanelState } from '../../composables/useV4PanelState'
+import V4PanelShell from './v4/V4PanelShell.vue'
 
 const props = defineProps<{
   bookUrl: string
   bodyStyle?: CSSProperties
 }>()
 
-const loading = ref(false)
-const error = ref(false)
-const graphData = ref<V4RelationshipGraphView | null>(null)
+const listState = useV4PanelState(
+  () => getV4Relationships(props.bookUrl),
+  computed(() => props.bookUrl),
+  { emptyCheck: (d) => d.edges.length === 0 },
+)
+
 const activeGroup = ref<string | null>(null)
 const expandedIds = ref(new Set<string>())
 
-const COLLAPSE_THRESHOLD = 0.3
+const nodes = computed(() => listState.data.value?.nodes ?? [])
+const edges = computed(() => listState.data.value?.edges ?? [])
+const groups = computed(() => listState.data.value?.groups ?? [])
+const total = computed(() => listState.data.value?.total ?? 0)
 
-const nodes = computed(() => graphData.value?.nodes ?? [])
-const edges = computed(() => graphData.value?.edges ?? [])
-const groups = computed(() => graphData.value?.groups ?? [])
-const total = computed(() => graphData.value?.total ?? 0)
+const panelSubtitle = computed(() => {
+  if (total.value > 0) return `${total.value} 条关系，${groups.value.length} 个分组`
+  return ''
+})
 
 const nodeMap = computed(() => {
-  const map = new Map<string, V4RelationshipNode>()
+  const map = new Map<string, { name: string }>()
   for (const n of nodes.value) map.set(n.id, n)
   return map
 })
@@ -130,13 +138,11 @@ const displayGroups = computed<DisplayGroup[]>(() => {
     arr.push(edge)
     map.set(edge.group, arr)
   }
-  // Sort edges within each group by importanceScore desc
   const result: DisplayGroup[] = []
   for (const [name, groupEdges] of map) {
     groupEdges.sort((a, b) => b.importanceScore - a.importanceScore)
     result.push({ name, edges: groupEdges })
   }
-  // Sort groups by total edges count desc
   result.sort((a, b) => b.edges.length - a.edges.length)
   return result
 })
@@ -147,10 +153,6 @@ function groupCount(g: string): number {
 
 function nodeName(id: string): string {
   return nodeMap.value.get(id)?.name || id
-}
-
-function isCollapsed(edge: V4RelationshipEdge): boolean {
-  return edge.importanceScore < COLLAPSE_THRESHOLD && !expandedIds.value.has(edge.id)
 }
 
 function toggleExpand(id: string) {
@@ -197,33 +199,7 @@ function polarityLabel(p: string): string {
   return labels[p] || p
 }
 
-let requestId = 0
-
-async function load() {
-  if (!props.bookUrl) return
-  const req = ++requestId
-  loading.value = true
-  error.value = false
-  graphData.value = null
-  try {
-    const data = await getV4Relationships(props.bookUrl)
-    if (req !== requestId) return
-    graphData.value = data
-  } catch {
-    if (req !== requestId) return
-    error.value = true
-  } finally {
-    if (req === requestId) loading.value = false
-  }
-}
-
-watch(() => props.bookUrl, () => {
-  activeGroup.value = null
-  expandedIds.value = new Set()
-  void load()
-}, { immediate: true })
-
-defineExpose({ reload: load })
+defineExpose({ reload: () => listState.reload() })
 </script>
 
 <style scoped>
@@ -232,23 +208,25 @@ defineExpose({ reload: load })
   gap: 14px;
 }
 
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
+.v4-relationship-refresh {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: #fff;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1), opacity 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
-.panel-head h2 {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 700;
+.v4-relationship-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
-.panel-head p {
-  margin: 4px 0 0;
-  opacity: 0.5;
-  font-size: 0.84rem;
+.v4-relationship-refresh:active:not(:disabled) {
+  transform: translateY(1px) scale(0.98);
 }
 
 /* ── Group filter ── */
@@ -257,9 +235,10 @@ defineExpose({ reload: load })
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+  margin-bottom: 10px;
 }
 
-.filter-pill {
+.group-pill {
   display: inline-flex;
   align-items: center;
   padding: 3px 9px;
@@ -274,12 +253,12 @@ defineExpose({ reload: load })
   font-family: inherit;
 }
 
-.filter-pill:hover {
+.group-pill:hover {
   background: color-mix(in srgb, currentColor 7%, transparent);
   border-color: color-mix(in srgb, currentColor 16%, transparent);
 }
 
-.filter-pill.active {
+.group-pill.active {
   border-color: color-mix(in srgb, var(--color-primary, #c97f3a) 40%, transparent);
   background: color-mix(in srgb, var(--color-primary, #c97f3a) 8%, transparent);
   font-weight: 600;
@@ -343,6 +322,10 @@ defineExpose({ reload: load })
   background: color-mix(in srgb, currentColor 4%, transparent);
 }
 
+.rel-item.low-importance {
+  opacity: 0.6;
+}
+
 .rel-item-head {
   display: flex;
   gap: 5px;
@@ -361,10 +344,6 @@ defineExpose({ reload: load })
   font-size: 0.8rem;
 }
 
-.rel-arrow.directed {
-  opacity: 0.6;
-}
-
 .rel-label {
   font-size: 0.78rem;
   opacity: 0.6;
@@ -373,47 +352,26 @@ defineExpose({ reload: load })
   border-radius: 5px;
 }
 
-.rel-item-meta {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-top: 4px;
-  font-size: 0.74rem;
-  opacity: 0.6;
-}
-
-.rel-state-text {
-  font-style: italic;
-}
-
 .rel-polarity {
   padding: 0 4px;
   border-radius: 4px;
   font-size: 0.7rem;
+  margin-left: auto;
+}
+
+.rel-strength {
+  font-size: 0.72rem;
+  opacity: 0.5;
 }
 
 .polarity-positive {
-  color: #3d8b5e;
+  color: #28a745;
+  background: rgba(40, 167, 69, 0.1);
 }
 
 .polarity-negative {
-  color: #c66a5d;
-}
-
-.polarity-mixed {
-  color: #b8860b;
-}
-
-.rel-low-importance {
-  opacity: 0.5;
-  font-style: italic;
-}
-
-/* ── Collapsed state ── */
-
-.rel-item.collapsed .rel-item-meta {
-  display: none;
+  color: #dc3545;
+  background: rgba(220, 53, 69, 0.08);
 }
 
 /* ── Detail expansion ── */
@@ -436,56 +394,39 @@ defineExpose({ reload: load })
 
 /* ── State messages ── */
 
-.rel-state {
+.rel-filter-empty {
   margin: 0;
-}
-
-.rel-loading {
-  display: grid;
-  gap: 10px;
-  padding: 16px;
-  border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
-  border-radius: 14px;
-}
-
-.rel-loading span {
-  height: 12px;
-  border-radius: 8px;
-  background: linear-gradient(90deg, color-mix(in srgb, currentColor 4%, transparent), color-mix(in srgb, currentColor 10%, transparent), color-mix(in srgb, currentColor 4%, transparent));
-}
-
-.rel-empty {
   padding: 2px 0 0;
   opacity: 0.5;
 }
 
 /* ── Group colors ── */
 
-.group-family { color: #5f7fc8; }
-.group-romance { color: #c86a8e; }
-.group-friendship { color: #5d9d72; }
-.group-mentorship { color: #7f6bc8; }
-.group-hierarchy { color: #8b7355; }
-.group-alliance { color: #4a9d8e; }
-.group-rivalry { color: #c66a5d; }
-.group-hostility { color: #b91c1c; }
-.group-debt_obligation { color: #b8860b; }
-.group-contract { color: #6b7280; }
-.group-acquaintance { color: #94a3b8; }
-.group-other_social { color: #64748b; }
-.group-unknown_significant { color: currentColor; }
+.group-color-family { color: #5f7fc8; }
+.group-color-romance { color: #c86a8e; }
+.group-color-friendship { color: #5d9d72; }
+.group-color-mentorship { color: #7f6bc8; }
+.group-color-hierarchy { color: #8b7355; }
+.group-color-alliance { color: #4a9d8e; }
+.group-color-rivalry { color: #c66a5d; }
+.group-color-hostility { color: #b91c1c; }
+.group-color-debt_obligation { color: #b8860b; }
+.group-color-contract { color: #6b7280; }
+.group-color-acquaintance { color: #94a3b8; }
+.group-color-other_social { color: #64748b; }
+.group-color-unknown_significant { color: currentColor; }
 
-.rel-dot.group-family { background: #5f7fc8; }
-.rel-dot.group-romance { background: #c86a8e; }
-.rel-dot.group-friendship { background: #5d9d72; }
-.rel-dot.group-mentorship { background: #7f6bc8; }
-.rel-dot.group-hierarchy { background: #8b7355; }
-.rel-dot.group-alliance { background: #4a9d8e; }
-.rel-dot.group-rivalry { background: #c66a5d; }
-.rel-dot.group-hostility { background: #b91c1c; }
-.rel-dot.group-debt_obligation { background: #b8860b; }
-.rel-dot.group-contract { background: #6b7280; }
-.rel-dot.group-acquaintance { background: #94a3b8; }
-.rel-dot.group-other_social { background: #64748b; }
-.rel-dot.group-unknown_significant { background: currentColor; }
+.rel-dot.group-color-family { background: #5f7fc8; }
+.rel-dot.group-color-romance { background: #c86a8e; }
+.rel-dot.group-color-friendship { background: #5d9d72; }
+.rel-dot.group-color-mentorship { background: #7f6bc8; }
+.rel-dot.group-color-hierarchy { background: #8b7355; }
+.rel-dot.group-color-alliance { background: #4a9d8e; }
+.rel-dot.group-color-rivalry { background: #c66a5d; }
+.rel-dot.group-color-hostility { background: #b91c1c; }
+.rel-dot.group-color-debt_obligation { background: #b8860b; }
+.rel-dot.group-color-contract { background: #6b7280; }
+.rel-dot.group-color-acquaintance { background: #94a3b8; }
+.rel-dot.group-color-other_social { background: #64748b; }
+.rel-dot.group-color-unknown_significant { background: currentColor; }
 </style>

@@ -5,6 +5,8 @@ import {
   getV4KnowledgeCard,
   getV4KnowledgeCategory,
 } from '../../api/v4/book'
+import { expectNoForbiddenV3AiBookBoundaryImports } from '../../../tests/helpers/v4BoundaryGuard'
+import V4KnowledgePanel from './V4KnowledgePanel.vue'
 
 vi.mock('../../api/v4/book', () => ({
   getV4Knowledge: vi.fn(),
@@ -109,7 +111,7 @@ describe('V4KnowledgePanel', () => {
       },
     })
 
-    const wrapper = mount(await import('./V4KnowledgePanel.vue').then((mod) => mod.default), {
+    const wrapper = mount(V4KnowledgePanel, {
       props: { bookUrl: 'test-book' },
     })
     await flushPromises()
@@ -130,5 +132,120 @@ describe('V4KnowledgePanel', () => {
     expect(wrapper.text()).toContain('Truth Concept')
     expect(wrapper.text()).not.toContain('纠错')
     expect(wrapper.text()).not.toContain('地图')
+  })
+
+  it('uses V4PanelShell with title and subtitle showing category/card counts', async () => {
+    getV4KnowledgeMock.mockResolvedValue({
+      total: 5,
+      categories: [
+        { category: 'history', count: 3 },
+        { category: 'secret', count: 2 },
+      ],
+      cards: [
+        {
+          id: 'card-1',
+          category: 'history',
+          topicKey: 'topic-1',
+          topicDisplay: 'Topic One',
+          currentSummary: 'Summary.',
+          confidence: 0.8,
+          importanceScore: 0.7,
+          firstSeenChapter: 0,
+          lastUpdatedChapter: 3,
+          assertionCount: 1,
+        },
+      ],
+    })
+
+    const wrapper = mount(V4KnowledgePanel, {
+      props: { bookUrl: 'test-book' },
+    })
+    await flushPromises()
+
+    // V4PanelShell renders title as h2
+    const h2 = wrapper.find('h2')
+    expect(h2.exists()).toBe(true)
+    expect(h2.text()).toBe('知识')
+    // subtitle shows counts
+    const subtitle = wrapper.find('.v4-panel-shell-header p')
+    expect(subtitle.exists()).toBe(true)
+    expect(subtitle.text()).toContain('5')
+    expect(subtitle.text()).toContain('2')
+  })
+
+  it('renders a refresh button in toolbar slot', async () => {
+    getV4KnowledgeMock.mockResolvedValue({
+      total: 1,
+      categories: [],
+      cards: [
+        {
+          id: 'card-1',
+          category: 'custom',
+          topicKey: 't1',
+          topicDisplay: 'T1',
+          currentSummary: null,
+          confidence: 0.5,
+          importanceScore: 0.5,
+          firstSeenChapter: 0,
+          lastUpdatedChapter: 0,
+          assertionCount: 0,
+        },
+      ],
+    })
+
+    const wrapper = mount(V4KnowledgePanel, {
+      props: { bookUrl: 'test-book' },
+    })
+    await flushPromises()
+
+    const refreshBtn = wrapper.find('.v4-panel-shell-toolbar button')
+    expect(refreshBtn.exists()).toBe(true)
+    expect(refreshBtn.text()).toContain('刷新')
+  })
+
+  it('does not render a V4 pill', async () => {
+    getV4KnowledgeMock.mockResolvedValue({
+      total: 0,
+      categories: [],
+      cards: [],
+    })
+
+    const wrapper = mount(V4KnowledgePanel, {
+      props: { bookUrl: 'test-book' },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.knowledge-pill').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('V4')
+  })
+
+  it('renders empty state via V4PanelShell when no cards', async () => {
+    getV4KnowledgeMock.mockResolvedValue({
+      total: 0,
+      categories: [],
+      cards: [],
+    })
+
+    const wrapper = mount(V4KnowledgePanel, {
+      props: { bookUrl: 'test-book' },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.v4-empty-state').exists()).toBe(true)
+  })
+
+  it('renders error state via V4PanelShell when fetch fails', async () => {
+    getV4KnowledgeMock.mockRejectedValue(new Error('V4 knowledge unavailable'))
+
+    const wrapper = mount(V4KnowledgePanel, {
+      props: { bookUrl: 'test-book' },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('V4 knowledge unavailable')
+  })
+
+  it('does not import V3 AI Book boundaries', () => {
+    expectNoForbiddenV3AiBookBoundaryImports('src/components/reader/V4KnowledgePanel.vue')
   })
 })

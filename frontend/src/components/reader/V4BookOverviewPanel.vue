@@ -1,53 +1,55 @@
 <template>
-  <V4PanelFrame title="V4 总览" subtitle="只展示 V4 projection、processing 和安全质量信号。">
-    <V4LoadingState v-if="loading" title="正在加载 V4 总览" />
-    <V4ErrorState
-      v-else-if="pageError"
-      title="总览加载失败"
-      :message="pageError"
-      retry-label="重试"
-      :on-retry="load"
-    />
+  <V4PanelShell
+    title="书籍概览"
+    subtitle="Projection、processing 和安全质量信号一览"
+    :loading="panelState.loading.value"
+    :error="panelState.error.value"
+    @retry="panelState.reload()"
+  >
+    <template #toolbar>
+      <button
+        type="button"
+        :disabled="panelState.loading.value"
+        @click="panelState.reload()"
+      >刷新</button>
+    </template>
 
-    <div v-else class="v4-overview">
-      <section class="v4-processing-strip" aria-label="V4 processing progress">
+    <div v-if="overview" class="v4-overview">
+      <section class="v4-processing-strip" aria-label="处理进度">
         <article>
           <span>已处理</span>
-          <strong>已处理 {{ formatChapter(status?.maxProcessedChapter ?? memory?.maxProcessedChapter) }}</strong>
+          <strong>已处理 {{ formatChapter(overview.status?.maxProcessedChapter ?? overview.memory?.maxProcessedChapter) }}</strong>
         </article>
         <article>
           <span>已读边界</span>
-          <strong>已读 {{ formatChapter(status?.maxReadChapter ?? memory?.maxReadChapter) }}</strong>
+          <strong>已读 {{ formatChapter(overview.status?.maxReadChapter ?? overview.memory?.maxReadChapter) }}</strong>
         </article>
         <article>
           <span>补齐任务</span>
           <strong>{{ catchupLabel }}</strong>
         </article>
-        <article :class="{ 'is-error': Boolean(status?.lastError) }">
+        <article :class="{ 'is-error': Boolean(overview.status?.lastError) }">
           <span>处理状态</span>
           <strong>{{ processingLabel }}</strong>
         </article>
       </section>
 
-      <section class="v4-domain-grid" aria-label="V4 domain summary">
+      <section class="v4-domain-grid" aria-label="领域概要">
         <article class="v4-domain-card">
           <span>角色</span>
-          <strong>角色 {{ countLabel(memory?.characterCount) }}</strong>
-          <small>来自 V4 aggregate</small>
+          <strong>角色 {{ countLabel(overview.memory?.characterCount) }}</strong>
         </article>
         <article class="v4-domain-card">
           <span>关系</span>
-          <strong>关系 {{ countLabel(memory?.relationshipCount) }}</strong>
-          <small>来自 V4 aggregate</small>
+          <strong>关系 {{ countLabel(overview.memory?.relationshipCount) }}</strong>
         </article>
         <article class="v4-domain-card">
           <span>知识</span>
-          <strong>知识 {{ countLabel(memory?.knowledgeCount) }}</strong>
-          <small>来自 V4 aggregate</small>
+          <strong>知识 {{ countLabel(overview.memory?.knowledgeCount) }}</strong>
         </article>
-        <article class="v4-domain-card" :class="{ unavailable: Boolean(mapError) }">
-          <span>{{ mapError ? '地图不可用' : '地点' }}</span>
-          <strong>{{ mapError ? 'open tab to view' : `地点 ${countLabel(mapOverview?.placeCount)}` }}</strong>
+        <article class="v4-domain-card" :class="{ unavailable: Boolean(overview.mapError) }">
+          <span>{{ overview.mapError ? '地图不可用' : '地点' }}</span>
+          <strong>{{ overview.mapError ? '打开地图 tab 查看' : `地点 ${countLabel(overview.mapOverview?.placeCount)}` }}</strong>
           <small>{{ mapAttentionLabel }}</small>
         </article>
         <article class="v4-domain-card">
@@ -57,113 +59,92 @@
         </article>
       </section>
 
-      <section class="v4-attention-panel" aria-label="V4 attention">
+      <section class="v4-attention-panel" aria-label="需要关注">
         <h3>需要注意</h3>
         <ul>
-          <li v-if="status?.lastError">{{ status.lastError }}</li>
-          <li v-if="mapOverview && mapOverview.conflictCount > 0">地图冲突 {{ mapOverview.conflictCount }}</li>
+          <li v-if="overview.status?.lastError">{{ overview.status.lastError }}</li>
+          <li v-if="overview.mapOverview && overview.mapOverview.conflictCount > 0">地图冲突 {{ overview.mapOverview.conflictCount }}</li>
           <li v-if="qualityFindingCount !== '0'">质量发现 {{ qualityFindingCount }}</li>
           <li v-if="!hasAttention">暂无高优先级提醒</li>
         </ul>
       </section>
     </div>
-  </V4PanelFrame>
+  </V4PanelShell>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { getV4CatchupStatus, getV4Map, getV4Memory, getV4MemoryStatus, getV4Quality } from '../../api/v4/book'
-import type {
-  V4CatchupStatusResponse,
-  V4MapOverviewView,
-  V4MemoryResponse,
-  V4MemoryStatusResponse,
-  V4QualityOverviewView,
-} from '../../types/v4'
-import V4ErrorState from './v4/V4ErrorState.vue'
-import V4LoadingState from './v4/V4LoadingState.vue'
-import V4PanelFrame from './v4/V4PanelFrame.vue'
+import { useV4PanelState } from '../../composables/useV4PanelState'
+import V4PanelShell from './v4/V4PanelShell.vue'
 
 const props = defineProps<{
   bookUrl: string
 }>()
 
-const loading = ref(false)
-const pageError = ref('')
-const memory = ref<V4MemoryResponse | null>(null)
-const status = ref<V4MemoryStatusResponse | null>(null)
-const catchup = ref<V4CatchupStatusResponse | null>(null)
-const mapOverview = ref<V4MapOverviewView | null>(null)
-const quality = ref<V4QualityOverviewView | null>(null)
-const mapError = ref('')
-let requestId = 0
+const panelState = useV4PanelState(
+  async () => {
+    const [memoryResult, statusResult, catchupResult, mapResult, qualityResult] = await Promise.allSettled([
+      getV4Memory(props.bookUrl),
+      getV4MemoryStatus(props.bookUrl),
+      getV4CatchupStatus(props.bookUrl),
+      getV4Map(props.bookUrl),
+      getV4Quality(props.bookUrl),
+    ])
+
+    if (memoryResult.status === 'rejected' && statusResult.status === 'rejected') {
+      throw new Error(summarizeError(memoryResult.reason))
+    }
+
+    return {
+      memory: memoryResult.status === 'fulfilled' ? memoryResult.value : null,
+      status: statusResult.status === 'fulfilled' ? statusResult.value : null,
+      catchup: catchupResult.status === 'fulfilled' ? catchupResult.value : null,
+      mapOverview: mapResult.status === 'fulfilled' ? mapResult.value : null,
+      quality: qualityResult.status === 'fulfilled' ? qualityResult.value : null,
+      mapError: mapResult.status === 'rejected' ? summarizeError(mapResult.reason) : '',
+    }
+  },
+  computed(() => props.bookUrl),
+  { emptyCheck: () => false },
+)
+
+const overview = computed(() => panelState.data.value)
 
 const catchupLabel = computed(() => {
-  if (!catchup.value) return '不可用'
-  if (catchup.value.status === 'running') {
-    const current = formatChapter(catchup.value.currentChapter)
-    const target = formatChapter(catchup.value.targetChapter)
+  const catchup = overview.value?.catchup
+  if (!catchup) return '不可用'
+  if (catchup.status === 'running') {
+    const current = formatChapter(catchup.currentChapter)
+    const target = formatChapter(catchup.targetChapter)
     return `${current} / ${target}`
   }
-  return catchup.value.status
+  return catchup.status
 })
 const processingLabel = computed(() => {
-  if (status.value?.lastError) return '失败'
-  return status.value?.processing ? '处理中' : '空闲'
+  const status = overview.value?.status
+  if (status?.lastError) return '失败'
+  return status?.processing ? '处理中' : '空闲'
 })
 const mapAttentionLabel = computed(() => {
-  if (mapError.value) return '地图 tab 可单独查看'
-  if (!mapOverview.value) return 'unavailable'
-  return `边 ${mapOverview.value.activeEdgeCount} · 冲突 ${mapOverview.value.conflictCount}`
+  const o = overview.value
+  if (!o) return ''
+  if (o.mapError) return '地图 tab 可单独查看'
+  if (!o.mapOverview) return ''
+  return `边 ${o.mapOverview.activeEdgeCount} · 冲突 ${o.mapOverview.conflictCount}`
 })
-const qualityFindingCount = computed(() => String(quality.value?.findings?.length ?? 0))
-const qualityCorrectionCount = computed(() => String(quality.value?.corrections?.length ?? 0))
+const qualityFindingCount = computed(() => String(overview.value?.quality?.findings?.length ?? 0))
+const qualityCorrectionCount = computed(() => String(overview.value?.quality?.corrections?.length ?? 0))
 const hasAttention = computed(() => {
-  return Boolean(status.value?.lastError)
-    || Boolean(mapOverview.value && mapOverview.value.conflictCount > 0)
+  const o = overview.value
+  if (!o) return false
+  return Boolean(o.status?.lastError)
+    || Boolean(o.mapOverview && o.mapOverview.conflictCount > 0)
     || qualityFindingCount.value !== '0'
 })
 
-watch(
-  () => props.bookUrl,
-  () => {
-    void load()
-  },
-  { immediate: true },
-)
-
-async function load() {
-  requestId += 1
-  const currentRequestId = requestId
-  loading.value = true
-  pageError.value = ''
-  mapError.value = ''
-
-  const [memoryResult, statusResult, catchupResult, mapResult, qualityResult] = await Promise.allSettled([
-    getV4Memory(props.bookUrl),
-    getV4MemoryStatus(props.bookUrl),
-    getV4CatchupStatus(props.bookUrl),
-    getV4Map(props.bookUrl),
-    getV4Quality(props.bookUrl),
-  ])
-
-  if (currentRequestId !== requestId) return
-
-  memory.value = memoryResult.status === 'fulfilled' ? memoryResult.value : null
-  status.value = statusResult.status === 'fulfilled' ? statusResult.value : null
-  catchup.value = catchupResult.status === 'fulfilled' ? catchupResult.value : null
-  mapOverview.value = mapResult.status === 'fulfilled' ? mapResult.value : null
-  quality.value = qualityResult.status === 'fulfilled' ? qualityResult.value : null
-  mapError.value = mapResult.status === 'rejected' ? summarizeError(mapResult.reason) : ''
-
-  if (memoryResult.status === 'rejected' && statusResult.status === 'rejected') {
-    pageError.value = summarizeError(memoryResult.reason)
-  }
-  loading.value = false
-}
-
 function countLabel(value?: number | null) {
-  return typeof value === 'number' ? String(value) : 'unavailable'
+  return typeof value === 'number' ? String(value) : '暂无数据'
 }
 
 function formatChapter(index?: number | null) {

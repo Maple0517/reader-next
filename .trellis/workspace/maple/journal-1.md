@@ -275,3 +275,36 @@ Finalized Phase 6 report wording, stabilized V4 frontend/projection bug fixes, u
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: BF-010 地图层级/拓扑边文案澄清
+
+**Date**: 2026-07-06
+**Task**: BF-010 地图层级/拓扑边文案澄清
+**Branch**: `maple/ai-redesign`
+
+### Summary
+
+纯前端文案改动：概览文本补充层级关系计数，分区标题区分层级关系/拓扑关系，统计栏各数字加明确标签。测试+build通过。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9032d96b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

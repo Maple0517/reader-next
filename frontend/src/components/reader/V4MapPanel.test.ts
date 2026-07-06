@@ -35,6 +35,90 @@ describe('V4MapPanel', () => {
     getV4MapConflictsMock.mockReset()
   })
 
+  it('renders with V4PanelShell and no V4 pill', async () => {
+    getV4MapMock.mockResolvedValue({
+      placeCount: 1,
+      activeEdgeCount: 0,
+      conflictCount: 0,
+      topPlaces: [{ id: 'place-a', name: '青云城', placeType: 'city' }],
+    })
+    getV4MapPlacesMock.mockResolvedValue({
+      total: 1,
+      places: [{ id: 'place-a', name: '青云城', placeType: 'city' }],
+      hierarchy: [],
+    })
+    getV4MapGraphMock.mockResolvedValue({ nodes: [], edges: [], layout: null, warnings: [] })
+    getV4MapLayoutMock.mockResolvedValue({ nodes: [], edges: [], warnings: [] })
+    getV4MapConflictsMock.mockResolvedValue({ total: 0, conflicts: [] })
+
+    const wrapper = mount(await import('./V4MapPanel.vue').then((mod) => mod.default), {
+      props: { bookUrl: 'book-1' },
+    })
+    await flushPromises()
+
+    // V4PanelShell renders title
+    expect(wrapper.find('.v4-panel-shell-header h2').text()).toBe('地图')
+    // no V4 pill
+    expect(wrapper.text()).not.toContain('V4')
+    // toolbar has refresh button
+    expect(wrapper.find('.v4-panel-shell-toolbar button').exists()).toBe(true)
+  })
+
+  it('renders view mode toggle and topology canvas', async () => {
+    getV4MapMock.mockResolvedValue({
+      placeCount: 2,
+      activeEdgeCount: 1,
+      conflictCount: 0,
+      topPlaces: [],
+    })
+    getV4MapPlacesMock.mockResolvedValue({
+      total: 2,
+      places: [
+        { id: 'place-a', name: '青云城', placeType: 'city' },
+        { id: 'place-b', name: '黑风谷', placeType: 'dungeon' },
+      ],
+      hierarchy: [
+        {
+          placeId: 'place-a', name: '青云城', placeType: 'city',
+          children: [{ placeId: 'place-b', name: '黑风谷', placeType: 'dungeon', children: [] }],
+        },
+      ],
+    })
+    getV4MapGraphMock.mockResolvedValue({
+      nodes: [
+        { placeId: 'place-a', label: '青云城', placeType: 'city' },
+        { placeId: 'place-b', label: '黑风谷', placeType: 'dungeon' },
+      ],
+      edges: [{ edgeId: 'edge-1', fromPlaceId: 'place-a', toPlaceId: 'place-b', edgeType: 'route_to' }],
+      layout: null,
+      warnings: [],
+    })
+    getV4MapLayoutMock.mockResolvedValue({
+      nodes: [
+        { placeId: 'place-a', label: '青云城', placeType: 'city', x: 100, y: 100 },
+        { placeId: 'place-b', label: '黑风谷', placeType: 'dungeon', x: 200, y: 200 },
+      ],
+      edges: [],
+      warnings: [],
+    })
+    getV4MapConflictsMock.mockResolvedValue({ total: 0, conflicts: [] })
+
+    const wrapper = mount(await import('./V4MapPanel.vue').then((mod) => mod.default), {
+      props: { bookUrl: 'book-1' },
+    })
+    await flushPromises()
+
+    // view mode toggle buttons
+    const modeButtons = wrapper.findAll('[data-test^="map-mode-"]')
+    expect(modeButtons.length).toBe(3)
+    expect(wrapper.find('[data-test="map-mode-topology"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="map-mode-hierarchy"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="map-mode-list"]').exists()).toBe(true)
+
+    // topology SVG canvas present
+    expect(wrapper.find('.map-topology-canvas').exists()).toBe(true)
+  })
+
   it('renders places, hierarchy, graph fallback, detail, conflict indicators, and avoids editor/image map UI', async () => {
     getV4MapMock.mockResolvedValue({
       placeCount: 2,

@@ -269,7 +269,6 @@
         <section v-else-if="activeTab === 'identity' && book" class="stack-panel">
           <V4IdentityPanel
             :book-url="book.bookUrl"
-            :body-style="{}"
           />
         </section>
 
@@ -283,7 +282,6 @@
         <section v-else-if="activeTab === 'map' && book" class="stack-panel">
           <V4MapPanel
             :book-url="book.bookUrl"
-            :body-style="{}"
           />
         </section>
 

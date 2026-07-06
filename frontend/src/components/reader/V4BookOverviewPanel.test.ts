@@ -97,6 +97,47 @@ describe('V4BookOverviewPanel', () => {
     expect(wrapper.text()).not.toContain('digest.characterStates')
   })
 
+  it('uses V4PanelShell with title "书籍概览"', async () => {
+    getV4MemoryMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      bookName: '山海旧事',
+      author: '佚名',
+      maxReadChapter: 8,
+      maxProcessedChapter: 5,
+      processing: false,
+      characterCount: 3,
+      relationshipCount: 2,
+      knowledgeCount: 5,
+    })
+    getV4MemoryStatusMock.mockResolvedValue({ maxReadChapter: 8, maxProcessedChapter: 5, processing: false, lastError: null })
+    getV4CatchupStatusMock.mockResolvedValue({ status: 'idle', targetChapter: null, currentChapter: null, maxProcessedChapter: 5, lastError: null })
+    getV4MapMock.mockResolvedValue({ placeCount: 4, activeEdgeCount: 3, conflictCount: 1, topPlaces: [] })
+    getV4QualityMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      qualityMetrics: {},
+      auditRuns: [],
+      findings: [],
+      corrections: [],
+      reprocessJobs: [],
+      promptRegressionRuns: [],
+    })
+
+    const wrapper = mount(V4BookOverviewPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+
+    // Uses V4PanelShell structure
+    expect(wrapper.find('.v4-panel-shell').exists()).toBe(true)
+    // Title is Chinese, no "V4" prefix
+    expect(wrapper.find('.v4-panel-shell-header h2').text()).toBe('书籍概览')
+    // No "V4" in subtitle or rendered overview text
+    expect(wrapper.text()).not.toContain('V4')
+    // No "来自 V4 aggregate" label
+    expect(wrapper.text()).not.toContain('来自 V4 aggregate')
+    // Toolbar with refresh button
+    expect(wrapper.find('.v4-panel-shell-toolbar button').exists()).toBe(true)
+    expect(wrapper.find('.v4-panel-shell-toolbar button').text()).toBe('刷新')
+  })
+
   it('keeps partial V4 data visible when one domain fails', async () => {
     getV4MemoryMock.mockResolvedValue({
       bookUrl: 'book-1',
@@ -128,6 +169,37 @@ describe('V4BookOverviewPanel', () => {
     expect(wrapper.text()).toContain('角色 3')
     expect(wrapper.text()).toContain('地图不可用')
     expect(wrapper.text()).toContain('质量发现 0')
+    // Still uses V4PanelShell, no full-page error
+    expect(wrapper.find('.v4-panel-shell').exists()).toBe(true)
+  })
+
+  it('shows loading state through V4PanelShell', async () => {
+    // Never resolve to keep loading
+    getV4MemoryMock.mockReturnValue(new Promise(() => {}))
+    getV4MemoryStatusMock.mockReturnValue(new Promise(() => {}))
+    getV4CatchupStatusMock.mockReturnValue(new Promise(() => {}))
+    getV4MapMock.mockReturnValue(new Promise(() => {}))
+    getV4QualityMock.mockReturnValue(new Promise(() => {}))
+
+    const wrapper = mount(V4BookOverviewPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+
+    // V4PanelShell should show loading
+    expect(wrapper.find('.v4-loading-state').exists()).toBe(true)
+  })
+
+  it('shows error state through V4PanelShell when all critical APIs fail', async () => {
+    getV4MemoryMock.mockRejectedValue(new Error('memory failed'))
+    getV4MemoryStatusMock.mockRejectedValue(new Error('status failed'))
+    getV4CatchupStatusMock.mockRejectedValue(new Error('catchup failed'))
+    getV4MapMock.mockRejectedValue(new Error('map failed'))
+    getV4QualityMock.mockRejectedValue(new Error('quality failed'))
+
+    const wrapper = mount(V4BookOverviewPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+
+    // V4PanelShell should show error
+    expect(wrapper.find('.v4-error-state').exists()).toBe(true)
   })
 
   it('does not import V3 boundaries or the heavy relationship graph endpoint for counts', () => {

@@ -92,9 +92,9 @@
         <V4BookOverviewPanel v-if="activeTab === 'overview'" :key="overviewRefreshKey" :book-url="bookUrl" />
         <V4CharacterPanel v-else-if="activeTab === 'characters'" :book-url="bookUrl" />
         <V4RelationshipPanel v-else-if="activeTab === 'relationships'" :book-url="bookUrl" :body-style="{}" />
-        <V4KnowledgePanel v-else-if="activeTab === 'knowledge'" :book-url="bookUrl" :body-style="{}" />
-        <V4MapPanel v-else-if="activeTab === 'map'" :book-url="bookUrl" :body-style="{}" />
-        <V4IdentityPanel v-else-if="activeTab === 'identity'" :book-url="bookUrl" :body-style="{}" />
+        <V4KnowledgePanel v-else-if="activeTab === 'knowledge'" :book-url="bookUrl" />
+        <V4MapPanel v-else-if="activeTab === 'map'" :book-url="bookUrl" />
+        <V4IdentityPanel v-else-if="activeTab === 'identity'" :book-url="bookUrl" />
         <V4QualityPanel v-else-if="activeTab === 'quality'" :book-url="bookUrl" :body-style="{}" />
       </main>
     </section>

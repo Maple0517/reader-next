@@ -1,157 +1,145 @@
 <template>
-  <section class="v4-identity-panel panel-card" :style="bodyStyle" role="tabpanel" aria-label="V4 身份调试">
-    <div class="panel-head">
-      <div>
-        <h2>身份线索</h2>
-        <p v-if="totalLinks > 0">{{ totalLinks }} 条身份链接，{{ totalOperations }} 个合并操作</p>
-        <p v-else>V4 identity debug surface</p>
-      </div>
-      <span class="debug-pill">Debug only</span>
-    </div>
+  <V4PanelShell
+    title="身份线索"
+    :subtitle="subtitle"
+    :loading="listState.loading.value"
+    :error="listState.error.value"
+    :empty="listState.empty.value"
+    empty-title="暂无身份数据"
+    empty-message="当前资料还没有可展示的身份链接或合并操作。"
+    @retry="listState.reload()"
+  >
+    <template #toolbar>
+      <button class="v4-identity-refresh" type="button" :disabled="listState.loading.value" @click="listState.reload()">
+        刷新
+      </button>
+    </template>
 
-    <div v-if="loading" class="identity-state identity-loading">
-      <span></span><span></span><span></span>
-    </div>
-
-    <p v-else-if="error" class="identity-state identity-empty">身份调试数据加载失败。</p>
-
-    <div v-else class="identity-content">
-      <section class="identity-section">
-        <div class="section-head">
-          <strong>Identity links</strong>
+    <div class="v4-identity-content">
+      <section class="v4-identity-section">
+        <div class="v4-identity-section-head">
+          <strong>身份链接</strong>
           <span>{{ totalLinks }}</span>
         </div>
-        <p v-if="!links.length" class="identity-empty">暂无 identity links</p>
-        <article v-for="link in links" :key="link.id" class="identity-link-card">
-          <div class="identity-link-head">
-            <span :class="['link-type', `type-${link.linkType}`]">{{ link.linkType }}</span>
+        <p v-if="!links.length" class="v4-identity-empty">暂无身份链接</p>
+        <article v-for="link in links" :key="link.id" class="v4-identity-link-card">
+          <div class="v4-identity-link-head">
+            <span :class="['v4-identity-link-type', `v4-identity-link-type-${link.linkType}`]">{{ link.linkType }}</span>
             <strong>{{ confidenceLabel(link.confidence) }}</strong>
           </div>
-          <div class="entity-pair">
+          <div class="v4-identity-entity-pair">
             <code>{{ link.entityAId }}</code>
             <span>{{ link.linkType === 'redirect' ? '→' : '↔' }}</span>
             <code>{{ link.entityBId }}</code>
           </div>
-          <div class="identity-meta">
-            <span>status：{{ link.status }}</span>
-            <span>source claim：{{ link.sourceClaimId }}</span>
-            <span v-if="link.redirectTargetId">redirect target：{{ link.redirectTargetId }}</span>
+          <div class="v4-identity-meta">
+            <span>状态：{{ link.status }}</span>
+            <span>来源：{{ link.sourceClaimId }}</span>
+            <span v-if="link.redirectTargetId">重定向目标：{{ link.redirectTargetId }}</span>
           </div>
         </article>
       </section>
 
-      <section class="identity-section">
-        <div class="section-head">
-          <strong>Merge operations</strong>
+      <section class="v4-identity-section">
+        <div class="v4-identity-section-head">
+          <strong>合并操作</strong>
           <span>{{ totalOperations }}</span>
         </div>
-        <p v-if="!operations.length" class="identity-empty">暂无 merge operations</p>
-        <article v-for="operation in operations" :key="operation.id" class="merge-card">
-          <div class="identity-link-head">
-            <span class="link-type">{{ operation.status }}</span>
+        <p v-if="!operations.length" class="v4-identity-empty">暂无合并操作</p>
+        <article v-for="operation in operations" :key="operation.id" class="v4-identity-merge-card">
+          <div class="v4-identity-link-head">
+            <span class="v4-identity-link-type">{{ operation.status }}</span>
             <strong>{{ confidenceLabel(operation.confidence) }}</strong>
           </div>
-          <div class="entity-pair">
+          <div class="v4-identity-entity-pair">
             <code>{{ operation.victimEntityId }}</code>
             <span>→</span>
             <code>{{ operation.survivorEntityId }}</code>
           </div>
-          <div class="identity-meta">
-            <span>reason：{{ operation.reasonCode }}</span>
-            <span>source link：{{ operation.sourceIdentityLinkId }}</span>
-            <span>relationship merges：{{ operation.relationshipMergeCount }}</span>
-            <span>property conflicts：{{ operation.propertyConflictCount }}</span>
+          <div class="v4-identity-meta">
+            <span>原因：{{ operation.reasonCode }}</span>
+            <span>来源链接：{{ operation.sourceIdentityLinkId }}</span>
+            <span>关系合并：{{ operation.relationshipMergeCount }}</span>
+            <span>属性冲突：{{ operation.propertyConflictCount }}</span>
           </div>
         </article>
       </section>
     </div>
-  </section>
+  </V4PanelShell>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import type { CSSProperties } from 'vue'
+import { computed } from 'vue'
 import { getV4IdentityLinks, getV4MergeOperations } from '../../api/v4/book'
+import { useV4PanelState } from '../../composables/useV4PanelState'
 import type { V4IdentityLink, V4MergeOperation } from '../../types/v4'
+import V4PanelShell from './v4/V4PanelShell.vue'
+
+interface IdentityData {
+  links: V4IdentityLink[]
+  operations: V4MergeOperation[]
+}
 
 const props = defineProps<{
   bookUrl: string
-  bodyStyle?: CSSProperties
 }>()
 
-const loading = ref(false)
-const error = ref(false)
-const links = ref<V4IdentityLink[]>([])
-const operations = ref<V4MergeOperation[]>([])
-
-const totalLinks = computed(() => links.value.length)
-const totalOperations = computed(() => operations.value.length)
-
-let requestId = 0
-
-function confidenceLabel(value: number): string {
-  return `${Math.round(value * 100)}%`
-}
-
-async function load() {
-  if (!props.bookUrl) return
-  const req = ++requestId
-  loading.value = true
-  error.value = false
-  links.value = []
-  operations.value = []
-  try {
+const listState = useV4PanelState<IdentityData>(
+  async () => {
     const [linkData, operationData] = await Promise.all([
       getV4IdentityLinks(props.bookUrl),
       getV4MergeOperations(props.bookUrl),
     ])
-    if (req !== requestId) return
-    links.value = linkData.identityLinks || []
-    operations.value = operationData.mergeOperations || []
-  } catch {
-    if (req !== requestId) return
-    error.value = true
-  } finally {
-    if (req === requestId) loading.value = false
+    return {
+      links: linkData.identityLinks || [],
+      operations: operationData.mergeOperations || [],
+    }
+  },
+  computed(() => props.bookUrl),
+  { emptyCheck: (d) => d.links.length === 0 && d.operations.length === 0 },
+)
+
+const links = computed<V4IdentityLink[]>(() => listState.data.value?.links ?? [])
+const operations = computed<V4MergeOperation[]>(() => listState.data.value?.operations ?? [])
+const totalLinks = computed(() => links.value.length)
+const totalOperations = computed(() => operations.value.length)
+
+const subtitle = computed(() => {
+  if (totalLinks.value > 0 || totalOperations.value > 0) {
+    return `${totalLinks.value} 条身份链接，${totalOperations.value} 个合并操作`
   }
+  return undefined
+})
+
+function confidenceLabel(value: number): string {
+  return `${Math.round(value * 100)}%`
 }
-
-watch(() => props.bookUrl, () => {
-  void load()
-}, { immediate: true })
-
-defineExpose({ reload: load })
 </script>
 
 <style scoped>
-.v4-identity-panel {
+.v4-identity-content,
+.v4-identity-section {
   display: grid;
-  gap: 14px;
+  gap: 10px;
 }
 
-.panel-head,
-.section-head,
-.identity-link-head {
+.v4-identity-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-text-secondary);
+  font-size: 0.84rem;
+}
+
+.v4-identity-link-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.panel-head h2 {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.panel-head p {
-  margin: 4px 0 0;
-  opacity: 0.55;
-  font-size: 0.84rem;
-}
-
-.debug-pill,
-.link-type {
+.v4-identity-link-type {
   display: inline-flex;
   align-items: center;
   min-height: 22px;
@@ -163,19 +151,8 @@ defineExpose({ reload: load })
   font-weight: 700;
 }
 
-.identity-content,
-.identity-section {
-  display: grid;
-  gap: 10px;
-}
-
-.section-head {
-  color: var(--color-text-secondary);
-  font-size: 0.84rem;
-}
-
-.identity-link-card,
-.merge-card {
+.v4-identity-link-card,
+.v4-identity-merge-card {
   display: grid;
   gap: 8px;
   padding: 10px;
@@ -184,14 +161,14 @@ defineExpose({ reload: load })
   background: color-mix(in srgb, currentColor 2%, transparent);
 }
 
-.entity-pair {
+.v4-identity-entity-pair {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.entity-pair code {
+.v4-identity-entity-pair code {
   padding: 2px 6px;
   border-radius: 6px;
   background: var(--color-bg-sunken);
@@ -199,11 +176,11 @@ defineExpose({ reload: load })
   font-size: 0.78rem;
 }
 
-.entity-pair span {
+.v4-identity-entity-pair span {
   color: var(--color-text-tertiary);
 }
 
-.identity-meta {
+.v4-identity-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 12px;
@@ -211,43 +188,9 @@ defineExpose({ reload: load })
   font-size: 0.76rem;
 }
 
-.identity-state,
-.identity-empty {
+.v4-identity-empty {
   margin: 0;
   color: var(--color-text-tertiary);
   font-size: 0.84rem;
-}
-
-.identity-loading {
-  display: inline-flex;
-  gap: 5px;
-  align-items: center;
-}
-
-.identity-loading span {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: pulse 0.9s ease-in-out infinite;
-}
-
-.identity-loading span:nth-child(2) {
-  animation-delay: 0.12s;
-}
-
-.identity-loading span:nth-child(3) {
-  animation-delay: 0.24s;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.25;
-  }
-
-  50% {
-    opacity: 1;
-  }
 }
 </style>

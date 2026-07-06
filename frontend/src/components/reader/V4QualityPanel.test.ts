@@ -43,7 +43,7 @@ describe('V4QualityPanel', () => {
     promptRegressionMock.mockReset()
   })
 
-  it('renders seven quality sections and keeps risky operations review-first', async () => {
+  it('renders seven quality sections with Chinese labels and review-first actions', async () => {
     getV4QualityMock.mockResolvedValue({
       bookUrl: 'book-1',
       qualityMetrics: {
@@ -96,35 +96,84 @@ describe('V4QualityPanel', () => {
     await flushPromises()
 
     expect(getV4QualityMock).toHaveBeenCalledWith('book-1')
-    expect(wrapper.text()).toContain('Overview')
-    expect(wrapper.text()).toContain('Quarantine')
-    expect(wrapper.text()).toContain('Audit Findings')
-    expect(wrapper.text()).toContain('Corrections')
-    expect(wrapper.text()).toContain('Reprocess')
-    expect(wrapper.text()).toContain('Prompt Regression')
-    expect(wrapper.text()).toContain('Metrics')
+
+    // Chinese section labels
+    expect(wrapper.text()).toContain('概览')
+    expect(wrapper.text()).toContain('隔离声明')
+    expect(wrapper.text()).toContain('审计发现')
+    expect(wrapper.text()).toContain('修正')
+    expect(wrapper.text()).toContain('重处理')
+    expect(wrapper.text()).toContain('Prompt 回归测试')
+    expect(wrapper.text()).toContain('指标')
+
+    // No English labels
+    expect(wrapper.text()).not.toContain('Overview')
+    expect(wrapper.text()).not.toContain('Quarantine')
+    expect(wrapper.text()).not.toContain('Audit Findings')
+    expect(wrapper.text()).not.toContain('Corrections')
+    expect(wrapper.text()).not.toContain('Reprocess')
+    expect(wrapper.text()).not.toContain('Prompt Regression')
+    expect(wrapper.text()).not.toContain('Metrics')
+
+    // No Review-first pill
+    expect(wrapper.text()).not.toContain('Review-first')
+
+    // Content preserved
     expect(wrapper.text()).toContain('Identity reveal needs source review')
     expect(wrapper.text()).toContain('他终于承认自己就是旧名。')
-    expect(wrapper.text()).toContain('dry-run')
+    expect(wrapper.text()).toContain('模拟运行')
     expect(wrapper.text()).not.toContain('raw JSON')
     expect(wrapper.text()).not.toContain('fix all')
     expect(wrapper.text()).not.toContain('delete')
 
-    await wrapper.get('[data-test="quality-quarantine-accept-workflow-1"]').trigger('click')
-    await wrapper.get('[data-test="quality-run-audit"]').trigger('click')
-    await wrapper.get('[data-test="quality-finding-convert-finding-1"]').trigger('click')
-    await wrapper.get('[data-test="quality-apply-correction-correction-1"]').trigger('click')
-    await wrapper.get('[data-test="quality-create-reprocess-dry-run"]').trigger('click')
-    await wrapper.get('[data-test="quality-cancel-reprocess-job-1"]').trigger('click')
-    await wrapper.get('[data-test="quality-run-regression"]').trigger('click')
+    // Chinese action buttons
+    expect(wrapper.text()).toContain('通过审核')
+    expect(wrapper.text()).toContain('运行审计')
+    expect(wrapper.text()).toContain('转为修正')
+    expect(wrapper.text()).toContain('重处理')  // "Queue dry-run" section head
+    expect(wrapper.text()).toContain('模拟运行')  // dry-run label
+    expect(wrapper.text()).toContain('取消')
+    expect(wrapper.text()).toContain('证据')  // Evidence -> 证据
 
+    // Click actions and verify Chinese messages (each overwrites previous)
+    await wrapper.get('[data-test="quality-quarantine-accept-workflow-1"]').trigger('click')
+    await flushPromises()
     expect(quarantineActionMock).toHaveBeenCalledWith('book-1', 'workflow-1', { action: 'accept', actor: 'reader-ui', note: 'reviewed in quality panel' })
+    expect(wrapper.text()).toContain('已提交审核通过操作。')
+
+    await wrapper.get('[data-test="quality-run-audit"]').trigger('click')
+    await flushPromises()
     expect(auditRunMock).toHaveBeenCalledWith('book-1', { auditType: 'full_book_quality', scopeJson: { source: 'quality_panel' } })
+    expect(wrapper.text()).toContain('已提交审查审计。')
+
+    await wrapper.get('[data-test="quality-finding-convert-finding-1"]').trigger('click')
+    await flushPromises()
     expect(findingActionMock).toHaveBeenCalledWith('book-1', 'finding-1', { action: 'convert_to_correction', actor: 'reader-ui' })
+    expect(wrapper.text()).toContain('发现已转为修正。')
+
+    await wrapper.get('[data-test="quality-apply-correction-correction-1"]').trigger('click')
+    await flushPromises()
     expect(applyCorrectionMock).toHaveBeenCalledWith('book-1', 'correction-1')
+    expect(wrapper.text()).toContain('已提交修正应用。')
+
+    await wrapper.get('[data-test="quality-create-reprocess-dry-run"]').trigger('click')
+    await flushPromises()
     expect(createReprocessJobMock).toHaveBeenCalledWith('book-1', expect.objectContaining({ dryRun: true, mode: 'dry_run_compare' }))
+    expect(wrapper.text()).toContain('已提交模拟重处理。')
+
+    await wrapper.get('[data-test="quality-cancel-reprocess-job-1"]').trigger('click')
+    await flushPromises()
     expect(cancelReprocessJobMock).toHaveBeenCalledWith('book-1', 'job-1')
+    expect(wrapper.text()).toContain('已提交重处理任务取消。')
+
+    await wrapper.get('[data-test="quality-run-regression"]').trigger('click')
+    await flushPromises()
     expect(promptRegressionMock).toHaveBeenCalledWith('book-1', expect.objectContaining({ fixtureSet: 'phase6' }))
+    expect(wrapper.text()).toContain('已提交 Prompt 回归测试。')
+
+    // Uses V4PanelShell (no panel-card class)
+    expect(wrapper.find('.panel-card').exists()).toBe(false)
+    expect(wrapper.find('.v4-panel-shell').exists()).toBe(true)
   })
 
   it('renders an honest empty quality state before audits or metrics exist', async () => {
@@ -146,5 +195,27 @@ describe('V4QualityPanel', () => {
 
     expect(wrapper.text()).toContain('尚未运行质量审计 / metrics')
     expect(wrapper.text()).toContain('catchup 不会自动生成审计结果')
+  })
+
+  it('uses V4PanelShell with correct title and subtitle', async () => {
+    getV4QualityMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      qualityMetrics: {},
+      quarantine: [],
+      auditRuns: [],
+      findings: [],
+      corrections: [],
+      reprocessJobs: [],
+      promptRegressionRuns: [],
+    })
+
+    const wrapper = mount(await import('./V4QualityPanel.vue').then((mod) => mod.default), {
+      props: { bookUrl: 'book-1' },
+    })
+    await flushPromises()
+
+    const shell = wrapper.findComponent({ name: 'V4PanelShell' })
+    expect(shell.exists()).toBe(true)
+    expect(shell.props('title')).toBe('质量控制')
   })
 })

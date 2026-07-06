@@ -18,7 +18,7 @@ describe('V4CharacterPanel', () => {
     getV4CharacterCardMock.mockReset()
   })
 
-  it('renders V4 character list data', async () => {
+  it('renders character grid cards with name, initial, importance and chapter range', async () => {
     getV4CharactersMock.mockResolvedValue({
       characters: [
         {
@@ -39,11 +39,60 @@ describe('V4CharacterPanel', () => {
     await flushPromises()
 
     expect(getV4CharactersMock).toHaveBeenCalledWith('book-1')
-    expect(wrapper.text()).toContain('林玄')
-    expect(wrapper.text()).toContain('玄子')
-    expect(wrapper.text()).toContain('外门弟子')
-    expect(wrapper.text()).toContain('可见度 0.90')
-    expect(wrapper.text()).toContain('第 5 章')
+    const card = wrapper.find('[data-character-id="char-1"]')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toContain('林')
+    expect(card.text()).toContain('林玄')
+    expect(card.text()).toContain('高')
+    expect(card.text()).toContain('第 1 章')
+    expect(card.text()).toContain('第 5 章')
+    // aliases displayed on card
+    expect(card.text()).toContain('玄子')
+  })
+
+  it('maps importance to correct level labels', async () => {
+    getV4CharactersMock.mockResolvedValue({
+      characters: [
+        {
+          id: 'char-high',
+          name: '角色高',
+          aliases: [],
+          summary: null,
+          importance: 0.9,
+          firstSeenChapter: 0,
+          lastSeenChapter: 1,
+          visibilityScore: 0.5,
+        },
+        {
+          id: 'char-mid',
+          name: '角色中',
+          aliases: [],
+          summary: null,
+          importance: 0.5,
+          firstSeenChapter: 2,
+          lastSeenChapter: 3,
+          visibilityScore: 0.5,
+        },
+        {
+          id: 'char-low',
+          name: '角色低',
+          aliases: [],
+          summary: null,
+          importance: 0.1,
+          firstSeenChapter: 4,
+          lastSeenChapter: 5,
+          visibilityScore: 0.5,
+        },
+      ],
+      total: 3,
+    })
+
+    const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+
+    expect(wrapper.find('[data-character-id="char-high"]').text()).toContain('高')
+    expect(wrapper.find('[data-character-id="char-mid"]').text()).toContain('中')
+    expect(wrapper.find('[data-character-id="char-low"]').text()).toContain('低')
   })
 
   it('collapses low-priority characters behind an explicit reveal action', async () => {
@@ -64,14 +113,14 @@ describe('V4CharacterPanel', () => {
     const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
     await flushPromises()
 
-    expect(wrapper.findAll('button[data-character-id]').length).toBe(12)
+    expect(wrapper.findAll('[data-character-id]').length).toBe(12)
     expect(wrapper.text()).toContain('显示其余 2 位角色')
     expect(wrapper.text()).not.toContain('角色14')
 
     await wrapper.get('.v4-character-toggle').trigger('click')
     await flushPromises()
 
-    expect(wrapper.findAll('button[data-character-id]').length).toBe(14)
+    expect(wrapper.findAll('[data-character-id]').length).toBe(14)
     expect(wrapper.text()).toContain('角色14')
   })
 
@@ -112,7 +161,7 @@ describe('V4CharacterPanel', () => {
 
     const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
     await flushPromises()
-    await wrapper.get('button[data-character-id="char-1"]').trigger('click')
+    await wrapper.get('[data-character-id="char-1"]').trigger('click')
     await flushPromises()
 
     expect(getV4CharacterCardMock).toHaveBeenCalledWith('book-1', 'char-1')
@@ -156,29 +205,28 @@ describe('V4CharacterPanel', () => {
 
     const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
     await flushPromises()
-    await wrapper.get('button[data-character-id="char-1"]').trigger('click')
+    await wrapper.get('[data-character-id="char-1"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.text()).toContain('证据面板待接入')
     expect(wrapper.text()).not.toContain('暂无证据摘要')
   })
 
-  it('renders an empty state', async () => {
+  it('renders an empty state via V4PanelShell', async () => {
     getV4CharactersMock.mockResolvedValue({ characters: [], total: 0 })
 
     const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('暂无 V4 角色')
+    expect(wrapper.find('.v4-empty-state').exists()).toBe(true)
   })
 
-  it('renders an error state', async () => {
+  it('renders an error state via V4PanelShell', async () => {
     getV4CharactersMock.mockRejectedValue(new Error('V4 characters unavailable'))
 
     const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('角色加载失败')
     expect(wrapper.text()).toContain('V4 characters unavailable')
   })
 
