@@ -17,7 +17,8 @@
     <div v-else class="map-content">
       <div class="map-stats">
         <span>地点 {{ overview?.placeCount ?? places.length }}</span>
-        <span>边 {{ overview?.activeEdgeCount ?? graph?.edges.length ?? 0 }}</span>
+        <span>层级关系 {{ flatHierarchy.length }}</span>
+        <span>拓扑边 {{ overview?.activeEdgeCount ?? graph?.edges.length ?? 0 }}</span>
         <span :class="{ warn: conflictCount > 0 }">冲突 {{ conflictCount }}</span>
       </div>
 
@@ -44,10 +45,10 @@
 
         <section class="hierarchy-list" aria-label="地点层级">
           <div class="section-head">
-            <strong>层级</strong>
-            <span>{{ flatHierarchy.length }}</span>
+            <strong>层级关系</strong>
+            <span>{{ flatHierarchy.length }} 个地点</span>
           </div>
-          <p v-if="!flatHierarchy.length" class="map-state">暂无层级资料</p>
+          <p v-if="!flatHierarchy.length" class="map-state">暂无层级关系资料</p>
           <div
             v-for="node in flatHierarchy"
             :key="node.placeId"
@@ -61,8 +62,8 @@
 
         <section class="graph-panel" aria-label="地图拓扑">
           <div class="section-head">
-            <strong>拓扑</strong>
-            <span>{{ graph?.edges.length ?? 0 }} 条边</span>
+            <strong>拓扑关系</strong>
+            <span>{{ graph?.edges.length ?? 0 }} 条拓扑边</span>
           </div>
           <div v-if="layoutAvailable" class="layout-grid">
             <div v-for="node in layoutNodes" :key="node.placeId" class="layout-node">
@@ -160,8 +161,9 @@ let detailRequestId = 0
 
 const overviewText = computed(() => {
   const placeCount = overview.value?.placeCount ?? places.value.length
+  const hierarchyCount = flatHierarchy.value.length
   const edgeCount = overview.value?.activeEdgeCount ?? graph.value?.edges.length ?? 0
-  return `${placeCount} 个地点 · ${edgeCount} 条拓扑边`
+  return `${placeCount} 个地点 · ${hierarchyCount} 个层级关系 · ${edgeCount} 条拓扑边`
 })
 
 const conflictCount = computed(() => conflicts.value.length || overview.value?.conflictCount || 0)
