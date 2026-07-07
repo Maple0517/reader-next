@@ -117,8 +117,9 @@ async fn apply_character_decision_lifecycle(
                 quarantine.reason
             );
             quarantine_claim(
-                claim_repo,
+                pool,
                 &quarantine.claim_id,
+                &quarantine.reason,
                 &mut result.claims_quarantined,
             )
             .await?;
@@ -145,6 +146,7 @@ mod tests {
     use crate::storage::db::v4::claim_repo::ClaimRepo;
     use crate::storage::db::v4::entity_repo::EntityRepo;
     use crate::storage::db::v4::property_repo::PropertyRepo;
+    use crate::storage::db::v4::quality_repo::QualityRepo;
     use sqlx::SqlitePool;
 
     async fn setup() -> (
@@ -367,5 +369,51 @@ mod tests {
             .await
             .unwrap();
         assert!(aliases.iter().any(|alias| alias.alias == "小张"));
+    }
+
+    #[tokio::test]
+    async fn character_quarantine_decision_marks_claim_quarantined_and_opens_workflow() {
+        let (pool, claim_repo, entity_repo, _property_repo, span_id, run_id) = setup().await;
+        let entity = entity_repo
+            .create_entity("b1", "character", "岳清源", "岳清源", None, 0.7, 1)
+            .await
+            .unwrap();
+        let claim = claim_repo
+            .create_claim(
+                "b1",
+                7,
+                "property_update",
+                Some("岳清源"),
+                None,
+                Some(&entity.id),
+                None,
+                "life_status = 死亡",
+                Some("死亡"),
+                None,
+                &span_id,
+                &run_id,
+                0.9,
+                "high",
+            )
+            .await
+            .unwrap();
+
+        let result = process_character_claims_for_segment(&pool, &claim_repo, &[claim.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(result.claims_quarantined, 1);
+        assert_eq!(result.claims_accepted, 0);
+        assert_eq!(result.claims_rejected, 0);
+        assert_eq!(result.claims_uncertain, 0);
+        let stored = claim_repo.get_claim(&claim.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "quarantined");
+        let workflow = QualityRepo::new(pool)
+            .get_quarantined_claim_by_claim_id("b1", &claim.id)
+            .await
+            .unwrap()
+            .expect("quarantine workflow should be created");
+        assert_eq!(workflow.status, "open");
+        assert_eq!(workflow.suggested_action, "needs_manual_review");
     }
 }

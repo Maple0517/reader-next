@@ -124,6 +124,7 @@ pub(crate) async fn process_relationship_claims_for_segment(
             }
             RelationshipGateDecision::Decided(decision) => {
                 apply_relationship_decision_lifecycle(
+                    pool,
                     book_id,
                     chapter_index,
                     claim_repo,
@@ -148,6 +149,7 @@ pub(crate) async fn process_relationship_claims_for_segment(
                 ) {
                     Ok(decision) => {
                         apply_relationship_decision_lifecycle(
+                            pool,
                             book_id,
                             chapter_index,
                             claim_repo,
@@ -212,6 +214,7 @@ pub(crate) async fn process_relationship_claims_for_segment(
 }
 
 async fn apply_relationship_decision_lifecycle(
+    pool: &SqlitePool,
     book_id: &str,
     chapter_index: i64,
     claim_repo: &ClaimRepo,
@@ -290,8 +293,9 @@ async fn apply_relationship_decision_lifecycle(
                 quarantine.reason
             );
             quarantine_claim(
-                claim_repo,
+                pool,
                 &quarantine.claim_id,
+                &quarantine.reason,
                 &mut result.claims_quarantined,
             )
             .await?;
@@ -306,6 +310,7 @@ mod tests {
     use super::*;
     use crate::service::v4::relationship_decision::RelationshipQuarantine;
     use crate::service::v4::test_support::setup_v4_processor_test;
+    use crate::storage::db::v4::quality_repo::QualityRepo;
 
     #[tokio::test]
     async fn relationship_quarantine_decision_marks_claim_quarantined() {
@@ -336,6 +341,7 @@ mod tests {
         let mut result = RelationshipSegmentProcessResult::default();
 
         apply_relationship_decision_lifecycle(
+            &ctx.pool,
             "b1",
             3,
             &claim_repo,
@@ -356,5 +362,12 @@ mod tests {
         assert_eq!(result.claims_uncertain, 0);
         let stored = claim_repo.get_claim(&claim.id).await.unwrap().unwrap();
         assert_eq!(stored.status, "quarantined");
+        let workflow = QualityRepo::new(ctx.pool.clone())
+            .get_quarantined_claim_by_claim_id("b1", &claim.id)
+            .await
+            .unwrap()
+            .expect("quarantine workflow should be created");
+        assert_eq!(workflow.status, "open");
+        assert_eq!(workflow.suggested_action, "needs_manual_review");
     }
 }

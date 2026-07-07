@@ -243,8 +243,9 @@ async fn apply_place_decision_lifecycle(
                 quarantine.reason
             );
             quarantine_claim(
-                claim_repo,
+                pool,
                 &quarantine.claim_id,
+                &quarantine.reason,
                 &mut result.claims_quarantined,
             )
             .await?;
@@ -337,6 +338,7 @@ mod tests {
     use crate::storage::db::v4::claim_repo::ClaimRepo;
     use crate::storage::db::v4::entity_repo::EntityRepo;
     use crate::storage::db::v4::place_repo::PlaceRepo;
+    use crate::storage::db::v4::quality_repo::QualityRepo;
     use sqlx::SqlitePool;
 
     async fn setup() -> (
@@ -491,5 +493,12 @@ mod tests {
         assert_eq!(result.claims_uncertain, 0);
         let stored = claim_repo.get_claim(&claim.id).await.unwrap().unwrap();
         assert_eq!(stored.status, "quarantined");
+        let workflow = QualityRepo::new(pool)
+            .get_quarantined_claim_by_claim_id("b1", &claim.id)
+            .await
+            .unwrap()
+            .expect("quarantine workflow should be created");
+        assert_eq!(workflow.status, "open");
+        assert_eq!(workflow.suggested_action, "needs_manual_review");
     }
 }
