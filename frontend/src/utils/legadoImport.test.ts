@@ -205,18 +205,18 @@ describe('parseLegadoBackupZip', () => {
     expect(result.replaceRules[3].scope).toBeUndefined()
   })
 
-  it('sorts books by reading progress descending', async () => {
+  it('sorts books by last read time descending', async () => {
     const blob = await createTestZip({
       'bookshelf.json': [
-        { ...sampleLegadoBook, name: '旧书', durChapterIndex: 10, durChapterPos: 0, durChapterTime: 1700000000000 },
-        { ...sampleLegadoBook, name: '新书', durChapterIndex: 100, durChapterPos: 500, durChapterTime: 1700100000000 },
-        { ...sampleLegadoBook, name: '中间', durChapterIndex: 50, durChapterPos: 0, durChapterTime: 1700050000000 },
+        { ...sampleLegadoBook, name: '旧书', durChapterIndex: 100, durChapterTime: 1700000000000 },
+        { ...sampleLegadoBook, name: '新书', durChapterIndex: 10, durChapterTime: 1700100000000 },
+        { ...sampleLegadoBook, name: '中间', durChapterIndex: 50, durChapterTime: 1700050000000 },
       ],
     })
     const result = await parseLegadoBackupZip(blob)
-    expect(result.books[0].name).toBe('新书')   // chapter 100
-    expect(result.books[1].name).toBe('中间')   // chapter 50
-    expect(result.books[2].name).toBe('旧书')   // chapter 10
+    expect(result.books[0].name).toBe('新书')   // most recent time
+    expect(result.books[1].name).toBe('中间')
+    expect(result.books[2].name).toBe('旧书')   // oldest time
   })
 
   it('maps Legado book fields to reader-next format', async () => {

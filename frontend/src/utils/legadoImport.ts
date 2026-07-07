@@ -396,16 +396,8 @@ async function parseLegadoBackupZipFromZip(
       skippedBooks++
     }
   }
-  // Sort by reading progress descending — furthest read first, then by last read time
-  usableBooks.sort((a, b) => {
-    const aIdx = a.durChapterIndex ?? 0
-    const bIdx = b.durChapterIndex ?? 0
-    if (bIdx !== aIdx) return bIdx - aIdx
-    const aPos = a.durChapterPos ?? 0
-    const bPos = b.durChapterPos ?? 0
-    if (bPos !== aPos) return bPos - aPos
-    return (b.durChapterTime ?? 0) - (a.durChapterTime ?? 0)
-  })
+  // Sort by last read time descending — most recently read first
+  usableBooks.sort((a, b) => (b.durChapterTime ?? 0) - (a.durChapterTime ?? 0))
 
   // Convert book sources
   const rawSources = bookSourcesText

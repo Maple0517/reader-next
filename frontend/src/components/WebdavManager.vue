@@ -546,8 +546,10 @@ async function applyLegadoImport() {
     for (const group of data.bookGroups) {
       try { await saveBookGroup(group) } catch (e) { errors.push(`分组 ${group.groupName}: ${(e as Error).message}`) }
     }
-    if (data.books.length) {
-      try { await saveBooks(data.books) } catch (e) { errors.push(`书籍: ${(e as Error).message}`) }
+    // Filter out books with empty bookUrl (data: URI decoded books)
+    const validBooks = data.books.filter((b) => !!b.bookUrl)
+    if (validBooks.length) {
+      try { await saveBooks(validBooks) } catch (e) { errors.push(`书籍: ${(e as Error).message}`) }
     }
     if (data.bookmarks.length) {
       try { await saveBookmarks(data.bookmarks) } catch (e) { errors.push(`书签: ${(e as Error).message}`) }
