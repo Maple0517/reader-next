@@ -72,7 +72,7 @@ const GENERIC_CHARACTER_LABELS: &[&str] = &[
 const GENERIC_CHARACTER_SUFFIXES: &[&str] =
     &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
 
-fn normalize_unit_score(value: f64) -> f64 {
+fn clamp_display_score(value: f64) -> f64 {
     if !value.is_finite() {
         return 0.0;
     }
@@ -142,8 +142,8 @@ fn sort_relationship_edges(mut edges: Vec<RelationshipEdge>) -> Vec<Relationship
             .cmp(&right.group)
             .then_with(|| right.last_seen_chapter.cmp(&left.last_seen_chapter))
             .then_with(|| {
-                normalize_unit_score(right.importance_score)
-                    .partial_cmp(&normalize_unit_score(left.importance_score))
+                clamp_display_score(right.importance_score)
+                    .partial_cmp(&clamp_display_score(left.importance_score))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .then_with(|| left.label.cmp(&right.label))
@@ -299,7 +299,7 @@ pub async fn build_edge_for_relationship(
         strength: rel.strength,
         polarity: rel.polarity.clone(),
         confidence: rel.confidence,
-        importance_score: normalize_unit_score(rel.importance_score),
+        importance_score: clamp_display_score(rel.importance_score),
         first_seen_chapter: rel.first_seen_chapter,
         last_changed_chapter: rel.last_changed_chapter,
         last_seen_chapter: rel.last_seen_chapter,
@@ -355,7 +355,7 @@ async fn project_relationship_graph_from_db(
                     &alias_names,
                 ),
                 aliases: alias_names,
-                importance: normalize_unit_score(entity.importance_score),
+                importance: clamp_display_score(entity.importance_score),
                 first_seen_chapter: entity.first_seen_chapter,
                 last_seen_chapter: entity.last_seen_chapter,
             });
@@ -444,12 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn relationship_projection_score_normalization_only_clamps_canonical_value() {
-        assert_eq!(normalize_unit_score(0.72), 0.72);
-        assert_eq!(normalize_unit_score(8.0), 1.0);
-        assert_eq!(normalize_unit_score(90.0), 1.0);
-        assert_eq!(normalize_unit_score(-0.2), 0.0);
-        assert_eq!(normalize_unit_score(f64::NAN), 0.0);
+    fn relationship_projection_display_score_only_clamps_canonical_value() {
+        assert_eq!(clamp_display_score(0.72), 0.72);
+        assert_eq!(clamp_display_score(8.0), 1.0);
+        assert_eq!(clamp_display_score(90.0), 1.0);
+        assert_eq!(clamp_display_score(-0.2), 0.0);
+        assert_eq!(clamp_display_score(f64::NAN), 0.0);
     }
 
     #[tokio::test]

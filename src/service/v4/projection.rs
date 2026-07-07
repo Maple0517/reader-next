@@ -60,7 +60,7 @@ const GENERIC_CHARACTER_LABELS: &[&str] = &[
 const GENERIC_CHARACTER_SUFFIXES: &[&str] =
     &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
 
-fn normalize_unit_score(value: f64) -> f64 {
+fn clamp_display_score(value: f64) -> f64 {
     if !value.is_finite() {
         return 0.0;
     }
@@ -125,7 +125,7 @@ fn preferred_character_name(
 }
 
 fn compute_visibility_score(entity: &EntityRecord, max_last_seen_chapter: i64) -> f64 {
-    let normalized_importance = normalize_unit_score(entity.importance_score);
+    let normalized_importance = clamp_display_score(entity.importance_score);
     let chapter_window = (max_last_seen_chapter.max(entity.last_seen_chapter) + 1).max(1) as f64;
     let span = (entity.last_seen_chapter - entity.first_seen_chapter + 1).max(1) as f64;
     let span_score = (span + 1.0).ln() / (chapter_window + 1.0).ln();
@@ -228,7 +228,7 @@ async fn project_character_card_from_db(
         name: display_name,
         aliases: alias_names,
         summary: entity.short_summary,
-        importance: normalize_unit_score(entity.importance_score),
+        importance: clamp_display_score(entity.importance_score),
         first_seen_chapter: entity.first_seen_chapter,
         last_seen_chapter: entity.last_seen_chapter,
         current_states,
@@ -298,7 +298,7 @@ async fn project_character_list_from_db(
             name: display_name,
             aliases: alias_names,
             summary: entity.short_summary,
-            importance: normalize_unit_score(entity.importance_score),
+            importance: clamp_display_score(entity.importance_score),
             first_seen_chapter: entity.first_seen_chapter,
             last_seen_chapter: entity.last_seen_chapter,
             visibility_score,
@@ -436,12 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn character_projection_score_normalization_only_clamps_canonical_value() {
-        assert_eq!(normalize_unit_score(0.72), 0.72);
-        assert_eq!(normalize_unit_score(8.0), 1.0);
-        assert_eq!(normalize_unit_score(90.0), 1.0);
-        assert_eq!(normalize_unit_score(-0.2), 0.0);
-        assert_eq!(normalize_unit_score(f64::NAN), 0.0);
+    fn character_projection_display_score_only_clamps_canonical_value() {
+        assert_eq!(clamp_display_score(0.72), 0.72);
+        assert_eq!(clamp_display_score(8.0), 1.0);
+        assert_eq!(clamp_display_score(90.0), 1.0);
+        assert_eq!(clamp_display_score(-0.2), 0.0);
+        assert_eq!(clamp_display_score(f64::NAN), 0.0);
     }
 
     #[test]

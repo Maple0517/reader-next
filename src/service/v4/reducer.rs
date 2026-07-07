@@ -1,4 +1,3 @@
-use crate::storage::db::v4::claim_repo::{ClaimRecord, ClaimRepo};
 use crate::storage::db::v4::entity_repo::EntityRepo;
 use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::knowledge_repo::KnowledgeRepo;
@@ -994,66 +993,6 @@ mod knowledge_reducer_tests {
             .unwrap();
         assert!(cached.is_none());
     }
-}
-
-/// Reduce claims into canonical state within a transaction.
-///
-/// Rules:
-/// - Only processes claims with status='proposed' and risk_level in ('low', 'medium')
-/// - Character/profile claims are owned by `character_processor` -> `apply_character_write`
-/// - minor_event: skip (ledger-only)
-/// - All claims in the batch commit/rollback together
-/// - Successful claims marked as 'accepted'
-pub async fn reduce_claims(
-    claims: &[ClaimRecord],
-    _book_id: &str,
-    pool: &SqlitePool,
-) -> anyhow::Result<ReductionResult> {
-    let mut result = ReductionResult::default();
-
-    // Filter to only proposed, low/medium risk claims
-    let reducible: Vec<&ClaimRecord> = claims
-        .iter()
-        .filter(|c| c.status == "proposed" && (c.risk_level == "low" || c.risk_level == "medium"))
-        .collect();
-
-    if reducible.is_empty() {
-        return Ok(result);
-    }
-
-    // Start transaction - all operations use the same connection for atomicity
-    let mut tx = pool.begin().await?;
-
-    for claim in &reducible {
-        match claim.claim_type.as_str() {
-            "entity_introduction" | "alias" | "property_update" => {
-                result.claims_skipped.push(claim.id.clone());
-            }
-            // minor_event and unknown types: ledger-only, intentionally not reduced.
-            // proposed status does not mean pending canonical work.
-            // These claims are preserved in the claims table for audit
-            // but do not block processing_progress or trigger retry.
-            _ => {
-                result.claims_skipped.push(claim.id.clone());
-            }
-        }
-    }
-
-    // Mark only processed claims (not skipped) as accepted
-    let accepted_ids: Vec<String> = reducible
-        .iter()
-        .filter(|c| !result.claims_skipped.contains(&c.id))
-        .map(|c| c.id.clone())
-        .collect();
-    if !accepted_ids.is_empty() {
-        ClaimRepo::batch_update_claim_status_with_conn(&mut *tx, &accepted_ids, "accepted").await?;
-    }
-    result.claims_accepted = accepted_ids;
-
-    // Commit transaction - all or nothing
-    tx.commit().await?;
-
-    Ok(result)
 }
 
 // --- Character Reducer ---
@@ -2381,6 +2320,7 @@ async fn apply_relationship_write_with_conn(
 mod tests {
     use super::*;
     use crate::storage::db;
+    use crate::storage::db::v4::claim_repo::ClaimRepo;
 
     async fn setup() -> (SqlitePool, ClaimRepo, EntityRepo, PropertyRepo) {
         let dir = std::env::temp_dir().join(format!("reader-v4-reducer-{}", uuid::Uuid::new_v4()));
@@ -2412,100 +2352,6 @@ mod tests {
         let property_repo = PropertyRepo::new(pool.clone());
 
         (pool, claim_repo, entity_repo, property_repo)
-    }
-
-    #[tokio::test]
-    async fn reduce_skips_high_risk_claims() {
-        let (pool, claim_repo, _entity_repo, _property_repo) = setup().await;
-
-        let span_id: (String,) =
-            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let run_id: (String,) =
-            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        // Create high-risk claim (quarantined)
-        let claim = claim_repo
-            .create_claim(
-                "b1",
-                1,
-                "property_update",
-                Some("张三"),
-                None,
-                None,
-                None,
-                "life_status = 死亡",
-                Some("死亡"),
-                None,
-                &span_id.0,
-                &run_id.0,
-                0.95,
-                "high",
-            )
-            .await
-            .unwrap();
-
-        // Mark as quarantined (simulating claim_writer behavior)
-        claim_repo
-            .update_claim_status(&claim.id, "quarantined")
-            .await
-            .unwrap();
-
-        let claims = vec![claim];
-        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
-
-        // Should be skipped
-        assert_eq!(result.entities_created.len(), 0);
-        assert_eq!(result.claims_accepted.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn reduce_skips_minor_event_claims() {
-        let (pool, claim_repo, _entity_repo, _property_repo) = setup().await;
-
-        let span_id: (String,) =
-            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let run_id: (String,) =
-            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        // Create minor_event claim
-        let claim = claim_repo
-            .create_claim(
-                "b1",
-                1,
-                "minor_event",
-                Some("张三"),
-                None,
-                None,
-                None,
-                "张三和李四切磋",
-                None,
-                None,
-                &span_id.0,
-                &run_id.0,
-                0.8,
-                "low",
-            )
-            .await
-            .unwrap();
-
-        let claims = vec![claim];
-        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
-
-        // minor_event is skipped by reducer
-        assert_eq!(result.entities_created.len(), 0);
-        assert_eq!(result.claims_skipped.len(), 1);
     }
 
     #[tokio::test]
@@ -2711,54 +2557,6 @@ mod tests {
         assert_eq!(current.value_text.as_deref(), Some("金丹"));
         let updated = entity_repo.get_by_id(&entity.id).await.unwrap().unwrap();
         assert_eq!(updated.last_seen_chapter, 4);
-    }
-
-    #[tokio::test]
-    async fn generic_reduce_claims_no_longer_applies_character_profile_claims() {
-        let (pool, claim_repo, entity_repo, _property_repo) = setup().await;
-        let span_id: (String,) =
-            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let run_id: (String,) =
-            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let claim = claim_repo
-            .create_claim(
-                "b1",
-                1,
-                "entity_introduction",
-                Some("旧桥角色"),
-                None,
-                None,
-                None,
-                "is a character",
-                None,
-                Some(r#"{"entity_type":"character","aliases":["旧桥"]}"#),
-                &span_id.0,
-                &run_id.0,
-                0.9,
-                "low",
-            )
-            .await
-            .unwrap();
-
-        let result = reduce_claims(&[claim.clone()], "b1", &pool).await.unwrap();
-
-        assert!(result.claims_accepted.is_empty());
-        assert!(
-            entity_repo
-                .find_entity_by_alias("b1", "旧桥角色")
-                .await
-                .unwrap()
-                .is_none(),
-            "generic reducer must not apply character/profile claims; character_processor owns typed commands"
-        );
-        let stored = claim_repo.get_claim(&claim.id).await.unwrap().unwrap();
-        assert_eq!(stored.status, "proposed");
     }
 
     // --- Relationship Reducer Tests ---
