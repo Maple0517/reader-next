@@ -66,10 +66,12 @@ pub struct JudgeOutput {
 /// Callers must pre-fetch subject/object entities before calling this function.
 ///
 /// This is the actual implementation. Callers fetch entities before calling this.
-pub fn structural_gate(
+pub fn structural_gate_with_relationship_fields(
     claim: &ClaimRecord,
     subject_entity: Option<&EntityRecord>,
     object_entity: Option<&EntityRecord>,
+    relation_group: &str,
+    is_long_term_hint: bool,
 ) -> GateResult {
     // Rule 1: subject_entity_id must exist and entity must be character
     let _subject_entity_id = match &claim.subject_entity_id {
@@ -97,16 +99,7 @@ pub fn structural_gate(
     }
 
     // Rule 3: relation_group must be in VALID_RELATION_GROUPS
-    let relation_group = claim
-        .value_json
-        .as_ref()
-        .and_then(|vj| {
-            let v: serde_json::Value = serde_json::from_str(vj).ok()?;
-            v.get("relation_group")?.as_str().map(|s| s.to_string())
-        })
-        .unwrap_or_default();
-
-    if relation_group.is_empty() || !VALID_RELATION_GROUPS.contains(&relation_group.as_str()) {
+    if relation_group.is_empty() || !VALID_RELATION_GROUPS.contains(&relation_group) {
         return GateResult::Reject(format!(
             "invalid or missing relation_group: '{}'",
             relation_group
@@ -127,18 +120,6 @@ pub fn structural_gate(
             claim.confidence, STRUCTURAL_CONFIDENCE_THRESHOLD
         ));
     }
-
-    // Extract hint fields from value_json
-    let value_json: serde_json::Value = claim
-        .value_json
-        .as_ref()
-        .and_then(|vj| serde_json::from_str(vj).ok())
-        .unwrap_or(serde_json::Value::Null);
-
-    let is_long_term_hint = value_json
-        .get("is_long_term_or_significant_hint")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
 
     // Rule 6: Redirect rules based on structural signals
     // Object resolved as non-character entity → Redirect (unconditional)
@@ -697,7 +678,7 @@ impl RealAiRelationshipJudge {
 }
 
 #[axum::async_trait]
-impl crate::service::v4::pipeline::Judge for RealAiRelationshipJudge {
+impl crate::service::v4::relationship_processor::Judge for RealAiRelationshipJudge {
     async fn judge(&self, claim: &ClaimRecord) -> anyhow::Result<JudgeOutput> {
         use crate::storage::db::v4::entity_repo::EntityRepo;
         use crate::storage::db::v4::property_repo::PropertyRepo;
@@ -839,6 +820,34 @@ mod tests {
         }
     }
 
+    fn structural_gate(
+        claim: &ClaimRecord,
+        subject_entity: Option<&EntityRecord>,
+        object_entity: Option<&EntityRecord>,
+    ) -> GateResult {
+        let value_json: serde_json::Value = claim
+            .value_json
+            .as_ref()
+            .and_then(|vj| serde_json::from_str(vj).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let relation_group = value_json
+            .get("relation_group")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let is_long_term_hint = value_json
+            .get("is_long_term_or_significant_hint")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        structural_gate_with_relationship_fields(
+            claim,
+            subject_entity,
+            object_entity,
+            relation_group,
+            is_long_term_hint,
+        )
+    }
+
     #[test]
     fn subject_is_character_object_is_character_pass() {
         let claim = make_claim(
@@ -853,6 +862,37 @@ mod tests {
         let object = make_entity("obj1", "character");
 
         let result = structural_gate(&claim, Some(&subject), Some(&object));
+        assert_eq!(result, GateResult::Pass);
+    }
+
+    #[test]
+    fn typed_structural_gate_does_not_reparse_claim_value_json() {
+        let mut claim = make_claim(
+            Some("subj1"),
+            Some("obj1"),
+            0.8,
+            "friendship",
+            true,
+            "span1",
+        );
+        claim.value_json = Some(
+            serde_json::json!({
+                "relation_group": "invalid_group",
+                "is_long_term_or_significant_hint": false,
+            })
+            .to_string(),
+        );
+        let subject = make_entity("subj1", "character");
+        let object = make_entity("obj1", "character");
+
+        let result = structural_gate_with_relationship_fields(
+            &claim,
+            Some(&subject),
+            Some(&object),
+            "friendship",
+            true,
+        );
+
         assert_eq!(result, GateResult::Pass);
     }
 

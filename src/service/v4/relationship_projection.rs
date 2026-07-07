@@ -1,11 +1,10 @@
 use crate::storage::db::v4::cache_repo::CacheRepo;
 use crate::storage::db::v4::entity_repo::EntityRepo;
-use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::relationship_repo::{
     RelationshipEventRepo, RelationshipRecord, RelationshipRepo,
 };
 use sqlx::SqlitePool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 const RELATIONSHIP_GRAPH_CACHE_TYPE: &str = "relationship_graph";
 const RELATIONSHIP_LIST_CACHE_TYPE: &str = "relationship_list";
@@ -70,24 +69,14 @@ const GENERIC_CHARACTER_LABELS: &[&str] = &[
     "中年女人",
 ];
 
-const GENERIC_CHARACTER_SUFFIXES: &[&str] = &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
+const GENERIC_CHARACTER_SUFFIXES: &[&str] =
+    &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
 
 fn normalize_unit_score(value: f64) -> f64 {
     if !value.is_finite() {
         return 0.0;
     }
-    let normalized = if value > 1.0 && value.fract().abs() < f64::EPSILON {
-        if value <= 10.0 {
-            value / 10.0
-        } else if value <= 100.0 {
-            value / 100.0
-        } else {
-            1.0
-        }
-    } else {
-        value
-    };
-    normalized.clamp(0.0, 1.0)
+    value.clamp(0.0, 1.0)
 }
 
 fn looks_generic_character_label(name: &str) -> bool {
@@ -104,9 +93,14 @@ fn looks_generic_character_label(name: &str) -> bool {
 
 fn alias_display_rank(alias: &str) -> (i32, usize, usize) {
     let trimmed = alias.trim();
-    let generic_penalty = if looks_generic_character_label(trimmed) { 1 } else { 0 };
+    let generic_penalty = if looks_generic_character_label(trimmed) {
+        1
+    } else {
+        0
+    };
     let honorific_penalty =
-        if trimmed.ends_with("叔叔") || trimmed.ends_with("先生") || trimmed.ends_with("大人") {
+        if trimmed.ends_with("叔叔") || trimmed.ends_with("先生") || trimmed.ends_with("大人")
+        {
             1
         } else {
             0
@@ -128,7 +122,9 @@ fn preferred_character_name(
         .map(String::as_str)
         .filter(|alias| {
             let trimmed = alias.trim();
-            !trimmed.is_empty() && trimmed != display_name.trim() && trimmed != canonical_name.trim()
+            !trimmed.is_empty()
+                && trimmed != display_name.trim()
+                && trimmed != canonical_name.trim()
         })
         .collect();
     candidates.sort_by_key(|alias| alias_display_rank(alias));
@@ -140,90 +136,8 @@ fn preferred_character_name(
         .to_string()
 }
 
-fn normalized_family_signature(label: &str) -> Option<&'static str> {
-    let lowered = label.trim().to_lowercase();
-    match lowered.as_str() {
-        "夫妻" | "夫妇" | "配偶" | "spouse" | "spouses" | "husband-wife" => Some("spouse"),
-        "兄弟" | "姐妹" | "兄妹" | "姐弟" | "sibling" | "siblings" => Some("sibling"),
-        "母子" | "父子" | "母女" | "父女" | "母亲" | "父亲" | "mother" | "father"
-        | "parent-child" | "parent" => Some("parent_child"),
-        _ => None,
-    }
-}
-
-fn canonical_family_label(signature: &str) -> &'static str {
-    match signature {
-        "spouse" => "夫妻",
-        "sibling" => "兄弟姐妹",
-        "parent_child" => "亲子",
-        _ => "家族",
-    }
-}
-
-fn is_edge_preferred(candidate: &RelationshipEdge, current: &RelationshipEdge) -> bool {
-    candidate.last_seen_chapter > current.last_seen_chapter
-        || (candidate.last_seen_chapter == current.last_seen_chapter
-            && normalize_unit_score(candidate.importance_score)
-                > normalize_unit_score(current.importance_score))
-        || (candidate.last_seen_chapter == current.last_seen_chapter
-            && (normalize_unit_score(candidate.importance_score)
-                - normalize_unit_score(current.importance_score))
-            .abs()
-                < f64::EPSILON
-            && candidate.confidence > current.confidence)
-}
-
-fn dedupe_relationship_edges(edges: Vec<RelationshipEdge>) -> Vec<RelationshipEdge> {
-    let mut merged = Vec::new();
-    let mut family_map: HashMap<String, RelationshipEdge> = HashMap::new();
-
-    for edge in edges {
-        if edge.group != "family" {
-            merged.push(edge);
-            continue;
-        }
-        let Some(signature) = normalized_family_signature(&edge.label) else {
-            merged.push(edge);
-            continue;
-        };
-
-        let (left, right) = if edge.source_id <= edge.target_id {
-            (&edge.source_id, &edge.target_id)
-        } else {
-            (&edge.target_id, &edge.source_id)
-        };
-        let key = format!("family::{signature}::{left}::{right}");
-        match family_map.remove(&key) {
-            None => {
-                family_map.insert(key, edge);
-            }
-            Some(existing) => {
-                let preferred = if is_edge_preferred(&edge, &existing) {
-                    edge.clone()
-                } else {
-                    existing.clone()
-                };
-                let mut combined = preferred;
-                combined.label = canonical_family_label(signature).to_string();
-                combined.directionality = "undirected".to_string();
-                combined.importance_score =
-                    normalize_unit_score(existing.importance_score.max(edge.importance_score));
-                combined.confidence = existing.confidence.max(edge.confidence);
-                combined.first_seen_chapter =
-                    existing.first_seen_chapter.min(edge.first_seen_chapter);
-                combined.last_changed_chapter =
-                    existing.last_changed_chapter.max(edge.last_changed_chapter);
-                combined.last_seen_chapter = existing.last_seen_chapter.max(edge.last_seen_chapter);
-                combined.event_count = existing.event_count + edge.event_count;
-                combined.evidence_available =
-                    existing.evidence_available || edge.evidence_available;
-                family_map.insert(key, combined);
-            }
-        }
-    }
-
-    merged.extend(family_map.into_values());
-    merged.sort_by(|left, right| {
+fn sort_relationship_edges(mut edges: Vec<RelationshipEdge>) -> Vec<RelationshipEdge> {
+    edges.sort_by(|left, right| {
         left.group
             .cmp(&right.group)
             .then_with(|| right.last_seen_chapter.cmp(&left.last_seen_chapter))
@@ -234,7 +148,7 @@ fn dedupe_relationship_edges(edges: Vec<RelationshipEdge>) -> Vec<RelationshipEd
             })
             .then_with(|| left.label.cmp(&right.label))
     });
-    merged
+    edges
 }
 
 // --- Projection Functions ---
@@ -328,27 +242,18 @@ pub async fn project_relationship_edges_for_character(
     pool: &SqlitePool,
 ) -> anyhow::Result<Vec<RelationshipEdge>> {
     let rel_repo = RelationshipRepo::new(pool.clone());
-    let identity_repo = IdentityRepo::new(pool.clone());
     let event_repo = RelationshipEventRepo::new(pool.clone());
-    let resolved_character_id = identity_repo
-        .resolve_redirect_target(book_id, character_id)
-        .await?
-        .unwrap_or_else(|| character_id.to_string());
 
     let relationships = rel_repo.list_active_by_book(book_id).await?;
     let mut edges = Vec::new();
     for rel in relationships {
-        let Some(edge) =
-            build_edge_for_relationship_in_book(book_id, &rel, &event_repo, &identity_repo).await?
-        else {
-            continue;
-        };
-        if edge.source_id == resolved_character_id || edge.target_id == resolved_character_id {
+        let edge = build_edge_for_relationship(&rel, &event_repo).await?;
+        if edge.source_id == character_id || edge.target_id == character_id {
             edges.push(edge);
         }
     }
 
-    Ok(dedupe_relationship_edges(edges))
+    Ok(sort_relationship_edges(edges))
 }
 
 pub async fn project_relationship_edges_for_chapter(
@@ -357,7 +262,6 @@ pub async fn project_relationship_edges_for_chapter(
     pool: &SqlitePool,
 ) -> anyhow::Result<Vec<RelationshipEdge>> {
     let rel_repo = RelationshipRepo::new(pool.clone());
-    let identity_repo = IdentityRepo::new(pool.clone());
     let event_repo = RelationshipEventRepo::new(pool.clone());
 
     let relationship_pairs = rel_repo
@@ -365,15 +269,11 @@ pub async fn project_relationship_edges_for_chapter(
         .await?;
     let mut edges = Vec::new();
     for (_event, rel) in relationship_pairs {
-        let Some(edge) =
-            build_edge_for_relationship_in_book(book_id, &rel, &event_repo, &identity_repo).await?
-        else {
-            continue;
-        };
+        let edge = build_edge_for_relationship(&rel, &event_repo).await?;
         edges.push(edge);
     }
 
-    Ok(dedupe_relationship_edges(edges))
+    Ok(sort_relationship_edges(edges))
 }
 
 /// Build `RelationshipEdge` for a relationship record, fetching event count and latest claim ID.
@@ -409,20 +309,6 @@ pub async fn build_edge_for_relationship(
     })
 }
 
-pub async fn build_edge_for_relationship_in_book(
-    book_id: &str,
-    rel: &RelationshipRecord,
-    event_repo: &RelationshipEventRepo,
-    identity_repo: &IdentityRepo,
-) -> anyhow::Result<Option<RelationshipEdge>> {
-    let Some(resolved) = resolve_relationship_redirects(book_id, rel, identity_repo).await? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        build_edge_for_relationship(&resolved, event_repo).await?,
-    ))
-}
-
 /// Invalidate relationship cache entries for a book.
 pub async fn invalidate_relationship_cache(book_id: &str, pool: &SqlitePool) -> anyhow::Result<()> {
     let cache_repo = CacheRepo::new(pool.clone());
@@ -443,23 +329,14 @@ async fn project_relationship_graph_from_db(
 ) -> anyhow::Result<RelationshipGraphView> {
     let rel_repo = RelationshipRepo::new(pool.clone());
     let entity_repo = EntityRepo::new(pool.clone());
-    let identity_repo = IdentityRepo::new(pool.clone());
     let event_repo = RelationshipEventRepo::new(pool.clone());
 
     // Only active relationships
     let relationships = rel_repo.list_active_by_book(book_id).await?;
-    let mut resolved_relationships = Vec::new();
-    for rel in relationships {
-        if let Some(resolved) =
-            resolve_relationship_redirects(book_id, &rel, &identity_repo).await?
-        {
-            resolved_relationships.push(resolved);
-        }
-    }
 
     // Collect unique entity IDs
     let mut entity_ids: HashSet<String> = HashSet::new();
-    for rel in &resolved_relationships {
+    for rel in &relationships {
         entity_ids.insert(rel.subject_character_id.clone());
         entity_ids.insert(rel.object_character_id.clone());
     }
@@ -488,12 +365,12 @@ async fn project_relationship_graph_from_db(
     // Build edges with event info
     let mut edges = Vec::new();
     let mut groups: HashSet<String> = HashSet::new();
-    for rel in &resolved_relationships {
+    for rel in &relationships {
         groups.insert(rel.relation_group.clone());
         let edge = build_edge_for_relationship(rel, &event_repo).await?;
         edges.push(edge);
     }
-    let edges = dedupe_relationship_edges(edges);
+    let edges = sort_relationship_edges(edges);
     groups = edges.iter().map(|edge| edge.group.clone()).collect();
 
     let mut groups_vec: Vec<String> = groups.into_iter().collect();
@@ -505,30 +382,6 @@ async fn project_relationship_graph_from_db(
         edges,
         groups: groups_vec,
     })
-}
-
-async fn resolve_relationship_redirects(
-    book_id: &str,
-    rel: &RelationshipRecord,
-    identity_repo: &IdentityRepo,
-) -> anyhow::Result<Option<RelationshipRecord>> {
-    let subject = identity_repo
-        .resolve_redirect_target(book_id, &rel.subject_character_id)
-        .await?
-        .unwrap_or_else(|| rel.subject_character_id.clone());
-    let object = identity_repo
-        .resolve_redirect_target(book_id, &rel.object_character_id)
-        .await?
-        .unwrap_or_else(|| rel.object_character_id.clone());
-
-    if subject == object {
-        return Ok(None);
-    }
-
-    let mut resolved = rel.clone();
-    resolved.subject_character_id = subject;
-    resolved.object_character_id = object;
-    Ok(Some(resolved))
 }
 
 #[cfg(test)]
@@ -588,6 +441,15 @@ mod tests {
             .bind(&claim_id).bind(chapter).bind(&span_id).bind(&run_id).execute(pool).await.unwrap();
 
         (e1.id, e2.id, claim_id)
+    }
+
+    #[test]
+    fn relationship_projection_score_normalization_only_clamps_canonical_value() {
+        assert_eq!(normalize_unit_score(0.72), 0.72);
+        assert_eq!(normalize_unit_score(8.0), 1.0);
+        assert_eq!(normalize_unit_score(90.0), 1.0);
+        assert_eq!(normalize_unit_score(-0.2), 0.0);
+        assert_eq!(normalize_unit_score(f64::NAN), 0.0);
     }
 
     #[tokio::test]
@@ -664,7 +526,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_relationship_graph_dedupes_inverse_family_edges_and_prefers_specific_alias() {
+    async fn project_relationship_graph_preserves_canonical_family_edges_and_prefers_specific_alias(
+    ) {
         let pool = setup().await;
         let (_, _, claim_id_1) = seed_full(&pool, 16).await;
         let claim_id_2 = uuid::Uuid::new_v4().to_string();
@@ -773,17 +636,32 @@ mod tests {
         assert!(node_names.contains(&"乔尔"));
         assert!(!node_names.contains(&"中年男子"));
 
-        assert_eq!(graph.edges.len(), 1);
-        let edge = &graph.edges[0];
-        assert_eq!(edge.group, "family");
-        assert_eq!(edge.label, "亲子");
-        assert_eq!(edge.directionality, "undirected");
-        assert!((edge.importance_score - 0.98).abs() < f64::EPSILON);
-        assert_eq!(edge.event_count, 2);
+        assert_eq!(graph.edges.len(), 2);
+        let mother_edge = graph
+            .edges
+            .iter()
+            .find(|edge| edge.label == "mother")
+            .unwrap();
+        assert_eq!(mother_edge.group, "family");
+        assert_eq!(mother_edge.source_id, generic.id);
+        assert_eq!(mother_edge.target_id, child.id);
+        assert_eq!(mother_edge.directionality, "directed");
+        assert_eq!(mother_edge.event_count, 1);
+
+        let chinese_mother_edge = graph
+            .edges
+            .iter()
+            .find(|edge| edge.label == "母亲")
+            .unwrap();
+        assert_eq!(chinese_mother_edge.group, "family");
+        assert_eq!(chinese_mother_edge.source_id, child.id);
+        assert_eq!(chinese_mother_edge.target_id, generic.id);
+        assert_eq!(chinese_mother_edge.directionality, "directed");
+        assert_eq!(chinese_mother_edge.event_count, 1);
     }
 
     #[tokio::test]
-    async fn project_relationship_edges_for_character_dedupes_inverse_family_edges() {
+    async fn project_relationship_edges_for_character_preserves_canonical_family_edges() {
         let pool = setup().await;
         let (_, _, claim_id_1) = seed_full(&pool, 16).await;
         let claim_id_2 = uuid::Uuid::new_v4().to_string();
@@ -814,18 +692,8 @@ mod tests {
 
         let rel1 = rel_repo
             .create_relationship(
-                "b1",
-                &parent.id,
-                &child.id,
-                "family",
-                "mother",
-                "directed",
-                None,
-                0.85,
-                "positive",
-                0.9,
-                0.82,
-                16,
+                "b1", &parent.id, &child.id, "family", "mother", "directed", None, 0.85,
+                "positive", 0.9, 0.82, 16,
             )
             .await
             .unwrap();
@@ -848,18 +716,8 @@ mod tests {
 
         let rel2 = rel_repo
             .create_relationship(
-                "b1",
-                &child.id,
-                &parent.id,
-                "family",
-                "母亲",
-                "directed",
-                None,
-                0.86,
-                "positive",
-                0.92,
-                0.98,
-                17,
+                "b1", &child.id, &parent.id, "family", "母亲", "directed", None, 0.86, "positive",
+                0.92, 0.98, 17,
             )
             .await
             .unwrap();
@@ -884,12 +742,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(edges.len(), 1);
-        let edge = &edges[0];
-        assert_eq!(edge.group, "family");
-        assert_eq!(edge.label, "亲子");
-        assert_eq!(edge.directionality, "undirected");
-        assert_eq!(edge.event_count, 2);
+        assert_eq!(edges.len(), 2);
+        let mother_edge = edges.iter().find(|edge| edge.label == "mother").unwrap();
+        assert_eq!(mother_edge.group, "family");
+        assert_eq!(mother_edge.source_id, parent.id);
+        assert_eq!(mother_edge.target_id, child.id);
+        assert_eq!(mother_edge.directionality, "directed");
+        assert_eq!(mother_edge.event_count, 1);
+
+        let chinese_mother_edge = edges.iter().find(|edge| edge.label == "母亲").unwrap();
+        assert_eq!(chinese_mother_edge.group, "family");
+        assert_eq!(chinese_mother_edge.source_id, child.id);
+        assert_eq!(chinese_mother_edge.target_id, parent.id);
+        assert_eq!(chinese_mother_edge.directionality, "directed");
+        assert_eq!(chinese_mother_edge.event_count, 1);
     }
 
     #[tokio::test]
@@ -997,7 +863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_relationship_graph_resolves_redirected_victim_entities() {
+    async fn project_relationship_graph_preserves_canonical_relationship_ids_without_redirect() {
         let pool = setup().await;
         let entity_repo = EntityRepo::new(pool.clone());
         let rel_repo = RelationshipRepo::new(pool.clone());
@@ -1110,15 +976,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(graph.nodes.iter().all(|node| node.id != victim.id));
-        assert!(graph.nodes.iter().any(|node| node.id == survivor.id));
+        assert!(graph.nodes.iter().any(|node| node.id == victim.id));
+        assert!(graph.nodes.iter().all(|node| node.id != survivor.id));
         assert_eq!(graph.edges.len(), 1);
-        assert_eq!(graph.edges[0].source_id, survivor.id);
+        assert_eq!(graph.edges[0].source_id, victim.id);
         assert_eq!(graph.edges[0].target_id, other.id);
     }
 
     #[tokio::test]
-    async fn build_edge_for_relationship_in_book_resolves_redirected_victim_entity() {
+    async fn build_edge_for_relationship_preserves_canonical_relationship_ids_even_when_redirect_exists(
+    ) {
         let pool = setup().await;
         let entity_repo = EntityRepo::new(pool.clone());
         let rel_repo = RelationshipRepo::new(pool.clone());
@@ -1189,17 +1056,15 @@ mod tests {
             .await
             .unwrap();
 
-        let edge = build_edge_for_relationship_in_book("b1", &rel, &ev_repo, &identity_repo)
-            .await
-            .unwrap()
-            .unwrap();
+        let edge = build_edge_for_relationship(&rel, &ev_repo).await.unwrap();
 
-        assert_eq!(edge.source_id, survivor.id);
+        assert_eq!(edge.source_id, victim.id);
         assert_eq!(edge.target_id, other.id);
     }
 
     #[tokio::test]
-    async fn project_relationship_edges_for_character_includes_redirected_victim_edges() {
+    async fn project_relationship_edges_for_character_uses_canonical_relationship_ids_without_redirect(
+    ) {
         let pool = setup().await;
         let entity_repo = EntityRepo::new(pool.clone());
         let rel_repo = RelationshipRepo::new(pool.clone());
@@ -1270,13 +1135,17 @@ mod tests {
             .await
             .unwrap();
 
-        let edges = project_relationship_edges_for_character("b1", &survivor.id, &pool)
+        let survivor_edges = project_relationship_edges_for_character("b1", &survivor.id, &pool)
             .await
             .unwrap();
+        assert!(survivor_edges.is_empty());
 
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].source_id, survivor.id);
-        assert_eq!(edges[0].target_id, other.id);
+        let victim_edges = project_relationship_edges_for_character("b1", &victim.id, &pool)
+            .await
+            .unwrap();
+        assert_eq!(victim_edges.len(), 1);
+        assert_eq!(victim_edges[0].source_id, victim.id);
+        assert_eq!(victim_edges[0].target_id, other.id);
     }
 
     #[tokio::test]

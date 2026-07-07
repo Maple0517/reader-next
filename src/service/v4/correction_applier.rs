@@ -1,7 +1,14 @@
 use crate::service::v4::correction::{CorrectionCommand, CorrectionValidationService};
+use crate::service::v4::place_reducer::{
+    apply_place_edge_status_write_with_conn, PlaceEdgeStatusWriteCommand, PlaceReductionResult,
+};
+use crate::service::v4::reducer::{
+    apply_knowledge_assertion_status_write_with_conn, apply_relationship_status_write_with_conn,
+    KnowledgeAssertionStatus, KnowledgeAssertionStatusWriteCommand, KnowledgeReductionResult,
+    RelationshipReductionResult, RelationshipStatusWriteCommand,
+};
 use crate::storage::db::v4::claim_repo::ClaimRepo;
 use crate::storage::db::v4::quality_repo::{NewCorrectionEvent, QualityRepo, UserCorrectionRecord};
-use crate::storage::db::v4::relationship_repo::{RelationshipRecord, RelationshipRepo};
 use sqlx::{SqliteConnection, SqlitePool};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,55 +161,51 @@ impl CorrectionApplier {
                 "identity correction apply is handled by identity reducer in a later route"
             )),
             "deactivate_relationship" => {
-                let relationship = self
-                    .get_relationship_for_update(conn, &correction.book_id, &correction.target_id)
-                    .await?;
-                RelationshipRepo::update_relationship_with_conn(
+                let mut result = RelationshipReductionResult::default();
+                apply_relationship_status_write_with_conn(
+                    &RelationshipStatusWriteCommand {
+                        book_id: correction.book_id.clone(),
+                        relationship_id: correction.target_id.clone(),
+                        status: "inactive".to_string(),
+                    },
                     conn,
-                    &relationship.id,
-                    &relationship.relation_label,
-                    relationship.current_state.as_deref(),
-                    relationship.strength,
-                    &relationship.polarity,
-                    relationship.confidence,
-                    relationship.importance_score,
-                    relationship.last_changed_chapter,
-                    relationship.last_seen_chapter,
-                    "inactive",
+                    &mut result,
                 )
                 .await?;
-                self.invalidate_cache(conn, &correction.book_id, "relationship_graph", "__book__")
-                    .await?;
-                self.invalidate_cache(conn, &correction.book_id, "relationship_list", "__book__")
-                    .await?;
                 Ok(format!(
                     "{{\"relationshipId\":\"{}\",\"status\":\"inactive\"}}",
                     correction.target_id
                 ))
             }
             "mark_knowledge_assertion_false" => {
-                self.update_status(
+                let mut result = KnowledgeReductionResult::default();
+                apply_knowledge_assertion_status_write_with_conn(
+                    &KnowledgeAssertionStatusWriteCommand {
+                        book_id: correction.book_id.clone(),
+                        assertion_id: correction.target_id.clone(),
+                        status: KnowledgeAssertionStatus::FalseInWorld,
+                    },
                     conn,
-                    "UPDATE knowledge_assertions SET status = 'false_in_world', updated_at = datetime('now') WHERE book_id = ? AND id = ?",
-                    &correction.book_id,
-                    &correction.target_id,
+                    &mut result,
                 )
                 .await?;
-                self.invalidate_all_cache(conn, &correction.book_id).await?;
                 Ok(format!(
                     "{{\"assertionId\":\"{}\",\"status\":\"false_in_world\"}}",
                     correction.target_id
                 ))
             }
             "deactivate_place_edge" => {
-                self.update_status(
+                let mut result = PlaceReductionResult::default();
+                apply_place_edge_status_write_with_conn(
+                    &PlaceEdgeStatusWriteCommand {
+                        book_id: correction.book_id.clone(),
+                        edge_id: correction.target_id.clone(),
+                        status: "deprecated".to_string(),
+                    },
                     conn,
-                    "UPDATE place_edges SET status = 'deprecated', updated_at = datetime('now') WHERE book_id = ? AND id = ?",
-                    &correction.book_id,
-                    &correction.target_id,
+                    &mut result,
                 )
                 .await?;
-                self.invalidate_all_cache(conn, &correction.book_id).await?;
                 Ok(format!(
                     "{{\"placeEdgeId\":\"{}\",\"status\":\"deprecated\"}}",
                     correction.target_id
@@ -224,59 +227,6 @@ impl CorrectionApplier {
             )),
             other => Err(anyhow::anyhow!("unsupported correction_type: {}", other)),
         }
-    }
-
-    async fn get_relationship_for_update(
-        &self,
-        conn: &mut SqliteConnection,
-        book_id: &str,
-        relationship_id: &str,
-    ) -> anyhow::Result<RelationshipRecord> {
-        sqlx::query_as::<_, RelationshipRecord>(
-            "SELECT id, book_id, subject_character_id, object_character_id, relation_group, relation_label, directionality, current_state, strength, polarity, confidence, importance_score, first_seen_chapter, last_changed_chapter, last_seen_chapter, status, created_at, updated_at
-             FROM relationships WHERE book_id = ? AND id = ?",
-        )
-        .bind(book_id)
-        .bind(relationship_id)
-        .fetch_optional(conn)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("relationship not found"))
-    }
-
-    async fn update_status(
-        &self,
-        conn: &mut SqliteConnection,
-        sql: &str,
-        book_id: &str,
-        target_id: &str,
-    ) -> anyhow::Result<()> {
-        let result = sqlx::query(sql)
-            .bind(book_id)
-            .bind(target_id)
-            .execute(conn)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(anyhow::anyhow!("correction target was not updated"));
-        }
-        Ok(())
-    }
-
-    async fn invalidate_cache(
-        &self,
-        conn: &mut SqliteConnection,
-        book_id: &str,
-        view_type: &str,
-        scope_id: &str,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
-            "DELETE FROM view_model_cache WHERE book_id = ? AND view_type = ? AND scope_id = ?",
-        )
-        .bind(book_id)
-        .bind(view_type)
-        .bind(scope_id)
-        .execute(conn)
-        .await?;
-        Ok(())
     }
 
     async fn invalidate_all_cache(
@@ -331,6 +281,8 @@ mod tests {
     use crate::service::v4::correction::{CorrectionCommand, CorrectionValidationService};
     use crate::storage::db;
     use crate::storage::db::v4::cache_repo::CacheRepo;
+    use crate::storage::db::v4::knowledge_repo::KnowledgeRepo;
+    use crate::storage::db::v4::place_repo::PlaceRepo;
     use sqlx::SqlitePool;
 
     async fn setup_test_db() -> SqlitePool {
@@ -382,6 +334,64 @@ mod tests {
             .unwrap();
     }
 
+    async fn seed_knowledge_assertion(pool: &SqlitePool) -> String {
+        seed_claim(pool, "knowledge_claim").await;
+        let repo = KnowledgeRepo::new(pool.clone());
+        let card = repo
+            .find_or_create_card(
+                "b1",
+                "world_rule",
+                "灵气",
+                "灵气",
+                Some("旧摘要"),
+                0.8,
+                0.7,
+                1,
+            )
+            .await
+            .unwrap();
+        repo.find_or_create_assertion(
+            "b1",
+            &card.id,
+            "knowledge_claim",
+            "灵气充盈。",
+            "active",
+            0.8,
+            0.7,
+            1,
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn seed_place_edge(pool: &SqlitePool) -> String {
+        seed_claim(pool, "place_claim").await;
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('p1', 'b1', 'place', '青云城', '青云城', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO entities (id, book_id, entity_type, canonical_name, display_name, importance_score, first_seen_chapter, last_seen_chapter, status, created_at, updated_at) VALUES ('p2', 'b1', 'place', '黑风谷', '黑风谷', 0.5, 1, 1, 'active', datetime('now'), datetime('now'))")
+            .execute(pool)
+            .await
+            .unwrap();
+        PlaceRepo::new(pool.clone())
+            .find_or_create_edge(
+                "b1",
+                "p1",
+                "p2",
+                "north_of",
+                None,
+                None,
+                0.8,
+                "place_claim",
+                1,
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
     async fn create_correction(
         pool: &SqlitePool,
         command: CorrectionCommand,
@@ -390,6 +400,26 @@ mod tests {
             .validate_and_create(command)
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn correction_applier_does_not_embed_direct_canonical_status_update_sql() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/service/v4/correction_applier.rs"
+        ))
+        .unwrap();
+
+        for forbidden in [
+            concat!("UPDATE ", "relationships SET status"),
+            concat!("UPDATE ", "knowledge_assertions SET status"),
+            concat!("UPDATE ", "place_edges SET status"),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "CorrectionApplier must route canonical status writes through reducer appliers, found {forbidden}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -496,6 +526,95 @@ mod tests {
             .is_none());
         assert!(cache_repo
             .get_cached("b1", "relationship_list", "__book__", 10)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_knowledge_assertion_false_updates_status_and_invalidates_knowledge_cache() {
+        let pool = setup_test_db().await;
+        let assertion_id = seed_knowledge_assertion(&pool).await;
+        let cache_repo = CacheRepo::new(pool.clone());
+        cache_repo
+            .set_cached("b1", "knowledge", "__book__", 10, "{\"old\":true}")
+            .await
+            .unwrap();
+        let correction = create_correction(
+            &pool,
+            CorrectionCommand {
+                book_id: "b1".to_string(),
+                target_type: "knowledge_assertion".to_string(),
+                target_id: assertion_id.clone(),
+                correction_type: "mark_knowledge_assertion_false".to_string(),
+                correction_json: "{}".to_string(),
+                source: "user".to_string(),
+                source_claim_id: None,
+                source_span_id: None,
+                created_by: "tester".to_string(),
+            },
+        )
+        .await;
+
+        let result = CorrectionApplier::new(pool.clone())
+            .apply(&correction.id, "tester")
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, CorrectionApplyStatus::Applied);
+        let status: (String,) =
+            sqlx::query_as("SELECT status FROM knowledge_assertions WHERE id = ?")
+                .bind(&assertion_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status.0, "false_in_world");
+        assert!(cache_repo
+            .get_cached("b1", "knowledge", "__book__", 10)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn deactivate_place_edge_updates_status_and_invalidates_map_cache() {
+        let pool = setup_test_db().await;
+        let edge_id = seed_place_edge(&pool).await;
+        let cache_repo = CacheRepo::new(pool.clone());
+        cache_repo
+            .set_cached("b1", "map_graph", "__book__", 10, "{\"old\":true}")
+            .await
+            .unwrap();
+        let correction = create_correction(
+            &pool,
+            CorrectionCommand {
+                book_id: "b1".to_string(),
+                target_type: "place_edge".to_string(),
+                target_id: edge_id.clone(),
+                correction_type: "deactivate_place_edge".to_string(),
+                correction_json: "{}".to_string(),
+                source: "user".to_string(),
+                source_claim_id: None,
+                source_span_id: None,
+                created_by: "tester".to_string(),
+            },
+        )
+        .await;
+
+        let result = CorrectionApplier::new(pool.clone())
+            .apply(&correction.id, "tester")
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, CorrectionApplyStatus::Applied);
+        let status: (String,) = sqlx::query_as("SELECT status FROM place_edges WHERE id = ?")
+            .bind(&edge_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status.0, "deprecated");
+        assert!(cache_repo
+            .get_cached("b1", "map_graph", "__book__", 10)
             .await
             .unwrap()
             .is_none());

@@ -1,6 +1,5 @@
 use crate::storage::db::v4::cache_repo::CacheRepo;
 use crate::storage::db::v4::entity_repo::{EntityRecord, EntityRepo};
-use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::property_repo::PropertyRepo;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -58,24 +57,14 @@ const GENERIC_CHARACTER_LABELS: &[&str] = &[
     "中年女人",
 ];
 
-const GENERIC_CHARACTER_SUFFIXES: &[&str] = &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
+const GENERIC_CHARACTER_SUFFIXES: &[&str] =
+    &["男子", "女人", "男孩", "女孩", "青年", "老人", "妇人"];
 
 fn normalize_unit_score(value: f64) -> f64 {
     if !value.is_finite() {
         return 0.0;
     }
-    let normalized = if value > 1.0 && value.fract().abs() < f64::EPSILON {
-        if value <= 10.0 {
-            value / 10.0
-        } else if value <= 100.0 {
-            value / 100.0
-        } else {
-            1.0
-        }
-    } else {
-        value
-    };
-    normalized.clamp(0.0, 1.0)
+    value.clamp(0.0, 1.0)
 }
 
 fn looks_generic_character_label(name: &str) -> bool {
@@ -92,9 +81,14 @@ fn looks_generic_character_label(name: &str) -> bool {
 
 fn alias_display_rank(alias: &str) -> (i32, usize, usize) {
     let trimmed = alias.trim();
-    let generic_penalty = if looks_generic_character_label(trimmed) { 1 } else { 0 };
+    let generic_penalty = if looks_generic_character_label(trimmed) {
+        1
+    } else {
+        0
+    };
     let honorific_penalty =
-        if trimmed.ends_with("叔叔") || trimmed.ends_with("先生") || trimmed.ends_with("大人") {
+        if trimmed.ends_with("叔叔") || trimmed.ends_with("先生") || trimmed.ends_with("大人")
+        {
             1
         } else {
             0
@@ -116,7 +110,9 @@ fn preferred_character_name(
         .map(String::as_str)
         .filter(|alias| {
             let trimmed = alias.trim();
-            !trimmed.is_empty() && trimmed != display_name.trim() && trimmed != canonical_name.trim()
+            !trimmed.is_empty()
+                && trimmed != display_name.trim()
+                && trimmed != canonical_name.trim()
         })
         .collect();
     candidates.sort_by_key(|alias| alias_display_rank(alias));
@@ -152,15 +148,10 @@ pub async fn project_character_card(
     pool: &SqlitePool,
 ) -> anyhow::Result<CharacterCardView> {
     let cache_repo = CacheRepo::new(pool.clone());
-    let identity_repo = IdentityRepo::new(pool.clone());
-    let resolved_entity_id = identity_repo
-        .resolve_redirect_target(book_id, entity_id)
-        .await?
-        .unwrap_or_else(|| entity_id.to_string());
 
     // Try cache first
     if let Some(cached) = cache_repo
-        .get_cached(book_id, "character_card", &resolved_entity_id, max_chapter)
+        .get_cached(book_id, "character_card", entity_id, max_chapter)
         .await?
     {
         if let Ok(view) = serde_json::from_str::<CharacterCardView>(&cached) {
@@ -169,18 +160,12 @@ pub async fn project_character_card(
     }
 
     // Cache miss - project from DB
-    let view = project_character_card_from_db(&resolved_entity_id, book_id, pool).await?;
+    let view = project_character_card_from_db(entity_id, book_id, pool).await?;
 
     // Cache the result
     let payload = serde_json::to_string(&view)?;
     cache_repo
-        .set_cached(
-            book_id,
-            "character_card",
-            &resolved_entity_id,
-            max_chapter,
-            &payload,
-        )
+        .set_cached(book_id, "character_card", entity_id, max_chapter, &payload)
         .await?;
 
     Ok(view)
@@ -199,7 +184,12 @@ async fn project_character_card_from_db(
     let entity = entity_repo
         .get_by_id(entity_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Entity not found: {}", entity_id))?;
+        .filter(|entity| {
+            entity.book_id == book_id
+                && entity.entity_type == "character"
+                && entity.status == "active"
+        })
+        .ok_or_else(|| anyhow::anyhow!("active character not found: {}", entity_id))?;
 
     // Get aliases
     let aliases = entity_repo.list_aliases_by_entity(entity_id).await?;
@@ -283,7 +273,6 @@ async fn project_character_list_from_db(
     pool: &SqlitePool,
 ) -> anyhow::Result<Vec<CharacterListItem>> {
     let entity_repo = EntityRepo::new(pool.clone());
-    let identity_repo = IdentityRepo::new(pool.clone());
 
     let entities = entity_repo.list_by_book(book_id).await?;
     let mut items = Vec::new();
@@ -296,13 +285,6 @@ async fn project_character_list_from_db(
 
     for entity in entities {
         if entity.entity_type != "character" {
-            continue;
-        }
-        if identity_repo
-            .resolve_redirect_target(book_id, &entity.id)
-            .await?
-            .is_some()
-        {
             continue;
         }
         let aliases = entity_repo.list_aliases_by_entity(&entity.id).await?;
@@ -454,6 +436,15 @@ mod tests {
     }
 
     #[test]
+    fn character_projection_score_normalization_only_clamps_canonical_value() {
+        assert_eq!(normalize_unit_score(0.72), 0.72);
+        assert_eq!(normalize_unit_score(8.0), 1.0);
+        assert_eq!(normalize_unit_score(90.0), 1.0);
+        assert_eq!(normalize_unit_score(-0.2), 0.0);
+        assert_eq!(normalize_unit_score(f64::NAN), 0.0);
+    }
+
+    #[test]
     fn character_projection_serializes_public_api_fields_as_camel_case() {
         let mut current_states = HashMap::new();
         current_states.insert(
@@ -482,8 +473,12 @@ mod tests {
         assert!(value.get("currentStates").is_some());
         assert!(value.get("first_seen_chapter").is_none());
         assert!(value.get("current_states").is_none());
-        assert!(value["currentStates"]["realm"].get("updatedChapter").is_some());
-        assert!(value["currentStates"]["realm"].get("updated_chapter").is_none());
+        assert!(value["currentStates"]["realm"]
+            .get("updatedChapter")
+            .is_some());
+        assert!(value["currentStates"]["realm"]
+            .get("updated_chapter")
+            .is_none());
 
         let item = CharacterListItem {
             id: "char-1".to_string(),
@@ -522,7 +517,15 @@ mod tests {
             .await
             .unwrap();
         entity_repo
-            .create_entity("b1", "organization", "神圣海尔兹帝国", "神圣海尔兹帝国", None, 0.8, 1)
+            .create_entity(
+                "b1",
+                "organization",
+                "神圣海尔兹帝国",
+                "神圣海尔兹帝国",
+                None,
+                0.8,
+                1,
+            )
             .await
             .unwrap();
 
@@ -561,7 +564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_character_card_resolves_active_redirect_to_survivor() {
+    async fn project_character_card_rejects_redirected_non_active_entity() {
         let (pool, entity_repo, _property_repo) = setup().await;
 
         let victim = entity_repo
@@ -608,13 +611,11 @@ mod tests {
             .await
             .unwrap();
 
-        let card = project_character_card(&victim.id, "b1", 10, &pool)
+        let err = project_character_card(&victim.id, "b1", 10, &pool)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(card.id, survivor.id);
-        assert_eq!(card.name, "张三");
-        assert_eq!(card.summary.as_deref(), Some("真身"));
+        assert!(err.to_string().contains("active character not found"));
     }
 
     #[tokio::test]

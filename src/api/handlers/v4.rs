@@ -13,8 +13,8 @@ use crate::service::v4::correction::{CorrectionCommand, CorrectionValidationServ
 use crate::service::v4::correction_applier::{CorrectionApplier, CorrectionApplyStatus};
 use crate::service::v4::identity_judge::RealAiIdentityJudge;
 use crate::service::v4::knowledge_judge::RealAiKnowledgeRevisionJudge;
-use crate::service::v4::map_conflict_judge::RealAiMapConflictJudge;
 use crate::service::v4::knowledge_projection;
+use crate::service::v4::map_conflict_judge::RealAiMapConflictJudge;
 use crate::service::v4::place_projection;
 use crate::service::v4::projection;
 use crate::service::v4::prompt_regression::{PromptRegressionRequest, PromptRegressionRunner};
@@ -484,14 +484,13 @@ pub async fn get_v4_chapter_memory(
         (None, vec![])
     };
 
-    let relationships_in_chapter =
-        relationship_projection::project_relationship_edges_for_chapter(
-            &ctx.book_id,
-            chapter_index,
-            &state.pool,
-        )
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+    let relationships_in_chapter = relationship_projection::project_relationship_edges_for_chapter(
+        &ctx.book_id,
+        chapter_index,
+        &state.pool,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
     let relationship_count = relationships_in_chapter.len() as i64;
     let knowledge_count = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*)
@@ -797,10 +796,13 @@ pub async fn get_v4_relationships(
     let req: V4RelationshipsRequest = parse_request(q, body)?;
     let ctx = resolve_v4_book(&state, &auth, req.book_url).await?;
     let max_processed = get_max_processed(&state, &ctx.book_id).await?;
-    let mut view =
-        relationship_projection::project_relationship_graph(&ctx.book_id, max_processed, &state.pool)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+    let mut view = relationship_projection::project_relationship_graph(
+        &ctx.book_id,
+        max_processed,
+        &state.pool,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
 
     if let Some(group) = req.group.as_deref() {
         view.edges.retain(|edge| edge.group == group);
@@ -2184,58 +2186,56 @@ async fn run_catchup_worker_inner(
         // Get raw_text from chapters table
         let chapter = match chapter_repo.get_chapter(book_id, chapter_index).await {
             Ok(Some(ch)) => ch,
-            Ok(None) => {
-                match source_ctx {
-                    Some((state, ctx)) => {
-                        match get_or_load_v4_chapter(state, ctx, chapter_index).await {
-                            Ok(chapter) => chapter,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to load chapter {} for {}: {}",
-                                    chapter_index,
+            Ok(None) => match source_ctx {
+                Some((state, ctx)) => {
+                    match get_or_load_v4_chapter(state, ctx, chapter_index).await {
+                        Ok(chapter) => chapter,
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to load chapter {} for {}: {}",
+                                chapter_index,
+                                book_id,
+                                e
+                            );
+                            let _ = progress_repo
+                                .set_status(
                                     book_id,
-                                    e
-                                );
-                                let _ = progress_repo
-                                    .set_status(
-                                        book_id,
-                                        "failed",
-                                        Some(target_chapter),
-                                        Some(chapter_index),
-                                        None,
-                                        Some(&format!(
-                                            "Chapter load failed at chapter {}: {}",
-                                            chapter_index, e
-                                        )),
-                                    )
-                                    .await;
-                                return;
-                            }
+                                    "failed",
+                                    Some(target_chapter),
+                                    Some(chapter_index),
+                                    None,
+                                    Some(&format!(
+                                        "Chapter load failed at chapter {}: {}",
+                                        chapter_index, e
+                                    )),
+                                )
+                                .await;
+                            return;
                         }
                     }
-                    None => {
-                        tracing::warn!(
-                            "Chapter {} not found in V4 chapter cache for book {}",
-                            chapter_index,
-                            book_id
-                        );
-                        let _ = progress_repo
-                            .set_status(
-                                book_id,
-                                "failed",
-                                Some(target_chapter),
-                                Some(chapter_index),
-                                None,
-                                Some(&format!(
-                                    "Chapter {} not found in V4 chapter cache",
-                                    chapter_index
-                                )),
-                            )
-                            .await;
-                        return;
-                    }
                 }
-            }
+                None => {
+                    tracing::warn!(
+                        "Chapter {} not found in V4 chapter cache for book {}",
+                        chapter_index,
+                        book_id
+                    );
+                    let _ = progress_repo
+                        .set_status(
+                            book_id,
+                            "failed",
+                            Some(target_chapter),
+                            Some(chapter_index),
+                            None,
+                            Some(&format!(
+                                "Chapter {} not found in V4 chapter cache",
+                                chapter_index
+                            )),
+                        )
+                        .await;
+                    return;
+                }
+            },
             Err(e) => {
                 tracing::error!(
                     "Failed to fetch chapter {} for {}: {}",
@@ -2327,38 +2327,36 @@ async fn get_or_load_v4_chapter(
         .await?;
     let book_url = repair_encoded_url(&ctx.book_url);
 
-    let (title, _chapter_url, raw_text) =
-        if shelf_book
-            .as_ref()
-            .is_some_and(|book| crate::service::local_txt_book::is_local_txt_origin(&book.origin))
-            || book_url.starts_with("local-txt:")
-        {
-            let chapters = state
-                .local_txt_book_service
-                .get_chapter_list(&ctx.user_ns, &book_url)
-                .await?;
-            let chapter = chapters
-                .into_iter()
-                .find(|chapter| chapter.index == chapter_index_i32)
-                .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
-            let raw_text = state
-                .local_txt_book_service
-                .get_content(&ctx.user_ns, &chapter.url)
-                .await?;
-            (chapter.title, chapter.url, raw_text)
-        } else {
-            let book_source_url = shelf_book.as_ref().map(|book| book.origin.clone());
-            let source = crate::api::handlers::book::resolve_book_source(
-                state,
-                &ctx.user_ns,
-                book_source_url,
-                None,
-                Some(&book_url),
-            )
+    let (title, _chapter_url, raw_text) = if shelf_book
+        .as_ref()
+        .is_some_and(|book| crate::service::local_txt_book::is_local_txt_origin(&book.origin))
+        || book_url.starts_with("local-txt:")
+    {
+        let chapters = state
+            .local_txt_book_service
+            .get_chapter_list(&ctx.user_ns, &book_url)
             .await?;
-            let toc_url = if let Some(toc_url) =
-                shelf_book.as_ref().and_then(|book| book.toc_url.clone())
-            {
+        let chapter = chapters
+            .into_iter()
+            .find(|chapter| chapter.index == chapter_index_i32)
+            .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
+        let raw_text = state
+            .local_txt_book_service
+            .get_content(&ctx.user_ns, &chapter.url)
+            .await?;
+        (chapter.title, chapter.url, raw_text)
+    } else {
+        let book_source_url = shelf_book.as_ref().map(|book| book.origin.clone());
+        let source = crate::api::handlers::book::resolve_book_source(
+            state,
+            &ctx.user_ns,
+            book_source_url,
+            None,
+            Some(&book_url),
+        )
+        .await?;
+        let toc_url =
+            if let Some(toc_url) = shelf_book.as_ref().and_then(|book| book.toc_url.clone()) {
                 toc_url
             } else {
                 state
@@ -2368,38 +2366,38 @@ async fn get_or_load_v4_chapter(
                     .toc_url
                     .unwrap_or_else(|| book_url.clone())
             };
-            load_network_chapter_with_refresh_retry(|refresh| {
-                let source = source.clone();
-                let toc_url = toc_url.clone();
-                let book_url = book_url.clone();
-                async move {
-                    if refresh {
-                        let _ = state
-                            .book_service
-                            .delete_chapter_list_cache(&ctx.user_ns, &toc_url)
-                            .await;
-                        let _ = state
-                            .book_service
-                            .delete_book_cache(&ctx.user_ns, &book_url)
-                            .await;
-                    }
-                    let chapters = state
+        load_network_chapter_with_refresh_retry(|refresh| {
+            let source = source.clone();
+            let toc_url = toc_url.clone();
+            let book_url = book_url.clone();
+            async move {
+                if refresh {
+                    let _ = state
                         .book_service
-                        .get_chapter_list_with_cache(&ctx.user_ns, &source, &toc_url, refresh)
-                        .await?;
-                    let chapter = chapters
-                        .into_iter()
-                        .find(|chapter| chapter.index == chapter_index_i32)
-                        .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
-                    let raw_text = state
+                        .delete_chapter_list_cache(&ctx.user_ns, &toc_url)
+                        .await;
+                    let _ = state
                         .book_service
-                        .get_content(&ctx.user_ns, &book_url, &source, &chapter.url)
-                        .await?;
-                    Ok((chapter.title, chapter.url, raw_text))
+                        .delete_book_cache(&ctx.user_ns, &book_url)
+                        .await;
                 }
-            })
-            .await?
-        };
+                let chapters = state
+                    .book_service
+                    .get_chapter_list_with_cache(&ctx.user_ns, &source, &toc_url, refresh)
+                    .await?;
+                let chapter = chapters
+                    .into_iter()
+                    .find(|chapter| chapter.index == chapter_index_i32)
+                    .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
+                let raw_text = state
+                    .book_service
+                    .get_content(&ctx.user_ns, &book_url, &source, &chapter.url)
+                    .await?;
+                Ok((chapter.title, chapter.url, raw_text))
+            }
+        })
+        .await?
+    };
 
     if raw_text.trim().is_empty() {
         return Err(AppError::BadRequest("章节内容为空".to_string()));
@@ -2443,14 +2441,13 @@ mod tests {
         ai_book_generation_service::AiBookGenerationService, ai_book_service::AiBookService,
         ai_model_service::AiModelService, book_group_service::BookGroupService,
         book_service::BookService, book_source_service::BookSourceService,
-        chapter_summary_service::ChapterSummaryService,
-        json_document_service::JsonDocumentService, local_epub_book::LocalEpubBookService,
-        local_mobi_book::LocalMobiBookService, local_pdf_book::LocalPdfBookService,
-        local_txt_book::LocalTxtBookService, update_service::UpdateService,
-        user_service::UserService,
+        chapter_summary_service::ChapterSummaryService, json_document_service::JsonDocumentService,
+        local_epub_book::LocalEpubBookService, local_mobi_book::LocalMobiBookService,
+        local_pdf_book::LocalPdfBookService, local_txt_book::LocalTxtBookService,
+        update_service::UpdateService, user_service::UserService,
     };
-    use crate::storage::db;
     use crate::storage::cache::file_cache::FileCache;
+    use crate::storage::db;
     use crate::storage::db::repo::BookSourceRepo;
     use crate::storage::db::v4::entity_repo::EntityRepo;
     use crate::storage::db::v4::relationship_repo::{RelationshipEventRepo, RelationshipRepo};
@@ -2472,10 +2469,12 @@ mod tests {
     ) -> std::sync::Arc<crate::service::ai_model_service::AiModelService> {
         let dir = std::env::temp_dir().join(format!("v4-ai-model-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let docs = std::sync::Arc::new(crate::service::json_document_service::JsonDocumentService::new(
-            pool,
-            dir.to_str().unwrap(),
-        ));
+        let docs = std::sync::Arc::new(
+            crate::service::json_document_service::JsonDocumentService::new(
+                pool,
+                dir.to_str().unwrap(),
+            ),
+        );
         std::sync::Arc::new(crate::service::ai_model_service::AiModelService::new(
             docs,
             dir.to_str().unwrap(),
@@ -2796,7 +2795,11 @@ mod tests {
             let attempts = attempts_for_loader.clone();
             async move {
                 attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(("第十三章".to_string(), "u1".to_string(), "\n\t ".to_string()))
+                Ok((
+                    "第十三章".to_string(),
+                    "u1".to_string(),
+                    "\n\t ".to_string(),
+                ))
             }
         })
         .await
@@ -2815,7 +2818,8 @@ mod tests {
         let ai_model_service = setup_ai_model_service(pool.clone()).await;
 
         let judges = build_real_v4_pipeline_judges(ai_model_service, pool);
-        let _relationship: &dyn crate::service::v4::pipeline::Judge = &judges.relationship;
+        let _relationship: &dyn crate::service::v4::relationship_processor::Judge =
+            &judges.relationship;
         let _identity: &dyn crate::service::v4::identity_judge::IdentityJudge = &judges.identity;
         let _knowledge: &dyn crate::service::v4::knowledge_judge::KnowledgeRevisionJudge =
             &judges.knowledge;
@@ -3141,35 +3145,15 @@ mod tests {
 
         relationship_repo
             .create_relationship(
-                &book_id,
-                &alisa.id,
-                &lucien.id,
-                "family",
-                "mother",
-                "directed",
-                None,
-                0.8,
-                "positive",
-                0.95,
-                0.82,
-                1,
+                &book_id, &alisa.id, &lucien.id, "family", "mother", "directed", None, 0.8,
+                "positive", 0.95, 0.82, 1,
             )
             .await
             .unwrap();
         relationship_repo
             .create_relationship(
-                &book_id,
-                &lucien.id,
-                &alisa.id,
-                "family",
-                "母亲",
-                "directed",
-                None,
-                0.8,
-                "positive",
-                0.95,
-                0.81,
-                1,
+                &book_id, &lucien.id, &alisa.id, "family", "母亲", "directed", None, 0.8,
+                "positive", 0.95, 0.81, 1,
             )
             .await
             .unwrap();
@@ -3206,7 +3190,7 @@ mod tests {
 
         let payload = serde_json::to_value(response.0).unwrap();
         assert_eq!(payload["isSuccess"], json!(true));
-        assert_eq!(payload["data"]["total"], json!(2));
+        assert_eq!(payload["data"]["total"], json!(3));
 
         let names = payload["data"]["nodes"]
             .as_array()
@@ -3222,12 +3206,20 @@ mod tests {
             .unwrap()
             .iter()
             .filter(|edge| edge["group"] == json!("family"))
-            .count();
-        assert_eq!(family_edges, 1);
+            .collect::<Vec<_>>();
+        assert_eq!(family_edges.len(), 2);
+        assert!(family_edges
+            .iter()
+            .any(|edge| edge["label"] == json!("mother")
+                && edge["directionality"] == json!("directed")));
+        assert!(family_edges
+            .iter()
+            .any(|edge| edge["label"] == json!("母亲")
+                && edge["directionality"] == json!("directed")));
     }
 
     #[tokio::test]
-    async fn get_v4_chapter_memory_dedupes_inverse_family_relationships() {
+    async fn get_v4_chapter_memory_preserves_canonical_family_relationships() {
         let (state, _dir) = create_test_state().await;
         let book_url = "book://v4-chapter-relationships";
         let book_id = crate::util::hash::md5_hex(book_url);
@@ -3291,18 +3283,8 @@ mod tests {
 
         let rel1 = relationship_repo
             .create_relationship(
-                &book_id,
-                &parent.id,
-                &child.id,
-                "family",
-                "mother",
-                "directed",
-                None,
-                0.85,
-                "positive",
-                0.9,
-                0.82,
-                16,
+                &book_id, &parent.id, &child.id, "family", "mother", "directed", None, 0.85,
+                "positive", 0.9, 0.82, 16,
             )
             .await
             .unwrap();
@@ -3325,18 +3307,8 @@ mod tests {
 
         let rel2 = relationship_repo
             .create_relationship(
-                &book_id,
-                &child.id,
-                &parent.id,
-                "family",
-                "母亲",
-                "directed",
-                None,
-                0.86,
-                "positive",
-                0.92,
-                0.98,
-                16,
+                &book_id, &child.id, &parent.id, "family", "母亲", "directed", None, 0.86,
+                "positive", 0.92, 0.98, 16,
             )
             .await
             .unwrap();
@@ -3371,11 +3343,17 @@ mod tests {
 
         let payload = serde_json::to_value(response.0).unwrap();
         assert_eq!(payload["isSuccess"], json!(true));
-        assert_eq!(payload["data"]["relationshipCount"], json!(1));
-        assert_eq!(payload["data"]["relationshipsInChapter"][0]["label"], json!("亲子"));
-        assert_eq!(
-            payload["data"]["relationshipsInChapter"][0]["directionality"],
-            json!("undirected")
-        );
+        assert_eq!(payload["data"]["relationshipCount"], json!(2));
+        let relationships = payload["data"]["relationshipsInChapter"]
+            .as_array()
+            .unwrap();
+        assert!(relationships
+            .iter()
+            .any(|edge| edge["label"] == json!("mother")
+                && edge["directionality"] == json!("directed")));
+        assert!(relationships
+            .iter()
+            .any(|edge| edge["label"] == json!("母亲")
+                && edge["directionality"] == json!("directed")));
     }
 }

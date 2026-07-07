@@ -70,6 +70,25 @@ pub struct KnowledgeEntityMention {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum ParsedObservation {
+    Relationship(RelationshipObservation),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct RelationshipObservation {
+    pub subject_mention: String,
+    pub object_mention: String,
+    pub relation_hint: String,
+    pub relation_group: String,
+    pub relation_label: String,
+    pub directionality: String,
+    pub evidence_span_ids: Vec<String>,
+    pub confidence: f64,
+    pub importance_hint: f64,
+    pub is_long_term_or_significant_hint: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Observation {
     EntityIntroduction {
         subject_mention: String,
@@ -730,8 +749,8 @@ pub fn parse_observations_from_json(
 
     // Parse the first complete JSON root so valid payloads with trailing model text
     // still succeed, then keep the truncated-payload repair as fallback.
-    let arr: Vec<serde_json::Value> = extract_observation_array(&cleaned)
-        .or_else(|_: serde_json::Error| {
+    let arr: Vec<serde_json::Value> =
+        extract_observation_array(&cleaned).or_else(|_: serde_json::Error| {
             // Try to repair truncated JSON by finding the last complete object
             let trimmed = cleaned.trim_end();
             if let Some(pos) = trimmed.rfind('}') {
@@ -757,7 +776,9 @@ pub fn parse_observations_from_json(
                 "entity_introduction".to_string()
             }
             "alias" | "Alias" => "alias".to_string(),
-            "property_update" | "PropertyUpdate" | "propertyUpdate" => "property_update".to_string(),
+            "property_update" | "PropertyUpdate" | "propertyUpdate" => {
+                "property_update".to_string()
+            }
             "minor_event" | "MinorEvent" | "minorEvent" => "minor_event".to_string(),
             "relationship_update" | "RelationshipUpdate" | "relationshipUpdate" => {
                 "relationship_update".to_string()
@@ -769,7 +790,9 @@ pub fn parse_observations_from_json(
                 "location_introduction".to_string()
             }
             "location_edge" | "LocationEdge" | "locationEdge" => "location_edge".to_string(),
-            "identity_reveal" | "IdentityReveal" | "identityReveal" => "identity_reveal".to_string(),
+            "identity_reveal" | "IdentityReveal" | "identityReveal" => {
+                "identity_reveal".to_string()
+            }
             "entity_merge_candidate" | "EntityMergeCandidate" | "entityMergeCandidate" => {
                 "entity_merge_candidate".to_string()
             }
@@ -785,8 +808,7 @@ pub fn parse_observations_from_json(
         if !is_known_observation_type(&normalized_type) {
             anyhow::bail!("Unknown observation type: {}", normalized_type);
         }
-        if normalized_type != "summary" && !sanitize_evidence_span_ids(&mut item_value, &span_set)
-        {
+        if normalized_type != "summary" && !sanitize_evidence_span_ids(&mut item_value, &span_set) {
             tracing::warn!(
                 "Skipping V4 observation with no valid evidence_span_ids: {}",
                 normalized_type
@@ -1089,6 +1111,74 @@ pub fn parse_observations_from_json(
     }
 
     Ok(observations)
+}
+
+pub fn parse_relationship_observations_from_json(
+    raw: &str,
+    valid_span_ids: &[String],
+) -> anyhow::Result<Vec<ParsedObservation>> {
+    reject_step1_relationship_judge_fields(raw)?;
+    parse_observations_from_json(raw, valid_span_ids)?
+        .into_iter()
+        .filter_map(|observation| match observation {
+            Observation::RelationshipUpdate {
+                subject_mention,
+                object_mention,
+                relation_hint,
+                relation_group,
+                relation_label,
+                directionality,
+                evidence_span_ids,
+                confidence,
+                importance_hint,
+                is_long_term_or_significant_hint,
+            } => Some(Ok(ParsedObservation::Relationship(
+                RelationshipObservation {
+                    subject_mention,
+                    object_mention,
+                    relation_hint,
+                    relation_group,
+                    relation_label,
+                    directionality,
+                    evidence_span_ids,
+                    confidence,
+                    importance_hint,
+                    is_long_term_or_significant_hint,
+                },
+            ))),
+            _ => None,
+        })
+        .collect()
+}
+
+fn reject_step1_relationship_judge_fields(raw: &str) -> anyhow::Result<()> {
+    let cleaned = strip_markdown_fences(raw);
+    let arr = extract_observation_array(&cleaned)?;
+    for item in arr {
+        let Some(obs_type) = item.get("type").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if !matches!(
+            obs_type,
+            "relationship_update" | "RelationshipUpdate" | "relationshipUpdate"
+        ) {
+            continue;
+        }
+        for key in [
+            "normalized_relation_group",
+            "normalized_relation_label",
+            "judge_confidence",
+            "judge_reason_code",
+        ] {
+            if item.get(key).is_some() {
+                anyhow::bail!(
+                    "relationship Step 1 payload contains judge field {}; adapter output must be source observation only",
+                    key
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn extract_observation_array(cleaned: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
@@ -1611,6 +1701,34 @@ mod tests {
     }
 
     #[test]
+    fn relationship_adapter_outputs_parsed_relationship_contract() {
+        let json = r#"[{"type":"relationship_update","subject_mention":"张三","object_mention":"李四","relation_hint":"结盟","relation_group":"alliance","relation_label":"盟友","directionality":"undirected","importance_hint":0.8,"is_long_term_or_significant_hint":true,"evidence_span_ids":["s1"],"confidence":0.9}]"#;
+        let parsed = parse_relationship_observations_from_json(json, &["s1".to_string()]).unwrap();
+        assert_eq!(parsed.len(), 1);
+
+        match &parsed[0] {
+            ParsedObservation::Relationship(relationship) => {
+                assert_eq!(relationship.subject_mention, "张三");
+                assert_eq!(relationship.object_mention, "李四");
+                assert_eq!(relationship.relation_group, "alliance");
+                assert_eq!(relationship.directionality, "undirected");
+                assert_eq!(relationship.importance_hint, 0.8);
+                assert_eq!(relationship.evidence_span_ids, vec!["s1".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn relationship_adapter_rejects_judge_normalized_fields() {
+        let json = r#"[{"type":"relationship_update","subject_mention":"张三","object_mention":"李四","relation_hint":"结盟","relation_group":"alliance","relation_label":"盟友","directionality":"undirected","normalized_relation_group":"family","evidence_span_ids":["s1"],"confidence":0.9}]"#;
+
+        let err = parse_relationship_observations_from_json(json, &["s1".to_string()])
+            .expect_err("judge-normalized fields must stay out of Step 1");
+
+        assert!(err.to_string().contains("judge field"));
+    }
+
+    #[test]
     fn location_introduction_parser() {
         let json = r#"[{"type":"location_introduction","place_mention":"青云城","place_type":"city","parent_place_mention":"东域","aliases":["青云古城"],"description":"东域重城","importance_score":0.8,"map_visible_hint":true,"evidence_span_ids":["s1"],"confidence":0.9}]"#;
         let parsed = parse_observations_from_json(json, &["s1".to_string()]).unwrap();
@@ -1779,7 +1897,10 @@ mod tests {
         let json = r#"[{"type":"alias","subject_mention":"张三","alias":"小张","alias_type":"nickname","evidence_span_ids":[],"confidence":0.8}]"#;
         let span_ids = vec!["s1".to_string()];
         let result = parse_observations_from_json(json, &span_ids).unwrap();
-        assert!(result.is_empty(), "empty evidence_span_ids should be skipped");
+        assert!(
+            result.is_empty(),
+            "empty evidence_span_ids should be skipped"
+        );
     }
 
     #[test]
@@ -1787,7 +1908,10 @@ mod tests {
         let json = r#"[{"type":"alias","subject_mention":"张三","alias":"小张","alias_type":"nickname","evidence_span_ids":["bad_id"],"confidence":0.8}]"#;
         let span_ids = vec!["s1".to_string()];
         let result = parse_observations_from_json(json, &span_ids).unwrap();
-        assert!(result.is_empty(), "invalid evidence_span_id should be skipped");
+        assert!(
+            result.is_empty(),
+            "invalid evidence_span_id should be skipped"
+        );
     }
 
     #[test]

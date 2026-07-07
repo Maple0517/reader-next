@@ -415,7 +415,10 @@ async fn load_active_edges(book_id: &str, pool: &SqlitePool) -> anyhow::Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::v4::place_reducer::reduce_location_claims;
+    use crate::service::v4::place_reducer::{
+        apply_place_write, PlaceWriteAction, PlaceWriteCommand, PlaceWriteOrganizationLink,
+        PlaceWritePlaceAction, PlaceWriteProvenance,
+    };
     use crate::storage::db;
     use crate::storage::db::v4::claim_repo::ClaimRepo;
     use crate::storage::db::v4::entity_repo::EntityRepo;
@@ -561,7 +564,34 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_location_claims(&[claim], "b1", &pool).await.unwrap();
+        let result = apply_place_write(
+            PlaceWriteCommand {
+                book_id: "b1".to_string(),
+                chapter_index: 1,
+                provenance: PlaceWriteProvenance {
+                    claim_id: claim.id.clone(),
+                    evidence_span_ids: vec![span_id],
+                    confidence: 0.88,
+                },
+                action: PlaceWriteAction::UpsertPlace(PlaceWritePlaceAction {
+                    resolved_place_entity_id: None,
+                    display_name: "青云门山门".to_string(),
+                    place_type: "sect_site".to_string(),
+                    aliases: Vec::new(),
+                    parent_place_id: None,
+                    organization_link: Some(PlaceWriteOrganizationLink {
+                        organization_entity_id: organization.id.clone(),
+                        link_type: "organization_place_pair".to_string(),
+                    }),
+                    scale_level: 0,
+                    importance_score: 0.88,
+                    map_visible: true,
+                }),
+            },
+            &pool,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.entity_links_touched.len(), 1);
         let place_id = result.places_touched.first().unwrap();
 

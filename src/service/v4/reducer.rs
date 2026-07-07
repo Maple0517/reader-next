@@ -1,6 +1,3 @@
-use crate::service::v4::knowledge_judge::{
-    KnowledgeCardAction, KnowledgeJudgeDecision, KnowledgeJudgeOutput,
-};
 use crate::storage::db::v4::claim_repo::{ClaimRecord, ClaimRepo};
 use crate::storage::db::v4::entity_repo::EntityRepo;
 use crate::storage::db::v4::identity_repo::IdentityRepo;
@@ -10,7 +7,6 @@ use crate::storage::db::v4::relationship_repo::{
     RelationshipEventRepo, RelationshipRecord, RelationshipRepo,
 };
 use sqlx::{SqliteConnection, SqlitePool};
-use std::collections::HashMap;
 
 /// Result of reducing claims into canonical state.
 #[derive(Debug, Default)]
@@ -37,115 +33,190 @@ pub struct KnowledgeReductionResult {
     pub claims_skipped: Vec<String>,
 }
 
-pub async fn reduce_knowledge_claims(
-    claims: &[ClaimRecord],
-    book_id: &str,
+#[derive(Debug, Clone)]
+pub struct KnowledgeWriteProvenance {
+    pub claim_id: String,
+    pub evidence_span_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeWriteEntityRef {
+    pub entity_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeWriteCardAction {
+    CreateNewCard,
+    UseExistingCard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeWriteDecision {
+    AddNew,
+    Supplement,
+    ReviseExisting,
+    ContradictExisting,
+    MarkRumor,
+    MarkUncertain,
+    MarkFalseInWorld,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeAssertionStatus {
+    Active,
+    Rumor,
+    Uncertain,
+    FalseInWorld,
+}
+
+impl KnowledgeAssertionStatus {
+    pub fn from_write_status(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "active" => Ok(Self::Active),
+            "rumor" => Ok(Self::Rumor),
+            "uncertain" => Ok(Self::Uncertain),
+            "false_in_world" => Ok(Self::FalseInWorld),
+            other => anyhow::bail!("invalid knowledge assertion write status: {other}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Rumor => "rumor",
+            Self::Uncertain => "uncertain",
+            Self::FalseInWorld => "false_in_world",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeWriteCommand {
+    pub book_id: String,
+    pub category: String,
+    pub topic_display: String,
+    pub assertion_text: String,
+    pub importance_score: f64,
+    pub referenced_entities: Vec<KnowledgeWriteEntityRef>,
+    pub card_action: KnowledgeWriteCardAction,
+    pub target_card_id: Option<String>,
+    pub decision: KnowledgeWriteDecision,
+    pub affected_assertion_ids: Vec<String>,
+    pub assertion_status: KnowledgeAssertionStatus,
+    pub current_summary: Option<String>,
+    pub confidence: f64,
+    pub chapter_index: i64,
+    pub provenance: KnowledgeWriteProvenance,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeAssertionStatusWriteCommand {
+    pub book_id: String,
+    pub assertion_id: String,
+    pub status: KnowledgeAssertionStatus,
+}
+
+pub async fn apply_knowledge_write(
+    command: KnowledgeWriteCommand,
     pool: &SqlitePool,
-    judge_outputs: &HashMap<String, KnowledgeJudgeOutput>,
 ) -> anyhow::Result<KnowledgeReductionResult> {
     let mut result = KnowledgeReductionResult::default();
-    let reducible: Vec<&ClaimRecord> = claims
-        .iter()
-        .filter(|claim| claim.status == "proposed" && claim.claim_type == "knowledge_assertion")
-        .collect();
-
-    if reducible.is_empty() {
-        return Ok(result);
-    }
-
     let mut tx = pool.begin().await?;
-    for claim in reducible {
-        let Some(output) = judge_outputs.get(&claim.id) else {
-            result.claims_skipped.push(claim.id.clone());
-            continue;
-        };
-        if output.decision == KnowledgeJudgeDecision::Reject
-            || output.card_action == KnowledgeCardAction::Uncertain
-        {
-            result.claims_skipped.push(claim.id.clone());
-            continue;
-        }
-
-        reduce_single_knowledge_claim(claim, book_id, output, &mut *tx, &mut result).await?;
-        result.claims_accepted.push(claim.id.clone());
-    }
-
-    if !result.claims_accepted.is_empty() {
-        ClaimRepo::batch_update_claim_status_with_conn(
-            &mut *tx,
-            &result.claims_accepted,
-            "accepted",
-        )
-        .await?;
-    }
-
+    apply_knowledge_write_with_conn(&command, &mut *tx, &mut result).await?;
     tx.commit().await?;
     Ok(result)
 }
 
-async fn reduce_single_knowledge_claim(
-    claim: &ClaimRecord,
-    book_id: &str,
-    output: &KnowledgeJudgeOutput,
+pub async fn apply_knowledge_assertion_status_write(
+    command: KnowledgeAssertionStatusWriteCommand,
+    pool: &SqlitePool,
+) -> anyhow::Result<KnowledgeReductionResult> {
+    let mut result = KnowledgeReductionResult::default();
+    let mut tx = pool.begin().await?;
+    apply_knowledge_assertion_status_write_with_conn(&command, &mut *tx, &mut result).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub async fn apply_knowledge_assertion_status_write_with_conn(
+    command: &KnowledgeAssertionStatusWriteCommand,
     conn: &mut SqliteConnection,
     result: &mut KnowledgeReductionResult,
 ) -> anyhow::Result<()> {
-    let fields = extract_knowledge_claim_fields(claim)?;
-    let card = match output.card_action {
-        KnowledgeCardAction::CreateNewCard => {
+    let update_result = sqlx::query(
+        "UPDATE knowledge_assertions SET status = ?, updated_at = ? WHERE book_id = ? AND id = ?",
+    )
+    .bind(command.status.as_str())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(&command.book_id)
+    .bind(&command.assertion_id)
+    .execute(&mut *conn)
+    .await?;
+    if update_result.rows_affected() == 0 {
+        anyhow::bail!("knowledge assertion not found for status write");
+    }
+    invalidate_knowledge_cache_with_conn(conn, &command.book_id).await?;
+    result.assertions_revised.push(command.assertion_id.clone());
+    Ok(())
+}
+
+async fn apply_knowledge_write_with_conn(
+    command: &KnowledgeWriteCommand,
+    conn: &mut SqliteConnection,
+    result: &mut KnowledgeReductionResult,
+) -> anyhow::Result<()> {
+    let card = match command.card_action {
+        KnowledgeWriteCardAction::CreateNewCard => {
             KnowledgeRepo::find_or_create_card_with_conn(
                 conn,
-                book_id,
-                &fields.category,
-                &fields.topic_display,
-                &fields.topic_display,
-                active_summary(output),
-                output.confidence,
-                fields.importance_score,
-                claim.chapter_index,
+                &command.book_id,
+                &command.category,
+                &command.topic_display,
+                &command.topic_display,
+                active_summary_for_knowledge_command(command),
+                command.confidence,
+                command.importance_score,
+                command.chapter_index,
             )
             .await?
         }
-        KnowledgeCardAction::UseExistingCard => {
-            let card_id = output
+        KnowledgeWriteCardAction::UseExistingCard => {
+            let card_id = command
                 .target_card_id
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("use_existing_card missing target_card_id"))?;
             get_knowledge_card_by_id_with_conn(conn, card_id).await?
         }
-        KnowledgeCardAction::Uncertain => {
-            result.claims_skipped.push(claim.id.clone());
-            return Ok(());
-        }
     };
-    if card.book_id != book_id {
+    if card.book_id != command.book_id {
         anyhow::bail!(
             "knowledge card {} belongs to book {}, not {}",
             card.id,
             card.book_id,
-            book_id
+            command.book_id
         );
     }
     result.cards_created_or_reused.push(card.id.clone());
 
     let assertion = KnowledgeRepo::find_or_create_assertion_with_conn(
         conn,
-        book_id,
+        &command.book_id,
         &card.id,
-        &claim.id,
-        &fields.assertion_text,
-        &output.assertion_status,
-        output.confidence,
-        fields.importance_score,
-        claim.chapter_index,
+        &command.provenance.claim_id,
+        &command.assertion_text,
+        command.assertion_status.as_str(),
+        command.confidence,
+        command.importance_score,
+        command.chapter_index,
     )
     .await?;
     result.assertions_inserted.push(assertion.id.clone());
 
-    for entity_ref in &fields.referenced_entities {
+    for entity_ref in &command.referenced_entities {
         KnowledgeRepo::insert_assertion_entity_with_conn(
             conn,
-            book_id,
+            &command.book_id,
             &assertion.id,
             &entity_ref.entity_id,
             &entity_ref.role,
@@ -153,129 +224,53 @@ async fn reduce_single_knowledge_claim(
         .await?;
     }
 
-    apply_knowledge_revision_links(conn, book_id, &card.id, &assertion.id, output, result).await?;
+    apply_knowledge_revision_links_from_command(conn, &card.id, &assertion.id, command, result)
+        .await?;
 
-    if let Some(summary) = active_summary(output) {
+    if let Some(summary) = active_summary_for_knowledge_command(command) {
         update_knowledge_card_summary_with_conn(
             conn,
             &card.id,
             summary,
-            output.confidence,
-            fields.importance_score,
-            claim.chapter_index,
+            command.confidence,
+            command.importance_score,
+            command.chapter_index,
         )
         .await?;
     }
-    invalidate_knowledge_cache_with_conn(conn, book_id).await?;
+    invalidate_knowledge_cache_with_conn(conn, &command.book_id).await?;
+    result
+        .claims_accepted
+        .push(command.provenance.claim_id.clone());
 
     Ok(())
 }
 
-struct KnowledgeClaimFields {
-    category: String,
-    topic_display: String,
-    assertion_text: String,
-    importance_score: f64,
-    referenced_entities: Vec<KnowledgeClaimEntityRef>,
-}
-
-struct KnowledgeClaimEntityRef {
-    entity_id: String,
-    role: String,
-}
-
-fn extract_knowledge_claim_fields(claim: &ClaimRecord) -> anyhow::Result<KnowledgeClaimFields> {
-    let parsed: serde_json::Value = serde_json::from_str(
-        claim
-            .value_json
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("knowledge claim missing value_json"))?,
-    )?;
-    let category = parsed
-        .get("category")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("knowledge claim missing category"))?
-        .trim()
-        .to_string();
-    let topic_display = parsed
-        .get("topic_display")
-        .or_else(|| parsed.get("raw_topic"))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("knowledge claim missing topic"))?
-        .trim()
-        .to_string();
-    let assertion_text = parsed
-        .get("assertion_text")
-        .and_then(|value| value.as_str())
-        .or(claim.value_text.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("knowledge claim missing assertion_text"))?
-        .trim()
-        .to_string();
-    let importance_score = parsed
-        .get("importance_score")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.5);
-    let referenced_entities = parsed
-        .get("referenced_entity_mentions")
-        .and_then(|value| value.as_array())
-        .map(|mentions| {
-            mentions
-                .iter()
-                .filter_map(|mention| {
-                    let entity_id = mention
-                        .get("resolved_entity_id")
-                        .and_then(|value| value.as_str())
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())?;
-                    let role = mention
-                        .get("role")
-                        .and_then(|value| value.as_str())
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("related");
-                    Some(KnowledgeClaimEntityRef {
-                        entity_id: entity_id.to_string(),
-                        role: role.to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(KnowledgeClaimFields {
-        category,
-        topic_display,
-        assertion_text,
-        importance_score,
-        referenced_entities,
-    })
-}
-
-fn active_summary(output: &KnowledgeJudgeOutput) -> Option<&str> {
-    if output.assertion_status == "active" {
-        output
+fn active_summary_for_knowledge_command(command: &KnowledgeWriteCommand) -> Option<&str> {
+    if command.assertion_status == KnowledgeAssertionStatus::Active {
+        command
             .current_summary
             .as_deref()
-            .filter(|s| !s.trim().is_empty())
+            .filter(|summary| !summary.trim().is_empty())
     } else {
         None
     }
 }
 
-async fn apply_knowledge_revision_links(
+async fn apply_knowledge_revision_links_from_command(
     conn: &mut SqliteConnection,
-    book_id: &str,
     card_id: &str,
     new_assertion_id: &str,
-    output: &KnowledgeJudgeOutput,
+    command: &KnowledgeWriteCommand,
     result: &mut KnowledgeReductionResult,
 ) -> anyhow::Result<()> {
-    let (old_status, link_type, target_vec) = match output.decision {
-        KnowledgeJudgeDecision::ReviseExisting => (
+    let (old_status, link_type, target_vec) = match command.decision {
+        KnowledgeWriteDecision::ReviseExisting => (
             "revised",
             "supersedes",
             Some(&mut result.assertions_revised),
         ),
-        KnowledgeJudgeDecision::ContradictExisting => (
+        KnowledgeWriteDecision::ContradictExisting => (
             "contradicted",
             "contradicts",
             Some(&mut result.assertions_contradicted),
@@ -286,14 +281,15 @@ async fn apply_knowledge_revision_links(
         return Ok(());
     };
 
-    for old_assertion_id in &output.affected_assertion_ids {
-        validate_knowledge_assertion_same_card(conn, book_id, card_id, old_assertion_id).await?;
+    for old_assertion_id in &command.affected_assertion_ids {
+        validate_knowledge_assertion_same_card(conn, &command.book_id, card_id, old_assertion_id)
+            .await?;
         KnowledgeRepo::update_assertion_status_with_conn(conn, old_assertion_id, old_status)
             .await?;
         target_vec.push(old_assertion_id.clone());
         let link = KnowledgeRepo::insert_assertion_link_with_conn(
             conn,
-            book_id,
+            &command.book_id,
             new_assertion_id,
             old_assertion_id,
             link_type,
@@ -378,7 +374,10 @@ async fn invalidate_knowledge_cache_with_conn(
 
 #[cfg(test)]
 mod knowledge_reducer_tests {
-    use super::reduce_knowledge_claims;
+    use super::{
+        apply_knowledge_write, KnowledgeAssertionStatus, KnowledgeWriteCardAction,
+        KnowledgeWriteCommand, KnowledgeWriteDecision, KnowledgeWriteProvenance,
+    };
     use crate::service::v4::knowledge_judge::{
         KnowledgeCardAction, KnowledgeJudgeDecision, KnowledgeJudgeOutput,
     };
@@ -386,7 +385,6 @@ mod knowledge_reducer_tests {
     use crate::storage::db::v4::claim_repo::{ClaimRecord, ClaimRepo};
     use crate::storage::db::v4::knowledge_repo::KnowledgeRepo;
     use sqlx::SqlitePool;
-    use std::collections::HashMap;
 
     async fn setup() -> (SqlitePool, ClaimRepo, KnowledgeRepo, String, String) {
         let dir =
@@ -481,6 +479,126 @@ mod knowledge_reducer_tests {
         }
     }
 
+    fn knowledge_write_command_from_output(
+        claim: &ClaimRecord,
+        output: KnowledgeJudgeOutput,
+    ) -> KnowledgeWriteCommand {
+        let value: serde_json::Value =
+            serde_json::from_str(claim.value_json.as_deref().expect("test value_json")).unwrap();
+        KnowledgeWriteCommand {
+            book_id: claim.book_id.clone(),
+            category: value["category"].as_str().unwrap().to_string(),
+            topic_display: value["topic_display"].as_str().unwrap().to_string(),
+            assertion_text: value["assertion_text"].as_str().unwrap().to_string(),
+            importance_score: value["importance_score"].as_f64().unwrap_or(0.5),
+            referenced_entities: vec![],
+            card_action: match output.card_action {
+                KnowledgeCardAction::CreateNewCard => KnowledgeWriteCardAction::CreateNewCard,
+                KnowledgeCardAction::UseExistingCard => KnowledgeWriteCardAction::UseExistingCard,
+                KnowledgeCardAction::Uncertain => panic!("no-write output cannot become command"),
+            },
+            target_card_id: output.target_card_id,
+            decision: match output.decision {
+                KnowledgeJudgeDecision::AddNew => KnowledgeWriteDecision::AddNew,
+                KnowledgeJudgeDecision::Supplement => KnowledgeWriteDecision::Supplement,
+                KnowledgeJudgeDecision::ReviseExisting => KnowledgeWriteDecision::ReviseExisting,
+                KnowledgeJudgeDecision::ContradictExisting => {
+                    KnowledgeWriteDecision::ContradictExisting
+                }
+                KnowledgeJudgeDecision::MarkRumor => KnowledgeWriteDecision::MarkRumor,
+                KnowledgeJudgeDecision::MarkUncertain => KnowledgeWriteDecision::MarkUncertain,
+                KnowledgeJudgeDecision::MarkFalseInWorld => {
+                    KnowledgeWriteDecision::MarkFalseInWorld
+                }
+                KnowledgeJudgeDecision::Reject => panic!("reject output cannot become command"),
+            },
+            affected_assertion_ids: output.affected_assertion_ids,
+            assertion_status: KnowledgeAssertionStatus::from_write_status(&output.assertion_status)
+                .unwrap(),
+            current_summary: output.current_summary,
+            confidence: output.confidence,
+            chapter_index: claim.chapter_index,
+            provenance: KnowledgeWriteProvenance {
+                claim_id: claim.id.clone(),
+                evidence_span_ids: vec![claim.primary_source_span_id.clone()],
+            },
+        }
+    }
+
+    #[test]
+    fn knowledge_write_command_uses_typed_assertion_status_contract() {
+        let source = include_str!("reducer.rs");
+        let raw_string_field = concat!("pub assertion", "_status: String");
+        assert!(
+            !source.contains(raw_string_field),
+            "Knowledge reducer command must carry a typed assertion status, not a raw string"
+        );
+        assert!(
+            source.contains("enum KnowledgeAssertionStatus"),
+            "Knowledge reducer must define the typed assertion status enum it consumes"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_reducer_accepts_typed_command_without_claim_value_json() {
+        let (pool, claim_repo, knowledge_repo, span_id, run_id) = setup().await;
+        let ledger_claim = claim_repo
+            .create_claim(
+                "b1",
+                1,
+                "knowledge_assertion",
+                None,
+                None,
+                None,
+                None,
+                "knowledge ledger provenance only",
+                Some("Cultivation has stable realm tiers."),
+                None,
+                &span_id,
+                &run_id,
+                0.9,
+                "high",
+            )
+            .await
+            .unwrap();
+
+        let command = KnowledgeWriteCommand {
+            book_id: "b1".to_string(),
+            category: "power_system".to_string(),
+            topic_display: "Cultivation Realms".to_string(),
+            assertion_text: "Cultivation has stable realm tiers.".to_string(),
+            importance_score: 0.8,
+            referenced_entities: vec![],
+            card_action: KnowledgeWriteCardAction::CreateNewCard,
+            target_card_id: None,
+            decision: KnowledgeWriteDecision::AddNew,
+            affected_assertion_ids: Vec::new(),
+            assertion_status: KnowledgeAssertionStatus::Active,
+            current_summary: Some("Cultivation realm summary".to_string()),
+            confidence: 0.9,
+            chapter_index: 1,
+            provenance: KnowledgeWriteProvenance {
+                claim_id: ledger_claim.id,
+                evidence_span_ids: vec![span_id],
+            },
+        };
+
+        let result = apply_knowledge_write(command, &pool).await.unwrap();
+
+        assert_eq!(result.cards_created_or_reused.len(), 1);
+        assert_eq!(result.assertions_inserted.len(), 1);
+        let card = knowledge_repo
+            .list_cards("b1", None, None)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            card.current_summary.as_deref(),
+            Some("Cultivation realm summary")
+        );
+    }
+
     #[tokio::test]
     async fn new_topic_creates_card_assertion_and_accepts_claim() {
         let (pool, claim_repo, knowledge_repo, span_id, run_id) = setup().await;
@@ -492,9 +610,8 @@ mod knowledge_reducer_tests {
             "Cultivation has stable realm tiers.",
         )
         .await;
-        let mut decisions = HashMap::new();
-        decisions.insert(
-            claim.id.clone(),
+        let command = knowledge_write_command_from_output(
+            &claim,
             output(
                 KnowledgeJudgeDecision::AddNew,
                 KnowledgeCardAction::CreateNewCard,
@@ -505,9 +622,7 @@ mod knowledge_reducer_tests {
             ),
         );
 
-        let result = reduce_knowledge_claims(&[claim.clone()], "b1", &pool, &decisions)
-            .await
-            .unwrap();
+        let result = apply_knowledge_write(command, &pool).await.unwrap();
 
         assert_eq!(result.claims_accepted, vec![claim.id.clone()]);
         assert_eq!(
@@ -536,15 +651,7 @@ mod knowledge_reducer_tests {
                 .len(),
             1
         );
-        assert_eq!(
-            claim_repo
-                .get_claim(&claim.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "accepted"
-        );
+        assert_eq!(result.claims_accepted, vec![claim.id.clone()]);
     }
 
     #[tokio::test]
@@ -592,9 +699,8 @@ mod knowledge_reducer_tests {
             "Supplemental assertion.",
         )
         .await;
-        let mut decisions = HashMap::new();
-        decisions.insert(
-            new_claim.id.clone(),
+        let command = knowledge_write_command_from_output(
+            &new_claim,
             output(
                 KnowledgeJudgeDecision::Supplement,
                 KnowledgeCardAction::UseExistingCard,
@@ -605,9 +711,7 @@ mod knowledge_reducer_tests {
             ),
         );
 
-        reduce_knowledge_claims(&[new_claim], "b1", &pool, &decisions)
-            .await
-            .unwrap();
+        apply_knowledge_write(command, &pool).await.unwrap();
 
         let old_after = knowledge_repo
             .get_assertion_by_id(&old_assertion.id)
@@ -682,9 +786,8 @@ mod knowledge_reducer_tests {
             let claim =
                 create_knowledge_claim(&claim_repo, &span_id, &run_id, "Cultivation Realms", text)
                     .await;
-            let mut decisions = HashMap::new();
-            decisions.insert(
-                claim.id.clone(),
+            let command = knowledge_write_command_from_output(
+                &claim,
                 output(
                     decision,
                     KnowledgeCardAction::UseExistingCard,
@@ -695,9 +798,7 @@ mod knowledge_reducer_tests {
                 ),
             );
 
-            let result = reduce_knowledge_claims(&[claim], "b1", &pool, &decisions)
-                .await
-                .unwrap();
+            let result = apply_knowledge_write(command, &pool).await.unwrap();
 
             assert_eq!(result.links_inserted.len(), 1);
             assert_eq!(
@@ -750,9 +851,8 @@ mod knowledge_reducer_tests {
                 "Non factual assertion.",
             )
             .await;
-            let mut decisions = HashMap::new();
-            decisions.insert(
-                claim.id.clone(),
+            let command = knowledge_write_command_from_output(
+                &claim,
                 output(
                     decision,
                     KnowledgeCardAction::UseExistingCard,
@@ -763,9 +863,7 @@ mod knowledge_reducer_tests {
                 ),
             );
 
-            reduce_knowledge_claims(&[claim], "b1", &pool, &decisions)
-                .await
-                .unwrap();
+            apply_knowledge_write(command, &pool).await.unwrap();
             assert_eq!(
                 knowledge_repo
                     .get_card_by_id(&card.id)
@@ -790,9 +888,8 @@ mod knowledge_reducer_tests {
             "Assertion.",
         )
         .await;
-        let mut decisions = HashMap::new();
-        decisions.insert(
-            claim.id.clone(),
+        let command = knowledge_write_command_from_output(
+            &claim,
             output(
                 KnowledgeJudgeDecision::Supplement,
                 KnowledgeCardAction::UseExistingCard,
@@ -803,11 +900,7 @@ mod knowledge_reducer_tests {
             ),
         );
 
-        assert!(
-            reduce_knowledge_claims(&[claim.clone()], "b1", &pool, &decisions)
-                .await
-                .is_err()
-        );
+        assert!(apply_knowledge_write(command, &pool).await.is_err());
         assert!(knowledge_repo
             .list_cards("b1", None, None)
             .await
@@ -835,9 +928,8 @@ mod knowledge_reducer_tests {
             "Cultivation has stable realm tiers.",
         )
         .await;
-        let mut decisions = HashMap::new();
-        decisions.insert(
-            claim.id.clone(),
+        let command = knowledge_write_command_from_output(
+            &claim,
             output(
                 KnowledgeJudgeDecision::AddNew,
                 KnowledgeCardAction::CreateNewCard,
@@ -848,12 +940,8 @@ mod knowledge_reducer_tests {
             ),
         );
 
-        reduce_knowledge_claims(&[claim.clone()], "b1", &pool, &decisions)
-            .await
-            .unwrap();
-        reduce_knowledge_claims(&[claim], "b1", &pool, &decisions)
-            .await
-            .unwrap();
+        apply_knowledge_write(command.clone(), &pool).await.unwrap();
+        apply_knowledge_write(command, &pool).await.unwrap();
 
         let card = knowledge_repo
             .list_cards("b1", None, None)
@@ -886,9 +974,8 @@ mod knowledge_reducer_tests {
             "Cultivation has stable realm tiers.",
         )
         .await;
-        let mut decisions = HashMap::new();
-        decisions.insert(
-            claim.id.clone(),
+        let command = knowledge_write_command_from_output(
+            &claim,
             output(
                 KnowledgeJudgeDecision::AddNew,
                 KnowledgeCardAction::CreateNewCard,
@@ -899,9 +986,7 @@ mod knowledge_reducer_tests {
             ),
         );
 
-        reduce_knowledge_claims(&[claim], "b1", &pool, &decisions)
-            .await
-            .unwrap();
+        apply_knowledge_write(command, &pool).await.unwrap();
 
         let cached = crate::storage::db::v4::cache_repo::CacheRepo::new(pool)
             .get_cached("b1", "knowledge", "__book__", 10)
@@ -915,15 +1000,13 @@ mod knowledge_reducer_tests {
 ///
 /// Rules:
 /// - Only processes claims with status='proposed' and risk_level in ('low', 'medium')
-/// - entity_introduction: create/update entity + aliases
-/// - property_update: apply replace/append strategy
-/// - alias: create alias for existing entity
-/// - minor_event: skip (reducer doesn't consume)
+/// - Character/profile claims are owned by `character_processor` -> `apply_character_write`
+/// - minor_event: skip (ledger-only)
 /// - All claims in the batch commit/rollback together
 /// - Successful claims marked as 'accepted'
 pub async fn reduce_claims(
     claims: &[ClaimRecord],
-    book_id: &str,
+    _book_id: &str,
     pool: &SqlitePool,
 ) -> anyhow::Result<ReductionResult> {
     let mut result = ReductionResult::default();
@@ -943,16 +1026,10 @@ pub async fn reduce_claims(
 
     for claim in &reducible {
         match claim.claim_type.as_str() {
-            "entity_introduction" => {
-                reduce_entity_introduction(claim, book_id, &mut *tx, &mut result).await?;
+            "entity_introduction" | "alias" | "property_update" => {
+                result.claims_skipped.push(claim.id.clone());
             }
-            "alias" => {
-                reduce_alias(claim, book_id, &mut *tx, &mut result).await?;
-            }
-            "property_update" => {
-                reduce_property_update(claim, book_id, &mut *tx, &mut result).await?;
-            }
-            // minor_event: ledger-only, intentionally not reduced.
+            // minor_event and unknown types: ledger-only, intentionally not reduced.
             // proposed status does not mean pending canonical work.
             // These claims are preserved in the claims table for audit
             // but do not block processing_progress or trigger retry.
@@ -979,93 +1056,209 @@ pub async fn reduce_claims(
     Ok(result)
 }
 
-/// Reduce an entity_introduction claim.
-async fn reduce_entity_introduction(
-    claim: &ClaimRecord,
+// --- Character Reducer ---
+
+#[derive(Debug, Clone)]
+pub struct CharacterWriteProvenance {
+    pub claim_id: String,
+    pub evidence_span_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CharacterWriteCommand {
+    IntroduceEntity {
+        book_id: String,
+        entity_type: String,
+        canonical_name: String,
+        display_name: String,
+        short_summary: Option<String>,
+        aliases: Vec<String>,
+        chapter_index: i64,
+        confidence: f64,
+        provenance: CharacterWriteProvenance,
+    },
+    AddAlias {
+        book_id: String,
+        entity_id: String,
+        alias: String,
+        alias_type: String,
+        chapter_index: i64,
+        confidence: f64,
+        provenance: CharacterWriteProvenance,
+    },
+    UpdateProperty {
+        book_id: String,
+        entity_id: String,
+        dimension_key: String,
+        value_text: Option<String>,
+        value_json: Option<serde_json::Value>,
+        chapter_index: i64,
+        confidence: f64,
+        provenance: CharacterWriteProvenance,
+    },
+}
+
+pub async fn apply_character_write(
+    command: CharacterWriteCommand,
+    pool: &SqlitePool,
+) -> anyhow::Result<ReductionResult> {
+    let mut result = ReductionResult::default();
+    let mut tx = pool.begin().await?;
+
+    match command {
+        CharacterWriteCommand::IntroduceEntity {
+            book_id,
+            entity_type,
+            canonical_name,
+            display_name,
+            short_summary,
+            aliases,
+            chapter_index,
+            confidence,
+            provenance,
+        } => {
+            apply_character_introduce_entity(
+                &book_id,
+                &entity_type,
+                &canonical_name,
+                &display_name,
+                short_summary.as_deref(),
+                aliases,
+                chapter_index,
+                confidence,
+                &provenance,
+                &mut *tx,
+                &mut result,
+            )
+            .await?;
+        }
+        CharacterWriteCommand::AddAlias {
+            book_id,
+            entity_id,
+            alias,
+            alias_type,
+            chapter_index,
+            confidence,
+            provenance,
+        } => {
+            apply_character_add_alias(
+                &book_id,
+                &entity_id,
+                &alias,
+                &alias_type,
+                chapter_index,
+                confidence,
+                &provenance,
+                &mut *tx,
+                &mut result,
+            )
+            .await?;
+        }
+        CharacterWriteCommand::UpdateProperty {
+            book_id,
+            entity_id,
+            dimension_key,
+            value_text,
+            value_json,
+            chapter_index,
+            confidence,
+            provenance,
+        } => {
+            apply_character_update_property(
+                &book_id,
+                &entity_id,
+                &dimension_key,
+                value_text.as_deref(),
+                value_json.as_ref(),
+                chapter_index,
+                confidence,
+                &provenance,
+                &mut *tx,
+                &mut result,
+            )
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn apply_character_introduce_entity(
     book_id: &str,
+    entity_type: &str,
+    canonical_name: &str,
+    display_name: &str,
+    short_summary: Option<&str>,
+    aliases: Vec<String>,
+    chapter_index: i64,
+    confidence: f64,
+    provenance: &CharacterWriteProvenance,
     conn: &mut SqliteConnection,
     result: &mut ReductionResult,
 ) -> anyhow::Result<()> {
-    let subject_mention = match &claim.subject_mention {
-        Some(m) => m,
-        None => return Ok(()), // No mention, skip
-    };
-
-    // Extract entity info from value_json if available
-    let (entity_type, short_summary, aliases) = extract_entity_info(claim);
-
-    // Check if entity already exists by alias or canonical name
     let existing =
-        EntityRepo::find_entity_by_alias_with_conn(conn, book_id, subject_mention).await?;
+        EntityRepo::find_entity_by_alias_with_conn(conn, book_id, canonical_name).await?;
     let entity = if let Some(e) = existing {
-        // Update last_seen_chapter
-        EntityRepo::update_last_seen_with_conn(conn, &e.id, claim.chapter_index).await?;
+        EntityRepo::update_last_seen_with_conn(conn, &e.id, chapter_index).await?;
         result.entities_updated.push(e.id.clone());
         e
     } else {
-        // Create new entity; catch UNIQUE violation and return existing entity
-        let entity_type_str = entity_type.as_deref().unwrap_or("character");
         match EntityRepo::create_entity_with_conn(
             conn,
             book_id,
-            entity_type_str,
-            subject_mention,
-            subject_mention,
-            short_summary.as_deref(),
-            claim.confidence,
-            claim.chapter_index,
+            entity_type,
+            canonical_name,
+            display_name,
+            short_summary,
+            confidence,
+            chapter_index,
         )
         .await
         {
             Ok(entity) => {
-                // Create alias for the canonical name itself
                 EntityRepo::create_alias_with_conn(
                     conn,
                     book_id,
                     &entity.id,
-                    subject_mention,
+                    canonical_name,
                     "canonical",
-                    claim.chapter_index,
-                    claim.confidence,
-                    Some(&claim.id),
+                    chapter_index,
+                    confidence,
+                    Some(&provenance.claim_id),
                 )
                 .await?;
-
                 result.entities_created.push(entity.id.clone());
                 entity
             }
             Err(_) => {
-                // UNIQUE violation: entity already exists by canonical name.
-                // Find and return it.
                 let existing =
-                    EntityRepo::get_by_canonical_name_with_conn(conn, book_id, subject_mention)
+                    EntityRepo::get_by_canonical_name_with_conn(conn, book_id, canonical_name)
                         .await?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                    "Entity creation failed and lookup by canonical name returned nothing for '{}'",
-                    subject_mention
-                )
+                                "Entity creation failed and lookup by canonical name returned nothing for '{}'",
+                                canonical_name
+                            )
                         })?;
-                EntityRepo::update_last_seen_with_conn(conn, &existing.id, claim.chapter_index)
-                    .await?;
+                EntityRepo::update_last_seen_with_conn(conn, &existing.id, chapter_index).await?;
                 result.entities_updated.push(existing.id.clone());
                 existing
             }
         }
     };
 
-    // Create additional aliases from value_json
     for alias in aliases {
-        if alias != *subject_mention {
+        if alias != canonical_name {
             let alias_result = EntityRepo::create_alias_with_conn(
                 conn,
                 book_id,
                 &entity.id,
                 &alias,
                 "ai_extracted",
-                claim.chapter_index,
-                claim.confidence,
-                Some(&claim.id),
+                chapter_index,
+                confidence,
+                Some(&provenance.claim_id),
             )
             .await;
             if alias_result.is_ok() {
@@ -1074,178 +1267,105 @@ async fn reduce_entity_introduction(
         }
     }
 
+    result.claims_accepted.push(provenance.claim_id.clone());
     Ok(())
 }
 
-/// Reduce an alias claim.
-async fn reduce_alias(
-    claim: &ClaimRecord,
+async fn apply_character_add_alias(
     book_id: &str,
+    entity_id: &str,
+    alias: &str,
+    alias_type: &str,
+    chapter_index: i64,
+    confidence: f64,
+    provenance: &CharacterWriteProvenance,
     conn: &mut SqliteConnection,
     result: &mut ReductionResult,
 ) -> anyhow::Result<()> {
-    let subject_mention = match &claim.subject_mention {
-        Some(m) => m,
-        None => return Ok(()),
+    let Some(entity) = EntityRepo::get_by_id_with_conn(conn, entity_id).await? else {
+        return Ok(());
     };
 
-    let alias = match &claim.object_mention {
-        Some(a) => a,
-        None => return Ok(()),
-    };
-
-    // Find the entity
-    let entity = if let Some(eid) = &claim.subject_entity_id {
-        EntityRepo::get_by_id_with_conn(conn, eid).await?
-    } else {
-        EntityRepo::find_entity_by_alias_with_conn(conn, book_id, subject_mention).await?
-    };
-
-    if let Some(e) = entity {
-        // Update last_seen_chapter for any accepted claim mentioning this entity
-        EntityRepo::update_last_seen_with_conn(conn, &e.id, claim.chapter_index).await?;
-
-        let alias_result = EntityRepo::create_alias_with_conn(
-            conn,
-            book_id,
-            &e.id,
-            alias,
-            "ai_extracted",
-            claim.chapter_index,
-            claim.confidence,
-            Some(&claim.id),
-        )
-        .await;
-        if alias_result.is_ok() {
-            result.aliases_created.push(alias.clone());
-        }
+    EntityRepo::update_last_seen_with_conn(conn, &entity.id, chapter_index).await?;
+    let alias_result = EntityRepo::create_alias_with_conn(
+        conn,
+        book_id,
+        &entity.id,
+        alias,
+        alias_type,
+        chapter_index,
+        confidence,
+        Some(&provenance.claim_id),
+    )
+    .await;
+    if alias_result.is_ok() {
+        result.aliases_created.push(alias.to_string());
     }
-
+    result.claims_accepted.push(provenance.claim_id.clone());
     Ok(())
 }
 
-/// Reduce a property_update claim.
-async fn reduce_property_update(
-    claim: &ClaimRecord,
+async fn apply_character_update_property(
     book_id: &str,
+    entity_id: &str,
+    dimension_key: &str,
+    value_text: Option<&str>,
+    value_json: Option<&serde_json::Value>,
+    chapter_index: i64,
+    confidence: f64,
+    provenance: &CharacterWriteProvenance,
     conn: &mut SqliteConnection,
     result: &mut ReductionResult,
 ) -> anyhow::Result<()> {
-    let subject_mention = match &claim.subject_mention {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-
-    // Extract dimension from predicate (e.g., "realm = 筑基期" -> "realm")
-    let dimension_key = extract_dimension_from_predicate(&claim.predicate)
-        .ok_or_else(|| anyhow::anyhow!("No dimension key found"))?;
-
-    // Validate dimension exists
     let dimension =
-        PropertyRepo::validate_dimension_with_conn(conn, book_id, "character", &dimension_key)
+        PropertyRepo::validate_dimension_with_conn(conn, book_id, "character", dimension_key)
             .await?;
-    if dimension.is_none() {
-        return Ok(()); // Dimension not registered, skip
-    }
-
-    // Find the entity
-    let entity = if let Some(eid) = &claim.subject_entity_id {
-        EntityRepo::get_by_id_with_conn(conn, eid).await?
-    } else {
-        EntityRepo::find_entity_by_alias_with_conn(conn, book_id, subject_mention).await?
+    let Some(dimension) = dimension else {
+        return Ok(());
     };
 
-    let entity = match entity {
-        Some(e) => e,
-        None => return Ok(()), // Entity not found, skip
+    let Some(entity) = EntityRepo::get_by_id_with_conn(conn, entity_id).await? else {
+        return Ok(());
     };
 
-    // Update last_seen_chapter for any accepted claim mentioning this entity
-    EntityRepo::update_last_seen_with_conn(conn, &entity.id, claim.chapter_index).await?;
+    EntityRepo::update_last_seen_with_conn(conn, &entity.id, chapter_index).await?;
+    let value_json_string = value_json.map(serde_json::Value::to_string);
 
-    // Determine merge strategy from validated dimension
-    let merge_strategy = dimension
-        .as_ref()
-        .map(|d| d.merge_strategy.as_str())
-        .unwrap_or("replace");
-
-    // Apply the property update
-    match merge_strategy {
+    match dimension.merge_strategy.as_str() {
         "append" => {
             PropertyRepo::apply_append_with_conn(
                 conn,
                 book_id,
                 &entity.id,
-                &dimension_key,
-                claim.value_text.as_deref(),
-                claim.value_json.as_deref(),
-                claim.chapter_index,
-                &claim.id,
-                claim.confidence,
+                dimension_key,
+                value_text,
+                value_json_string.as_deref(),
+                chapter_index,
+                &provenance.claim_id,
+                confidence,
             )
             .await?;
         }
         _ => {
-            // Default: replace
             PropertyRepo::apply_replace_with_conn(
                 conn,
                 book_id,
                 &entity.id,
-                &dimension_key,
-                claim.value_text.as_deref(),
-                claim.value_json.as_deref(),
-                claim.chapter_index,
-                &claim.id,
-                claim.confidence,
+                dimension_key,
+                value_text,
+                value_json_string.as_deref(),
+                chapter_index,
+                &provenance.claim_id,
+                confidence,
             )
             .await?;
         }
     }
 
-    result.properties_inserted.push(claim.id.clone());
-    result.current_properties_updated.push(entity.id.clone());
-
+    result.properties_inserted.push(provenance.claim_id.clone());
+    result.current_properties_updated.push(entity.id);
+    result.claims_accepted.push(provenance.claim_id.clone());
     Ok(())
-}
-
-/// Extract entity info (entity_type, short_summary, aliases) from claim value_json.
-fn extract_entity_info(claim: &ClaimRecord) -> (Option<String>, Option<String>, Vec<String>) {
-    let value_json = match &claim.value_json {
-        Some(j) => j,
-        None => return (None, None, Vec::new()),
-    };
-
-    let parsed: serde_json::Value = match serde_json::from_str(value_json) {
-        Ok(v) => v,
-        Err(_) => return (None, None, Vec::new()),
-    };
-
-    let entity_type = parsed
-        .get("entity_type")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let short_summary = parsed
-        .get("short_summary")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let aliases = parsed
-        .get("aliases")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    (entity_type, short_summary, aliases)
-}
-
-/// Extract dimension key from predicate string like "realm = 筑基期".
-fn extract_dimension_from_predicate(predicate: &str) -> Option<String> {
-    predicate.split('=').next().map(|s| s.trim().to_string())
 }
 
 // --- Relationship Reducer ---
@@ -1260,6 +1380,64 @@ pub struct RelationshipReductionResult {
     pub claims_skipped: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RelationshipWriteProvenance {
+    pub claim_id: String,
+    pub evidence_span_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationshipWriteCommand {
+    pub book_id: String,
+    pub subject_character_id: String,
+    pub object_character_id: String,
+    pub relation_group: String,
+    pub relation_label: String,
+    pub directionality: String,
+    pub current_state: Option<String>,
+    pub strength: f64,
+    pub polarity: String,
+    pub importance_score: f64,
+    pub confidence: f64,
+    pub chapter_index: i64,
+    pub provenance: RelationshipWriteProvenance,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationshipStatusWriteCommand {
+    pub book_id: String,
+    pub relationship_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdentityWriteProvenance {
+    pub claim_id: String,
+    pub evidence_span_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum IdentityWriteCommand {
+    Merge {
+        book_id: String,
+        entity_a_id: String,
+        entity_b_id: String,
+        link_type: String,
+        survivor_hint: String,
+        confidence: f64,
+        reason_code: String,
+        provenance: IdentityWriteProvenance,
+    },
+    Link {
+        book_id: String,
+        entity_a_id: String,
+        entity_b_id: String,
+        link_type: String,
+        confidence: f64,
+        provenance: IdentityWriteProvenance,
+    },
+}
+
 /// Result of reducing identity claims into canonical state.
 #[derive(Debug, Default)]
 pub struct IdentityReductionResult {
@@ -1271,117 +1449,78 @@ pub struct IdentityReductionResult {
     pub claims_skipped: Vec<String>,
 }
 
-struct IdentityJudgeFields {
-    decision: String,
-    link_type: String,
-    survivor_hint: String,
-    judge_confidence: f64,
-    reason_code: String,
-}
-
-fn extract_identity_judge_fields(claim: &ClaimRecord) -> Option<IdentityJudgeFields> {
-    let parsed: serde_json::Value = serde_json::from_str(claim.value_json.as_ref()?).ok()?;
-    Some(IdentityJudgeFields {
-        decision: parsed
-            .get("judge_decision")
-            .and_then(|v| v.as_str())?
-            .to_string(),
-        link_type: parsed
-            .get("link_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("same_identity")
-            .to_string(),
-        survivor_hint: parsed
-            .get("survivor_hint")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        judge_confidence: parsed
-            .get("judge_confidence")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(claim.confidence),
-        reason_code: parsed
-            .get("reason_code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("identity_judge")
-            .to_string(),
-    })
-}
-
-fn is_identity_claim_type(claim_type: &str) -> bool {
-    matches!(
-        claim_type,
-        "identity_reveal"
-            | "entity_merge_candidate"
-            | "entity_split_candidate"
-            | "not_same_identity"
-    )
-}
-
-/// Reduce judge-approved identity claims into identity links and merge ledger rows.
-pub async fn reduce_identity_claims(
-    claims: &[ClaimRecord],
-    book_id: &str,
+pub async fn apply_identity_write(
+    command: IdentityWriteCommand,
     pool: &SqlitePool,
 ) -> anyhow::Result<IdentityReductionResult> {
     let mut result = IdentityReductionResult::default();
-    let reducible: Vec<&ClaimRecord> = claims
-        .iter()
-        .filter(|claim| claim.status == "proposed" && is_identity_claim_type(&claim.claim_type))
-        .collect();
-
-    if reducible.is_empty() {
-        return Ok(result);
-    }
-
     let mut tx = pool.begin().await?;
-    for claim in reducible {
-        let Some(fields) = extract_identity_judge_fields(claim) else {
-            result.claims_skipped.push(claim.id.clone());
-            continue;
-        };
 
-        match fields.decision.as_str() {
-            "merge" => {
-                reduce_identity_merge_claim(claim, book_id, &fields, &mut *tx, &mut result).await?;
-            }
-            "possible_same_identity" | "not_same_identity" => {
-                reduce_identity_link_claim(claim, book_id, &fields, &mut *tx, &mut result).await?;
-            }
-            _ => result.claims_skipped.push(claim.id.clone()),
+    match command {
+        IdentityWriteCommand::Merge {
+            book_id,
+            entity_a_id,
+            entity_b_id,
+            link_type,
+            survivor_hint,
+            confidence,
+            reason_code,
+            provenance,
+        } => {
+            apply_identity_merge_command(
+                &book_id,
+                &entity_a_id,
+                &entity_b_id,
+                &link_type,
+                &survivor_hint,
+                confidence,
+                &reason_code,
+                &provenance,
+                &mut *tx,
+                &mut result,
+            )
+            .await?;
         }
-    }
-
-    if !result.claims_accepted.is_empty() {
-        ClaimRepo::batch_update_claim_status_with_conn(
-            &mut *tx,
-            &result.claims_accepted,
-            "accepted",
-        )
-        .await?;
+        IdentityWriteCommand::Link {
+            book_id,
+            entity_a_id,
+            entity_b_id,
+            link_type,
+            confidence,
+            provenance,
+        } => {
+            apply_identity_link_command(
+                &book_id,
+                &entity_a_id,
+                &entity_b_id,
+                &link_type,
+                confidence,
+                &provenance,
+                &mut *tx,
+                &mut result,
+            )
+            .await?;
+        }
     }
 
     tx.commit().await?;
     Ok(result)
 }
 
-async fn reduce_identity_merge_claim(
-    claim: &ClaimRecord,
+async fn apply_identity_merge_command(
     book_id: &str,
-    fields: &IdentityJudgeFields,
+    entity_a_id: &str,
+    entity_b_id: &str,
+    link_type: &str,
+    survivor_hint: &str,
+    confidence: f64,
+    reason_code: &str,
+    provenance: &IdentityWriteProvenance,
     conn: &mut SqliteConnection,
     result: &mut IdentityReductionResult,
 ) -> anyhow::Result<()> {
-    let Some(entity_a_id) = claim.subject_entity_id.as_deref() else {
-        result.claims_skipped.push(claim.id.clone());
-        return Ok(());
-    };
-    let Some(entity_b_id) = claim.object_entity_id.as_deref() else {
-        result.claims_skipped.push(claim.id.clone());
-        return Ok(());
-    };
     if entity_a_id == entity_b_id {
-        result.claims_skipped.push(claim.id.clone());
+        result.claims_skipped.push(provenance.claim_id.clone());
         return Ok(());
     }
 
@@ -1392,24 +1531,24 @@ async fn reduce_identity_merge_claim(
         .await?
         .ok_or_else(|| anyhow::anyhow!("entity_b not found: {}", entity_b_id))?;
     if entity_a.entity_type != "character" || entity_b.entity_type != "character" {
-        result.claims_skipped.push(claim.id.clone());
+        result.claims_skipped.push(provenance.claim_id.clone());
         return Ok(());
     }
     if active_not_same_identity_exists(conn, book_id, &entity_a.id, &entity_b.id).await? {
-        result.claims_skipped.push(claim.id.clone());
+        result.claims_skipped.push(provenance.claim_id.clone());
         return Ok(());
     }
 
-    let (survivor, victim) = select_identity_merge_survivor(&entity_a, &entity_b, fields);
+    let (survivor, victim) = select_identity_merge_survivor(&entity_a, &entity_b, survivor_hint);
 
     let semantic_link = IdentityRepo::find_or_create_identity_link_with_conn(
         conn,
         book_id,
         &entity_a.id,
         &entity_b.id,
-        &fields.link_type,
-        fields.judge_confidence,
-        &claim.id,
+        link_type,
+        confidence,
+        &provenance.claim_id,
         "active",
     )
     .await?;
@@ -1421,8 +1560,8 @@ async fn reduce_identity_merge_claim(
         &survivor.id,
         &victim.id,
         &semantic_link.id,
-        &fields.reason_code,
-        fields.judge_confidence,
+        reason_code,
+        confidence,
         "pending",
     )
     .await?;
@@ -1445,8 +1584,8 @@ async fn reduce_identity_merge_claim(
         &victim.id,
         &survivor.id,
         "redirect",
-        fields.judge_confidence,
-        &claim.id,
+        confidence,
+        &provenance.claim_id,
         "active",
     )
     .await?;
@@ -1473,7 +1612,7 @@ async fn reduce_identity_merge_claim(
             &serde_json::json!({
                 "survivor_entity_id": survivor.id,
                 "victim_entity_id": victim.id,
-                "source_claim_id": claim.id,
+                "source_claim_id": provenance.claim_id,
                 "relationship_merge_count": relationship_merge_count,
             })
             .to_string(),
@@ -1491,41 +1630,32 @@ async fn reduce_identity_merge_claim(
         .execute(&mut *conn)
         .await?;
     result.merge_operations_completed.push(merge_op.id);
-    result.claims_accepted.push(claim.id.clone());
+    result.claims_accepted.push(provenance.claim_id.clone());
 
     Ok(())
 }
 
-async fn reduce_identity_link_claim(
-    claim: &ClaimRecord,
+async fn apply_identity_link_command(
     book_id: &str,
-    fields: &IdentityJudgeFields,
+    entity_a_id: &str,
+    entity_b_id: &str,
+    link_type: &str,
+    confidence: f64,
+    provenance: &IdentityWriteProvenance,
     conn: &mut SqliteConnection,
     result: &mut IdentityReductionResult,
 ) -> anyhow::Result<()> {
-    let expected_link_type = match fields.decision.as_str() {
-        "possible_same_identity" => "possible_same_identity",
-        "not_same_identity" => "not_same_identity",
-        _ => {
-            result.claims_skipped.push(claim.id.clone());
-            return Ok(());
-        }
-    };
-    if fields.link_type != expected_link_type || claim.primary_source_span_id.trim().is_empty() {
-        result.claims_skipped.push(claim.id.clone());
+    if !matches!(link_type, "possible_same_identity" | "not_same_identity")
+        || provenance
+            .evidence_span_ids
+            .iter()
+            .all(|span| span.trim().is_empty())
+    {
+        result.claims_skipped.push(provenance.claim_id.clone());
         return Ok(());
     }
-
-    let Some(entity_a_id) = claim.subject_entity_id.as_deref() else {
-        result.claims_skipped.push(claim.id.clone());
-        return Ok(());
-    };
-    let Some(entity_b_id) = claim.object_entity_id.as_deref() else {
-        result.claims_skipped.push(claim.id.clone());
-        return Ok(());
-    };
     if entity_a_id == entity_b_id {
-        result.claims_skipped.push(claim.id.clone());
+        result.claims_skipped.push(provenance.claim_id.clone());
         return Ok(());
     }
 
@@ -1536,7 +1666,7 @@ async fn reduce_identity_link_claim(
         .await?
         .ok_or_else(|| anyhow::anyhow!("entity_b not found: {}", entity_b_id))?;
     if entity_a.entity_type != "character" || entity_b.entity_type != "character" {
-        result.claims_skipped.push(claim.id.clone());
+        result.claims_skipped.push(provenance.claim_id.clone());
         return Ok(());
     }
 
@@ -1545,14 +1675,14 @@ async fn reduce_identity_link_claim(
         book_id,
         &entity_a.id,
         &entity_b.id,
-        expected_link_type,
-        fields.judge_confidence,
-        &claim.id,
+        link_type,
+        confidence,
+        &provenance.claim_id,
         "active",
     )
     .await?;
     result.identity_links_created.push(link.id);
-    result.claims_accepted.push(claim.id.clone());
+    result.claims_accepted.push(provenance.claim_id.clone());
 
     Ok(())
 }
@@ -1560,12 +1690,12 @@ async fn reduce_identity_link_claim(
 fn select_identity_merge_survivor(
     entity_a: &crate::storage::db::v4::entity_repo::EntityRecord,
     entity_b: &crate::storage::db::v4::entity_repo::EntityRecord,
-    fields: &IdentityJudgeFields,
+    survivor_hint: &str,
 ) -> (
     crate::storage::db::v4::entity_repo::EntityRecord,
     crate::storage::db::v4::entity_repo::EntityRecord,
 ) {
-    match fields.survivor_hint.as_str() {
+    match survivor_hint {
         "entity_a" => (entity_a.clone(), entity_b.clone()),
         "entity_b" => (entity_b.clone(), entity_a.clone()),
         _ if entity_a.first_seen_chapter <= entity_b.first_seen_chapter => {
@@ -2033,198 +2163,129 @@ async fn invalidate_relationship_cache_with_conn(
     Ok(())
 }
 
-/// Judge-normalized fields extracted from claim.value_json.
-struct JudgeNormalizedFields {
-    normalized_relation_group: String,
-    normalized_relation_label: String,
-    directionality: String,
-    current_state: Option<String>,
-    strength: f64,
-    polarity: String,
-    importance_score: f64,
-    judge_confidence: f64,
-}
-
-fn extract_judge_normalized_fields(claim: &ClaimRecord) -> Option<JudgeNormalizedFields> {
-    let value_json = claim.value_json.as_ref()?;
-    let parsed: serde_json::Value = serde_json::from_str(value_json).ok()?;
-
-    let group = parsed
-        .get("normalized_relation_group")
-        .and_then(|v| v.as_str())?
-        .to_string();
-    let label = parsed
-        .get("normalized_relation_label")
-        .and_then(|v| v.as_str())?
-        .to_string();
-    let directionality = parsed
-        .get("directionality")
-        .and_then(|v| v.as_str())?
-        .to_string();
-    let current_state = parsed
-        .get("current_state")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let strength = parsed
-        .get("strength")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.5);
-    let polarity = parsed
-        .get("polarity")
-        .and_then(|v| v.as_str())
-        .unwrap_or("neutral")
-        .to_string();
-    let importance_score = parsed
-        .get("importance_score")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.5);
-    let judge_confidence = parsed
-        .get("judge_confidence")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(claim.confidence);
-
-    Some(JudgeNormalizedFields {
-        normalized_relation_group: group,
-        normalized_relation_label: label,
-        directionality,
-        current_state,
-        strength,
-        polarity,
-        importance_score,
-        judge_confidence,
-    })
-}
-
-/// Reduce relationship_update claims into canonical relationships.
-///
-/// Uses its OWN transaction, independent from entity/property reducer.
-/// Relationship failure does NOT roll back Phase 1 canonical state.
-///
-/// Input: only claims with status='proposed' AND claim_type='relationship_update'.
-pub async fn reduce_relationship_claims(
-    claims: &[ClaimRecord],
-    book_id: &str,
+pub async fn apply_relationship_write(
+    command: RelationshipWriteCommand,
     pool: &SqlitePool,
 ) -> anyhow::Result<RelationshipReductionResult> {
     let mut result = RelationshipReductionResult::default();
-
-    // Filter to proposed relationship_update claims
-    let reducible: Vec<&ClaimRecord> = claims
-        .iter()
-        .filter(|c| c.status == "proposed" && c.claim_type == "relationship_update")
-        .collect();
-
-    if reducible.is_empty() {
-        return Ok(result);
-    }
-
-    // Start independent transaction
     let mut tx = pool.begin().await?;
-
-    for claim in &reducible {
-        match reduce_single_relationship_claim(claim, book_id, &mut *tx, &mut result).await {
-            Ok(()) => {}
-            Err(e) => {
-                // Log the error, skip this claim, continue with others
-                tracing::warn!("Relationship claim {} failed: {}. Skipping.", claim.id, e);
-                result.claims_skipped.push(claim.id.clone());
-            }
-        }
-    }
-
-    // Mark accepted claims
-    if !result.claims_accepted.is_empty() {
-        ClaimRepo::batch_update_claim_status_with_conn(
-            &mut *tx,
-            &result.claims_accepted,
-            "accepted",
-        )
-        .await?;
-    }
-
-    // Commit independent transaction
+    apply_relationship_write_with_conn(&command, &mut *tx, &mut result).await?;
     tx.commit().await?;
-
     Ok(result)
 }
 
-async fn reduce_single_relationship_claim(
-    claim: &ClaimRecord,
-    book_id: &str,
+pub async fn apply_relationship_status_write(
+    command: RelationshipStatusWriteCommand,
+    pool: &SqlitePool,
+) -> anyhow::Result<RelationshipReductionResult> {
+    let mut result = RelationshipReductionResult::default();
+    let mut tx = pool.begin().await?;
+    apply_relationship_status_write_with_conn(&command, &mut *tx, &mut result).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub async fn apply_relationship_status_write_with_conn(
+    command: &RelationshipStatusWriteCommand,
     conn: &mut SqliteConnection,
     result: &mut RelationshipReductionResult,
 ) -> anyhow::Result<()> {
-    // Extract Judge normalized fields from claim.value_json
-    let fields = extract_judge_normalized_fields(claim).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Missing or invalid Judge normalized fields in claim {}",
-            claim.id
-        )
-    })?;
+    if command.status != "inactive" {
+        anyhow::bail!(
+            "relationship status write only supports inactive, got {}",
+            command.status
+        );
+    }
 
-    // Validate subject_entity_id exists and entity_type='character'
-    let subject_id = claim
-        .subject_entity_id
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Missing subject_entity_id for claim {}", claim.id))?;
-    let subject = EntityRepo::get_by_id_with_conn(conn, subject_id)
+    let update_result = sqlx::query(
+        "UPDATE relationships SET status = 'inactive', updated_at = ? WHERE book_id = ? AND id = ?",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(&command.book_id)
+    .bind(&command.relationship_id)
+    .execute(&mut *conn)
+    .await?;
+    if update_result.rows_affected() == 0 {
+        anyhow::bail!("relationship not found for status write");
+    }
+    invalidate_relationship_cache_with_conn(conn, &command.book_id).await?;
+    result
+        .relationships_updated
+        .push(command.relationship_id.clone());
+    Ok(())
+}
+
+async fn apply_relationship_write_with_conn(
+    command: &RelationshipWriteCommand,
+    conn: &mut SqliteConnection,
+    result: &mut RelationshipReductionResult,
+) -> anyhow::Result<()> {
+    let subject = EntityRepo::get_by_id_with_conn(conn, &command.subject_character_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Subject entity {} not found", subject_id))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Subject entity {} not found", command.subject_character_id)
+        })?;
     if subject.entity_type != "character" {
         return Err(anyhow::anyhow!(
             "Subject entity {} is not a character (type={})",
-            subject_id,
+            command.subject_character_id,
             subject.entity_type
         ));
     }
 
-    // Validate object_entity_id exists and entity_type='character'
-    let object_id = claim
-        .object_entity_id
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Missing object_entity_id for claim {}", claim.id))?;
-    let object = EntityRepo::get_by_id_with_conn(conn, object_id)
+    let object = EntityRepo::get_by_id_with_conn(conn, &command.object_character_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Object entity {} not found", object_id))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Object entity {} not found", command.object_character_id)
+        })?;
     if object.entity_type != "character" {
         return Err(anyhow::anyhow!(
             "Object entity {} is not a character (type={})",
-            object_id,
+            command.object_character_id,
             object.entity_type
         ));
     }
 
     // Canonicalize pair for undirected: sort by entity_id (min as subject, max as object)
-    let (canonical_subject, canonical_object) = if fields.directionality == "undirected" {
-        if subject_id < object_id {
-            (subject_id.clone(), object_id.clone())
+    let (canonical_subject, canonical_object) = if command.directionality == "undirected" {
+        if command.subject_character_id < command.object_character_id {
+            (
+                command.subject_character_id.clone(),
+                command.object_character_id.clone(),
+            )
         } else {
-            (object_id.clone(), subject_id.clone())
+            (
+                command.object_character_id.clone(),
+                command.subject_character_id.clone(),
+            )
         }
     } else {
-        (subject_id.clone(), object_id.clone())
+        (
+            command.subject_character_id.clone(),
+            command.object_character_id.clone(),
+        )
     };
 
     // Check for existing relationship with same pair + same group + same directionality
     let existing = RelationshipRepo::find_existing_with_conn(
         conn,
-        book_id,
+        &command.book_id,
         &canonical_subject,
         &canonical_object,
-        &fields.normalized_relation_group,
-        &fields.directionality,
+        &command.relation_group,
+        &command.directionality,
     )
     .await?;
 
     let (relationship_id, is_new) = if let Some(rel) = existing {
         // Update existing relationship
-        let new_confidence = rel.confidence.max(fields.judge_confidence);
-        let new_importance = rel.importance_score.max(fields.importance_score);
-        let changed = fields.current_state.as_deref() != rel.current_state.as_deref()
-            || (fields.strength - rel.strength).abs() > f64::EPSILON
-            || fields.polarity != rel.polarity;
+        let new_confidence = rel.confidence.max(command.confidence);
+        let new_importance = rel.importance_score.max(command.importance_score);
+        let changed = command.current_state.as_deref() != rel.current_state.as_deref()
+            || (command.strength - rel.strength).abs() > f64::EPSILON
+            || command.polarity != rel.polarity;
         let last_changed = if changed {
-            claim.chapter_index
+            command.chapter_index
         } else {
             rel.last_changed_chapter
         };
@@ -2232,14 +2293,14 @@ async fn reduce_single_relationship_claim(
         RelationshipRepo::update_relationship_with_conn(
             conn,
             &rel.id,
-            &fields.normalized_relation_label,
-            fields.current_state.as_deref(),
-            fields.strength,
-            &fields.polarity,
+            &command.relation_label,
+            command.current_state.as_deref(),
+            command.strength,
+            &command.polarity,
             new_confidence,
             new_importance,
             last_changed,
-            claim.chapter_index,
+            command.chapter_index,
             "active",
         )
         .await?;
@@ -2252,34 +2313,36 @@ async fn reduce_single_relationship_claim(
         let any_existing = sqlx::query_scalar::<_, String>(
             "SELECT id FROM relationships WHERE book_id = ? AND subject_character_id = ? AND object_character_id = ? AND relation_group = ? LIMIT 1"
         )
-        .bind(book_id)
+        .bind(&command.book_id)
         .bind(&canonical_subject)
         .bind(&canonical_object)
-        .bind(&fields.normalized_relation_group)
+        .bind(&command.relation_group)
         .fetch_optional(&mut *conn)
         .await?;
 
         if any_existing.is_some() {
             // Same pair + same group + different directionality → skip
-            result.claims_skipped.push(claim.id.clone());
+            result
+                .claims_skipped
+                .push(command.provenance.claim_id.clone());
             return Ok(());
         }
 
         // Create new relationship
         let new_rel = RelationshipRepo::create_relationship_with_conn(
             conn,
-            book_id,
+            &command.book_id,
             &canonical_subject,
             &canonical_object,
-            &fields.normalized_relation_group,
-            &fields.normalized_relation_label,
-            &fields.directionality,
-            fields.current_state.as_deref(),
-            fields.strength,
-            &fields.polarity,
-            fields.judge_confidence,
-            fields.importance_score,
-            claim.chapter_index,
+            &command.relation_group,
+            &command.relation_label,
+            &command.directionality,
+            command.current_state.as_deref(),
+            command.strength,
+            &command.polarity,
+            command.confidence,
+            command.importance_score,
+            command.chapter_index,
         )
         .await?;
 
@@ -2290,22 +2353,26 @@ async fn reduce_single_relationship_claim(
     // Create relationship event
     RelationshipEventRepo::create_event_with_conn(
         conn,
-        book_id,
+        &command.book_id,
         &relationship_id,
         if is_new { "creation" } else { "update" },
-        &fields.normalized_relation_group,
-        &fields.normalized_relation_label,
-        fields.current_state.as_deref(),
-        Some(fields.strength),
-        Some(&fields.polarity),
-        claim.chapter_index,
-        &claim.id,
-        fields.judge_confidence,
+        &command.relation_group,
+        &command.relation_label,
+        command.current_state.as_deref(),
+        Some(command.strength),
+        Some(&command.polarity),
+        command.chapter_index,
+        &command.provenance.claim_id,
+        command.confidence,
     )
     .await?;
 
-    result.events_created.push(claim.id.clone());
-    result.claims_accepted.push(claim.id.clone());
+    result
+        .events_created
+        .push(command.provenance.claim_id.clone());
+    result
+        .claims_accepted
+        .push(command.provenance.claim_id.clone());
 
     Ok(())
 }
@@ -2345,117 +2412,6 @@ mod tests {
         let property_repo = PropertyRepo::new(pool.clone());
 
         (pool, claim_repo, entity_repo, property_repo)
-    }
-
-    #[tokio::test]
-    async fn reduce_entity_introduction_creates_entity() {
-        let (pool, claim_repo, _entity_repo, _property_repo) = setup().await;
-
-        let span_id: (String,) =
-            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let run_id: (String,) =
-            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        // Create a claim
-        let claim = claim_repo
-            .create_claim(
-                "b1",
-                1,
-                "entity_introduction",
-                Some("张三"),
-                None,
-                None,
-                None,
-                "is a character",
-                Some(r#"{"short_summary":"主角","aliases":["小张"]}"#),
-                None,
-                &span_id.0,
-                &run_id.0,
-                0.9,
-                "low",
-            )
-            .await
-            .unwrap();
-
-        let claims = vec![claim];
-        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
-
-        assert_eq!(result.entities_created.len(), 1);
-        assert_eq!(result.claims_accepted.len(), 1);
-
-        // Verify entity exists (using pool directly for read)
-        let entity_repo = EntityRepo::new(pool.clone());
-        let entity = entity_repo
-            .find_entity_by_alias("b1", "张三")
-            .await
-            .unwrap();
-        assert!(entity.is_some());
-        assert_eq!(entity.unwrap().canonical_name, "张三");
-    }
-
-    #[tokio::test]
-    async fn reduce_property_update_replace() {
-        let (pool, claim_repo, _entity_repo, _property_repo) = setup().await;
-
-        let span_id: (String,) =
-            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let run_id: (String,) =
-            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        // Create entity first
-        let entity_repo = EntityRepo::new(pool.clone());
-        let entity = entity_repo
-            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
-            .await
-            .unwrap();
-
-        // Create property_update claim
-        let claim = claim_repo
-            .create_claim(
-                "b1",
-                1,
-                "property_update",
-                Some("张三"),
-                None,
-                Some(&entity.id),
-                None,
-                "realm = 筑基期",
-                Some("筑基期"),
-                None,
-                &span_id.0,
-                &run_id.0,
-                0.85,
-                "low",
-            )
-            .await
-            .unwrap();
-
-        let claims = vec![claim];
-        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
-
-        assert_eq!(result.properties_inserted.len(), 1);
-        assert_eq!(result.claims_accepted.len(), 1);
-
-        // Verify property exists
-        let property_repo = PropertyRepo::new(pool.clone());
-        let current = property_repo
-            .get_current_property("b1", &entity.id, "realm")
-            .await
-            .unwrap();
-        assert!(current.is_some());
-        assert_eq!(current.unwrap().value_text.as_deref(), Some("筑基期"));
     }
 
     #[tokio::test]
@@ -2553,8 +2509,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reduce_alias_creates_alias() {
-        let (pool, claim_repo, entity_repo, _property_repo) = setup().await;
+    async fn character_reducer_accepts_typed_entity_command_without_claim_value_json() {
+        let (pool, claim_repo, _entity_repo, _property_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -2566,86 +2522,16 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-
-        // Create entity first
-        let entity = entity_repo
-            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
-            .await
-            .unwrap();
-
-        // Create alias claim
-        let claim = claim_repo
+        let ledger_claim = claim_repo
             .create_claim(
                 "b1",
                 1,
-                "alias",
+                "entity_introduction",
                 Some("张三"),
-                Some("小张"),
-                Some(&entity.id),
-                None,
-                "also known as 小张",
                 None,
                 None,
-                &span_id.0,
-                &run_id.0,
-                0.85,
-                "low",
-            )
-            .await
-            .unwrap();
-
-        let claims = vec![claim];
-        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
-
-        assert_eq!(result.aliases_created.len(), 1);
-        assert_eq!(result.claims_accepted.len(), 1);
-
-        // Verify alias exists
-        let found = entity_repo
-            .find_entity_by_alias("b1", "小张")
-            .await
-            .unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().id, entity.id);
-
-        // Verify last_seen_chapter was updated
-        let updated_entity = entity_repo.get_by_id(&entity.id).await.unwrap().unwrap();
-        assert_eq!(updated_entity.last_seen_chapter, 1);
-    }
-
-    #[tokio::test]
-    async fn reduce_alias_updates_last_seen_chapter() {
-        let (pool, claim_repo, entity_repo, _property_repo) = setup().await;
-
-        let span_id: (String,) =
-            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let run_id: (String,) =
-            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        // Create entity at chapter 1
-        let entity = entity_repo
-            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
-            .await
-            .unwrap();
-        assert_eq!(entity.last_seen_chapter, 1);
-
-        // Alias claim at chapter 5
-        let claim = claim_repo
-            .create_claim(
-                "b1",
-                5,
-                "alias",
-                Some("张三"),
-                Some("张真人"),
-                Some(&entity.id),
                 None,
-                "also known as 张真人",
+                "recorded only as ledger provenance",
                 None,
                 None,
                 &span_id.0,
@@ -2656,20 +2542,44 @@ mod tests {
             .await
             .unwrap();
 
-        let claims = vec![claim];
-        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
-        assert_eq!(result.claims_accepted.len(), 1);
+        let command = CharacterWriteCommand::IntroduceEntity {
+            book_id: "b1".to_string(),
+            entity_type: "character".to_string(),
+            canonical_name: "张三".to_string(),
+            display_name: "张三".to_string(),
+            short_summary: Some("主角".to_string()),
+            aliases: vec!["小张".to_string()],
+            chapter_index: 1,
+            confidence: 0.9,
+            provenance: CharacterWriteProvenance {
+                claim_id: ledger_claim.id,
+                evidence_span_ids: vec![],
+            },
+        };
 
-        // Verify last_seen_chapter updated to 5
-        let updated = entity_repo.get_by_id(&entity.id).await.unwrap().unwrap();
-        assert_eq!(
-            updated.last_seen_chapter, 5,
-            "last_seen_chapter should be updated by alias claim"
-        );
+        let result = apply_character_write(command, &pool).await.unwrap();
+
+        assert_eq!(result.entities_created.len(), 1);
+        assert_eq!(result.aliases_created, vec!["小张".to_string()]);
+
+        let entity_repo = EntityRepo::new(pool.clone());
+        let entity = entity_repo
+            .find_entity_by_alias("b1", "张三")
+            .await
+            .unwrap()
+            .expect("typed character command should create canonical alias");
+        assert_eq!(entity.canonical_name, "张三");
+
+        let alias_entity = entity_repo
+            .find_entity_by_alias("b1", "小张")
+            .await
+            .unwrap()
+            .expect("typed character command should create supplied alias");
+        assert_eq!(alias_entity.id, entity.id);
     }
 
     #[tokio::test]
-    async fn reduce_property_update_append() {
+    async fn character_reducer_accepts_typed_alias_command_without_claim_object_mention() {
         let (pool, claim_repo, entity_repo, _property_repo) = setup().await;
 
         let span_id: (String,) =
@@ -2682,79 +2592,184 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-
-        // Create entity
         let entity = entity_repo
             .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
             .await
             .unwrap();
+        entity_repo
+            .create_alias("b1", &entity.id, "张三", "canonical", 1, 0.9, None)
+            .await
+            .unwrap();
+        let ledger_claim = claim_repo
+            .create_claim(
+                "b1",
+                3,
+                "alias",
+                Some("张三"),
+                None,
+                Some(&entity.id),
+                None,
+                "recorded only as ledger provenance",
+                None,
+                None,
+                &span_id.0,
+                &run_id.0,
+                0.88,
+                "low",
+            )
+            .await
+            .unwrap();
 
-        // First ability claim
-        let claim1 = claim_repo
+        let command = CharacterWriteCommand::AddAlias {
+            book_id: "b1".to_string(),
+            entity_id: entity.id.clone(),
+            alias: "张真人".to_string(),
+            alias_type: "title".to_string(),
+            chapter_index: 3,
+            confidence: 0.88,
+            provenance: CharacterWriteProvenance {
+                claim_id: ledger_claim.id,
+                evidence_span_ids: vec![],
+            },
+        };
+
+        let result = apply_character_write(command, &pool).await.unwrap();
+
+        assert_eq!(result.aliases_created, vec!["张真人".to_string()]);
+        let found = entity_repo
+            .find_entity_by_alias("b1", "张真人")
+            .await
+            .unwrap()
+            .expect("typed alias command should create supplied alias");
+        assert_eq!(found.id, entity.id);
+        let updated = entity_repo.get_by_id(&entity.id).await.unwrap().unwrap();
+        assert_eq!(updated.last_seen_chapter, 3);
+    }
+
+    #[tokio::test]
+    async fn character_reducer_accepts_typed_property_command_without_claim_predicate_or_value_json(
+    ) {
+        let (pool, claim_repo, entity_repo, _property_repo) = setup().await;
+
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let entity = entity_repo
+            .create_entity("b1", "character", "张三", "张三", None, 0.9, 1)
+            .await
+            .unwrap();
+        let ledger_claim = claim_repo
+            .create_claim(
+                "b1",
+                4,
+                "property_update",
+                Some("张三"),
+                None,
+                Some(&entity.id),
+                None,
+                "recorded only as ledger provenance",
+                None,
+                None,
+                &span_id.0,
+                &run_id.0,
+                0.86,
+                "low",
+            )
+            .await
+            .unwrap();
+
+        let command = CharacterWriteCommand::UpdateProperty {
+            book_id: "b1".to_string(),
+            entity_id: entity.id.clone(),
+            dimension_key: "realm".to_string(),
+            value_text: Some("金丹".to_string()),
+            value_json: None,
+            chapter_index: 4,
+            confidence: 0.86,
+            provenance: CharacterWriteProvenance {
+                claim_id: ledger_claim.id,
+                evidence_span_ids: vec![],
+            },
+        };
+
+        let result = apply_character_write(command, &pool).await.unwrap();
+
+        assert_eq!(result.properties_inserted.len(), 1);
+        let property_repo = PropertyRepo::new(pool.clone());
+        let current = property_repo
+            .get_current_property("b1", &entity.id, "realm")
+            .await
+            .unwrap()
+            .expect("typed property command should update canonical property");
+        assert_eq!(current.value_text.as_deref(), Some("金丹"));
+        let updated = entity_repo.get_by_id(&entity.id).await.unwrap().unwrap();
+        assert_eq!(updated.last_seen_chapter, 4);
+    }
+
+    #[tokio::test]
+    async fn generic_reduce_claims_no_longer_applies_character_profile_claims() {
+        let (pool, claim_repo, entity_repo, _property_repo) = setup().await;
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let claim = claim_repo
             .create_claim(
                 "b1",
                 1,
-                "property_update",
-                Some("张三"),
+                "entity_introduction",
+                Some("旧桥角色"),
                 None,
-                Some(&entity.id),
                 None,
-                "ability = 剑法",
-                Some("剑法"),
                 None,
+                "is a character",
+                None,
+                Some(r#"{"entity_type":"character","aliases":["旧桥"]}"#),
                 &span_id.0,
                 &run_id.0,
-                0.85,
+                0.9,
                 "low",
             )
             .await
             .unwrap();
 
-        // Second ability claim
-        let claim2 = claim_repo
-            .create_claim(
-                "b1",
-                2,
-                "property_update",
-                Some("张三"),
-                None,
-                Some(&entity.id),
-                None,
-                "ability = 拳法",
-                Some("拳法"),
-                None,
-                &span_id.0,
-                &run_id.0,
-                0.8,
-                "low",
-            )
-            .await
-            .unwrap();
+        let result = reduce_claims(&[claim.clone()], "b1", &pool).await.unwrap();
 
-        let claims = vec![claim1, claim2];
-        let result = reduce_claims(&claims, "b1", &pool).await.unwrap();
-
-        assert_eq!(result.properties_inserted.len(), 2);
-        assert_eq!(result.claims_accepted.len(), 2);
-
-        // Verify append aggregation
-        let property_repo = PropertyRepo::new(pool.clone());
-        let current = property_repo
-            .get_current_property("b1", &entity.id, "ability")
-            .await
-            .unwrap();
-        assert!(current.is_some());
-        let current = current.unwrap();
-        // value_json should contain aggregated list
-        assert!(current.value_json.is_some());
-        let json: serde_json::Value = serde_json::from_str(&current.value_json.unwrap()).unwrap();
-        assert!(json.as_array().unwrap().len() >= 1);
+        assert!(result.claims_accepted.is_empty());
+        assert!(
+            entity_repo
+                .find_entity_by_alias("b1", "旧桥角色")
+                .await
+                .unwrap()
+                .is_none(),
+            "generic reducer must not apply character/profile claims; character_processor owns typed commands"
+        );
+        let stored = claim_repo.get_claim(&claim.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "proposed");
     }
 
     // --- Relationship Reducer Tests ---
 
-    /// Helper: build a relationship_update claim value_json with Judge normalized fields.
-    fn judge_value_json(
+    /// Helper: build the typed relationship command owned by Step 3.
+    fn relationship_write_command(
+        claim_id: &str,
+        subject_character_id: &str,
+        object_character_id: &str,
+        chapter_index: i64,
+        evidence_span_id: &str,
         group: &str,
         label: &str,
         directionality: &str,
@@ -2763,21 +2778,25 @@ mod tests {
         polarity: &str,
         importance_score: f64,
         judge_confidence: f64,
-    ) -> String {
-        serde_json::json!({
-            "normalized_relation_group": group,
-            "normalized_relation_label": label,
-            "directionality": directionality,
-            "current_state": current_state,
-            "strength": strength,
-            "polarity": polarity,
-            "importance_score": importance_score,
-            "judge_confidence": judge_confidence,
-            // Extractor hints should be ignored by reducer
-            "relation_hint": "SHOULD_BE_IGNORED",
-            "relation_group": "SHOULD_BE_IGNORED",
-        })
-        .to_string()
+    ) -> RelationshipWriteCommand {
+        RelationshipWriteCommand {
+            book_id: "b1".to_string(),
+            subject_character_id: subject_character_id.to_string(),
+            object_character_id: object_character_id.to_string(),
+            relation_group: group.to_string(),
+            relation_label: label.to_string(),
+            directionality: directionality.to_string(),
+            current_state: current_state.map(|state| state.to_string()),
+            strength,
+            polarity: polarity.to_string(),
+            importance_score,
+            confidence: judge_confidence,
+            chapter_index,
+            provenance: RelationshipWriteProvenance {
+                claim_id: claim_id.to_string(),
+                evidence_span_ids: vec![evidence_span_id.to_string()],
+            },
+        }
     }
 
     /// Helper: create two character entities, return their IDs.
@@ -2794,6 +2813,51 @@ mod tests {
             .await
             .unwrap();
         (e1.id, e2.id)
+    }
+
+    fn identity_merge_command(
+        claim_id: &str,
+        entity_a_id: &str,
+        entity_b_id: &str,
+        evidence_span_id: &str,
+        survivor_hint: &str,
+        confidence: f64,
+        reason_code: &str,
+    ) -> IdentityWriteCommand {
+        IdentityWriteCommand::Merge {
+            book_id: "b1".to_string(),
+            entity_a_id: entity_a_id.to_string(),
+            entity_b_id: entity_b_id.to_string(),
+            link_type: "same_identity".to_string(),
+            survivor_hint: survivor_hint.to_string(),
+            confidence,
+            reason_code: reason_code.to_string(),
+            provenance: IdentityWriteProvenance {
+                claim_id: claim_id.to_string(),
+                evidence_span_ids: vec![evidence_span_id.to_string()],
+            },
+        }
+    }
+
+    fn identity_link_command(
+        claim_id: &str,
+        entity_a_id: &str,
+        entity_b_id: &str,
+        evidence_span_id: &str,
+        link_type: &str,
+        confidence: f64,
+    ) -> IdentityWriteCommand {
+        IdentityWriteCommand::Link {
+            book_id: "b1".to_string(),
+            entity_a_id: entity_a_id.to_string(),
+            entity_b_id: entity_b_id.to_string(),
+            link_type: link_type.to_string(),
+            confidence,
+            provenance: IdentityWriteProvenance {
+                claim_id: claim_id.to_string(),
+                evidence_span_ids: vec![evidence_span_id.to_string()],
+            },
+        }
     }
 
     /// Helper: create a non-character entity.
@@ -2837,16 +2901,7 @@ mod tests {
                 Some(&object_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "friendship",
-                    "friends",
-                    "undirected",
-                    None,
-                    0.7,
-                    "positive",
-                    0.8,
-                    0.9,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.9,
@@ -2855,9 +2910,22 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_relationship_claims(&[claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &claim.id,
+            &subject_id,
+            &object_id,
+            1,
+            &span_id.0,
+            "friendship",
+            "friends",
+            "undirected",
+            None,
+            0.7,
+            "positive",
+            0.8,
+            0.9,
+        );
+        let result = apply_relationship_write(command, &pool).await.unwrap();
 
         assert_eq!(result.relationships_created.len(), 1);
         assert_eq!(result.events_created.len(), 1);
@@ -2881,6 +2949,67 @@ mod tests {
         };
         assert_eq!(&rel.subject_character_id, expected_sub);
         assert_eq!(&rel.object_character_id, expected_obj);
+    }
+
+    #[tokio::test]
+    async fn rel_reducer_accepts_typed_command_without_claim_value_json() {
+        let (pool, claim_repo, entity_repo, _) = setup().await;
+        let (subject_id, object_id) = create_two_characters(&pool, &entity_repo).await;
+
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let claim = claim_repo
+            .create_claim(
+                "b1",
+                1,
+                "relationship_update",
+                Some("张三"),
+                Some("李四"),
+                Some(&subject_id),
+                Some(&object_id),
+                "relationship",
+                None,
+                None,
+                &span_id.0,
+                &run_id.0,
+                0.9,
+                "high",
+            )
+            .await
+            .unwrap();
+
+        let command = RelationshipWriteCommand {
+            book_id: "b1".to_string(),
+            subject_character_id: subject_id.clone(),
+            object_character_id: object_id.clone(),
+            relation_group: "friendship".to_string(),
+            relation_label: "friends".to_string(),
+            directionality: "undirected".to_string(),
+            current_state: None,
+            strength: 0.7,
+            polarity: "positive".to_string(),
+            importance_score: 0.8,
+            confidence: 0.9,
+            chapter_index: 1,
+            provenance: RelationshipWriteProvenance {
+                claim_id: claim.id,
+                evidence_span_ids: vec![span_id.0],
+            },
+        };
+
+        let result = apply_relationship_write(command, &pool).await.unwrap();
+
+        assert_eq!(result.relationships_created.len(), 1);
+        assert_eq!(result.events_created.len(), 1);
+        assert!(result.claims_skipped.is_empty());
     }
 
     #[tokio::test]
@@ -2911,16 +3040,7 @@ mod tests {
                 Some(&object_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "friendship",
-                    "friends",
-                    "undirected",
-                    Some("close"),
-                    0.7,
-                    "positive",
-                    0.8,
-                    0.9,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.9,
@@ -2929,9 +3049,22 @@ mod tests {
             .await
             .unwrap();
 
-        let result1 = reduce_relationship_claims(&[claim1], "b1", &pool)
-            .await
-            .unwrap();
+        let command1 = relationship_write_command(
+            &claim1.id,
+            &subject_id,
+            &object_id,
+            1,
+            &span_id.0,
+            "friendship",
+            "friends",
+            "undirected",
+            Some("close"),
+            0.7,
+            "positive",
+            0.8,
+            0.9,
+        );
+        let result1 = apply_relationship_write(command1, &pool).await.unwrap();
         assert_eq!(result1.relationships_created.len(), 1);
 
         // Second claim: update same pair + same group
@@ -2946,16 +3079,7 @@ mod tests {
                 Some(&object_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "friendship",
-                    "best friends",
-                    "undirected",
-                    Some("very close"),
-                    0.9,
-                    "positive",
-                    0.9,
-                    0.95,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.95,
@@ -2964,9 +3088,22 @@ mod tests {
             .await
             .unwrap();
 
-        let result2 = reduce_relationship_claims(&[claim2], "b1", &pool)
-            .await
-            .unwrap();
+        let command2 = relationship_write_command(
+            &claim2.id,
+            &subject_id,
+            &object_id,
+            5,
+            &span_id.0,
+            "friendship",
+            "best friends",
+            "undirected",
+            Some("very close"),
+            0.9,
+            "positive",
+            0.9,
+            0.95,
+        );
+        let result2 = apply_relationship_write(command2, &pool).await.unwrap();
         assert_eq!(result2.relationships_updated.len(), 1);
         assert_eq!(result2.relationships_created.len(), 0);
         assert_eq!(result2.claims_accepted.len(), 1);
@@ -3013,16 +3150,7 @@ mod tests {
                 Some(&object_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "friendship",
-                    "friends",
-                    "undirected",
-                    None,
-                    0.7,
-                    "positive",
-                    0.8,
-                    0.9,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.9,
@@ -3043,16 +3171,7 @@ mod tests {
                 Some(&object_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "rivalry",
-                    "rivals",
-                    "directed",
-                    Some("competitive"),
-                    0.6,
-                    "negative",
-                    0.7,
-                    0.85,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.85,
@@ -3061,15 +3180,43 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_relationship_claims(&[claim1, claim2], "b1", &pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            result.relationships_created.len(),
-            2,
-            "different groups should coexist"
+        let command1 = relationship_write_command(
+            &claim1.id,
+            &subject_id,
+            &object_id,
+            1,
+            &span_id.0,
+            "friendship",
+            "friends",
+            "undirected",
+            None,
+            0.7,
+            "positive",
+            0.8,
+            0.9,
         );
-        assert_eq!(result.claims_accepted.len(), 2);
+        let command2 = relationship_write_command(
+            &claim2.id,
+            &subject_id,
+            &object_id,
+            2,
+            &span_id.0,
+            "rivalry",
+            "rivals",
+            "directed",
+            Some("competitive"),
+            0.6,
+            "negative",
+            0.7,
+            0.85,
+        );
+        let result1 = apply_relationship_write(command1, &pool).await.unwrap();
+        let result2 = apply_relationship_write(command2, &pool).await.unwrap();
+        let relationships_created =
+            result1.relationships_created.len() + result2.relationships_created.len();
+        let claims_accepted = result1.claims_accepted.len() + result2.claims_accepted.len();
+        assert_eq!(relationships_created, 2, "different groups should coexist");
+        assert_eq!(claims_accepted, 2);
 
         // Verify both relationships exist
         let rel_repo = RelationshipRepo::new(pool.clone());
@@ -3108,16 +3255,7 @@ mod tests {
                 Some(&object_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "mentorship",
-                    "mentor",
-                    "directed",
-                    Some("teaching"),
-                    0.8,
-                    "positive",
-                    0.9,
-                    0.95,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.95,
@@ -3126,9 +3264,22 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_relationship_claims(&[claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &claim.id,
+            &subject_id,
+            &object_id,
+            1,
+            &span_id.0,
+            "mentorship",
+            "mentor",
+            "directed",
+            Some("teaching"),
+            0.8,
+            "positive",
+            0.9,
+            0.95,
+        );
+        let result = apply_relationship_write(command, &pool).await.unwrap();
         assert_eq!(result.relationships_created.len(), 1);
 
         // Verify direction preserved (NOT canonicalized)
@@ -3172,16 +3323,7 @@ mod tests {
                 Some(smaller),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "friendship",
-                    "friends",
-                    "undirected",
-                    None,
-                    0.7,
-                    "positive",
-                    0.8,
-                    0.9,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.9,
@@ -3190,9 +3332,22 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_relationship_claims(&[claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &claim.id,
+            larger,
+            smaller,
+            1,
+            &span_id.0,
+            "friendship",
+            "friends",
+            "undirected",
+            None,
+            0.7,
+            "positive",
+            0.8,
+            0.9,
+        );
+        let result = apply_relationship_write(command, &pool).await.unwrap();
         assert_eq!(result.relationships_created.len(), 1);
 
         // Verify canonicalized: smaller ID as subject
@@ -3241,16 +3396,7 @@ mod tests {
                 Some(&char_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "hierarchy",
-                    "belongs to",
-                    "directed",
-                    None,
-                    0.5,
-                    "neutral",
-                    0.5,
-                    0.8,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.8,
@@ -3259,22 +3405,30 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_relationship_claims(&[claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &claim.id,
+            &place_id,
+            &char_id,
+            1,
+            &span_id.0,
+            "hierarchy",
+            "belongs to",
+            "directed",
+            None,
+            0.5,
+            "neutral",
+            0.5,
+            0.8,
+        );
+        let result = apply_relationship_write(command, &pool).await;
 
-        // Should be skipped, not create a relationship
-        assert!(result.relationships_created.is_empty());
-        assert!(result.claims_accepted.is_empty());
-        assert_eq!(result.claims_skipped.len(), 1);
+        assert!(
+            result.is_err(),
+            "typed relationship command with non-character subject should be rejected"
+        );
 
-        // Verify claim still proposed (not accepted)
         let claim_repo2 = ClaimRepo::new(pool.clone());
-        let fetched = claim_repo2
-            .get_claim(&result.claims_skipped[0])
-            .await
-            .unwrap()
-            .unwrap();
+        let fetched = claim_repo2.get_claim(&claim.id).await.unwrap().unwrap();
         assert_eq!(fetched.status, "proposed");
     }
 
@@ -3307,16 +3461,7 @@ mod tests {
                 Some(&ability_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "other_social",
-                    "practices",
-                    "undirected",
-                    None,
-                    0.3,
-                    "neutral",
-                    0.3,
-                    0.7,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.7,
@@ -3325,13 +3470,27 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_relationship_claims(&[claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &claim.id,
+            &char_id,
+            &ability_id,
+            1,
+            &span_id.0,
+            "other_social",
+            "practices",
+            "undirected",
+            None,
+            0.3,
+            "neutral",
+            0.3,
+            0.7,
+        );
+        let result = apply_relationship_write(command, &pool).await;
 
-        assert!(result.relationships_created.is_empty());
-        assert!(result.claims_accepted.is_empty());
-        assert_eq!(result.claims_skipped.len(), 1);
+        assert!(
+            result.is_err(),
+            "typed relationship command with non-character object should be rejected"
+        );
     }
 
     #[tokio::test]
@@ -3350,7 +3509,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        // First: run entity_reducer to create an entity (simulating Phase 1)
+        // First: run typed character reducer to create an entity (simulating Phase 1)
         let entity_claim = claim_repo
             .create_claim(
                 "b1",
@@ -3370,7 +3529,25 @@ mod tests {
             )
             .await
             .unwrap();
-        let entity_result = reduce_claims(&[entity_claim], "b1", &pool).await.unwrap();
+        let entity_result = apply_character_write(
+            CharacterWriteCommand::IntroduceEntity {
+                book_id: "b1".to_string(),
+                entity_type: "character".to_string(),
+                canonical_name: "王五".to_string(),
+                display_name: "王五".to_string(),
+                short_summary: Some("新角色".to_string()),
+                aliases: vec![],
+                chapter_index: 1,
+                confidence: 0.9,
+                provenance: CharacterWriteProvenance {
+                    claim_id: entity_claim.id,
+                    evidence_span_ids: vec![span_id.0.clone()],
+                },
+            },
+            &pool,
+        )
+        .await
+        .unwrap();
         assert_eq!(entity_result.entities_created.len(), 1);
 
         // Now: run relationship_reducer with a claim that will fail (missing entity)
@@ -3385,16 +3562,7 @@ mod tests {
                 Some("nonexistent_id_2"),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "friendship",
-                    "friends",
-                    "undirected",
-                    None,
-                    0.5,
-                    "neutral",
-                    0.5,
-                    0.8,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.8,
@@ -3403,13 +3571,27 @@ mod tests {
             .await
             .unwrap();
 
-        let rel_result = reduce_relationship_claims(&[bad_rel_claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &bad_rel_claim.id,
+            "nonexistent_id_1",
+            "nonexistent_id_2",
+            1,
+            &span_id.0,
+            "friendship",
+            "friends",
+            "undirected",
+            None,
+            0.5,
+            "neutral",
+            0.5,
+            0.8,
+        );
+        let rel_result = apply_relationship_write(command, &pool).await;
 
-        // Relationship failed (skipped)
-        assert!(rel_result.relationships_created.is_empty());
-        assert_eq!(rel_result.claims_skipped.len(), 1);
+        assert!(
+            rel_result.is_err(),
+            "bad relationship command should fail its own transaction"
+        );
 
         // But entity from Phase 1 is still there
         let entity = entity_repo
@@ -3424,7 +3606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rel_reducer_claims_marked_accepted_after_success() {
+    async fn rel_reducer_reports_accepted_claim_without_mutating_ledger_status() {
         let (pool, claim_repo, entity_repo, _) = setup().await;
         let (subject_id, object_id) = create_two_characters(&pool, &entity_repo).await;
 
@@ -3450,16 +3632,7 @@ mod tests {
                 Some(&object_id),
                 "relationship",
                 None,
-                Some(&judge_value_json(
-                    "friendship",
-                    "friends",
-                    "undirected",
-                    None,
-                    0.7,
-                    "positive",
-                    0.8,
-                    0.9,
-                )),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.9,
@@ -3471,20 +3644,33 @@ mod tests {
         // Verify claim starts as proposed
         assert_eq!(claim.status, "proposed");
 
-        let result = reduce_relationship_claims(&[claim.clone()], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &claim.id,
+            &subject_id,
+            &object_id,
+            1,
+            &span_id.0,
+            "friendship",
+            "friends",
+            "undirected",
+            None,
+            0.7,
+            "positive",
+            0.8,
+            0.9,
+        );
+        let result = apply_relationship_write(command, &pool).await.unwrap();
         assert_eq!(result.claims_accepted.len(), 1);
         assert_eq!(result.claims_accepted[0], claim.id);
 
-        // Verify claim status is now accepted in DB
+        // Step 4 reports the outcome; Step 3/pipeline owns ledger status transitions.
         let claim_repo2 = ClaimRepo::new(pool.clone());
         let fetched = claim_repo2.get_claim(&claim.id).await.unwrap().unwrap();
-        assert_eq!(fetched.status, "accepted");
+        assert_eq!(fetched.status, "proposed");
     }
 
     #[tokio::test]
-    async fn rel_reducer_reads_judge_fields_not_extractor_hints() {
+    async fn rel_reducer_uses_typed_command_fields_not_claim_payload_hints() {
         let (pool, claim_repo, entity_repo, _) = setup().await;
         let (subject_id, object_id) = create_two_characters(&pool, &entity_repo).await;
 
@@ -3499,18 +3685,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        // value_json has DIFFERENT extractor hints vs judge normalized fields
+        // The ledger payload may preserve extractor hints, but Step 4 must only
+        // apply the typed command materialized by Step 3.
         let value_json = serde_json::json!({
-            // Judge normalized fields (these should be used)
-            "normalized_relation_group": "mentorship",
-            "normalized_relation_label": "master",
-            "directionality": "directed",
-            "current_state": "teaching",
-            "strength": 0.9,
-            "polarity": "positive",
-            "importance_score": 0.95,
-            "judge_confidence": 0.95,
-            // Extractor hints (these should be IGNORED)
             "relation_hint": "对手",
             "relation_group": "rivalry",
             "relation_label": "对手",
@@ -3539,12 +3716,25 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_relationship_claims(&[claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = relationship_write_command(
+            &claim.id,
+            &subject_id,
+            &object_id,
+            1,
+            &span_id.0,
+            "mentorship",
+            "master",
+            "directed",
+            Some("teaching"),
+            0.9,
+            "positive",
+            0.95,
+            0.95,
+        );
+        let result = apply_relationship_write(command, &pool).await.unwrap();
         assert_eq!(result.relationships_created.len(), 1);
 
-        // Verify the relationship uses JUDGE fields, not extractor hints
+        // Verify the relationship uses command fields, not preserved ledger hints.
         let rel_repo = RelationshipRepo::new(pool.clone());
         let rel = rel_repo
             .get_by_id(&result.relationships_created[0])
@@ -3553,28 +3743,27 @@ mod tests {
             .unwrap();
         assert_eq!(
             rel.relation_group, "mentorship",
-            "should use judge normalized_relation_group, not extractor relation_group"
+            "should use command relation_group, not claim payload relation_group"
         );
         assert_eq!(
             rel.relation_label, "master",
-            "should use judge normalized_relation_label, not extractor relation_label"
+            "should use command relation_label, not claim payload relation_label"
         );
         assert_eq!(rel.directionality, "directed");
         assert!(
             (rel.confidence - 0.95).abs() < f64::EPSILON,
-            "should use judge_confidence"
+            "should use command confidence"
         );
         assert!(
             (rel.importance_score - 0.95).abs() < f64::EPSILON,
-            "should use judge importance_score"
+            "should use command importance_score"
         );
     }
 
     #[tokio::test]
-    async fn rel_reducer_skips_non_relationship_claims() {
+    async fn identity_reducer_accepts_typed_link_command_without_claim_value_json() {
         let (pool, claim_repo, entity_repo, _) = setup().await;
-        let (subject_id, _) = create_two_characters(&pool, &entity_repo).await;
-
+        let (entity_a_id, entity_b_id) = create_two_characters(&pool, &entity_repo).await;
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
                 .fetch_one(&pool)
@@ -3585,35 +3774,107 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-
-        // entity_introduction claim - should be ignored by relationship_reducer
-        let claim = claim_repo
+        let ledger_claim = claim_repo
             .create_claim(
                 "b1",
-                1,
-                "entity_introduction",
+                8,
+                "not_same_identity",
                 Some("张三"),
-                None,
-                Some(&subject_id),
-                None,
-                "is a character",
+                Some("李四"),
+                Some(&entity_a_id),
+                Some(&entity_b_id),
+                "not same identity",
                 None,
                 None,
                 &span_id.0,
                 &run_id.0,
                 0.9,
-                "low",
+                "high",
             )
             .await
             .unwrap();
+        let command = IdentityWriteCommand::Link {
+            book_id: "b1".to_string(),
+            entity_a_id: entity_a_id.clone(),
+            entity_b_id: entity_b_id.clone(),
+            link_type: "not_same_identity".to_string(),
+            confidence: 0.92,
+            provenance: IdentityWriteProvenance {
+                claim_id: ledger_claim.id,
+                evidence_span_ids: vec![span_id.0],
+            },
+        };
 
-        let result = reduce_relationship_claims(&[claim], "b1", &pool)
+        let result = apply_identity_write(command, &pool).await.unwrap();
+
+        assert_eq!(result.identity_links_created.len(), 1);
+        assert_eq!(result.claims_accepted.len(), 1);
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM entity_identity_links WHERE book_id = 'b1' AND link_type = 'not_same_identity' AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn identity_reducer_accepts_typed_merge_command_without_claim_value_json() {
+        let (pool, claim_repo, entity_repo, _) = setup().await;
+        let (victim_id, survivor_id) = create_two_characters(&pool, &entity_repo).await;
+        let span_id: (String,) =
+            sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id: (String,) =
+            sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let ledger_claim = claim_repo
+            .create_claim(
+                "b1",
+                8,
+                "identity_reveal",
+                Some("张三"),
+                Some("李四"),
+                Some(&victim_id),
+                Some(&survivor_id),
+                "identity reveal",
+                None,
+                None,
+                &span_id.0,
+                &run_id.0,
+                0.9,
+                "high",
+            )
             .await
             .unwrap();
-        assert!(result.relationships_created.is_empty());
-        assert!(result.claims_accepted.is_empty());
-        // No claims should be processed (not even skipped - they're filtered out)
-        assert!(result.claims_skipped.is_empty());
+        let command = IdentityWriteCommand::Merge {
+            book_id: "b1".to_string(),
+            entity_a_id: victim_id.clone(),
+            entity_b_id: survivor_id.clone(),
+            link_type: "same_identity".to_string(),
+            survivor_hint: "entity_b".to_string(),
+            confidence: 0.94,
+            reason_code: "explicit_reveal".to_string(),
+            provenance: IdentityWriteProvenance {
+                claim_id: ledger_claim.id,
+                evidence_span_ids: vec![span_id.0],
+            },
+        };
+
+        let result = apply_identity_write(command, &pool).await.unwrap();
+
+        assert_eq!(result.identity_links_created.len(), 1);
+        assert_eq!(result.redirects_created.len(), 1);
+        assert_eq!(result.merge_operations_completed.len(), 1);
+        assert_eq!(result.claims_accepted.len(), 1);
+        let victim = entity_repo.get_by_id(&victim_id).await.unwrap().unwrap();
+        let survivor = entity_repo.get_by_id(&survivor_id).await.unwrap().unwrap();
+        assert_eq!(victim.status, "merged");
+        assert_eq!(survivor.status, "active");
     }
 
     #[tokio::test]
@@ -3655,9 +3916,7 @@ mod tests {
                 Some(&survivor.id),
                 "黑衣人 is revealed as 张三",
                 Some("摘下面具"),
-                Some(
-                    r#"{"judge_decision":"merge","link_type":"same_identity","survivor_hint":"entity_b","judge_confidence":0.96,"reason_code":"explicit_reveal"}"#,
-                ),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.96,
@@ -3666,9 +3925,16 @@ mod tests {
             .await
             .unwrap();
 
-        reduce_identity_claims(&[claim.clone()], "b1", &pool)
-            .await
-            .unwrap();
+        let command = identity_merge_command(
+            &claim.id,
+            &victim.id,
+            &survivor.id,
+            &span_id.0,
+            "entity_b",
+            0.96,
+            "explicit_reveal",
+        );
+        apply_identity_write(command, &pool).await.unwrap();
 
         let victim_after = entity_repo.get_by_id(&victim.id).await.unwrap().unwrap();
         let survivor_after = entity_repo.get_by_id(&survivor.id).await.unwrap().unwrap();
@@ -3719,8 +3985,7 @@ mod tests {
             "victim alias should transfer to survivor"
         );
 
-        let stored_claim = claim_repo.get_claim(&claim.id).await.unwrap().unwrap();
-        assert_eq!(stored_claim.status, "accepted");
+        assert!(claim_repo.get_claim(&claim.id).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -3823,9 +4088,7 @@ mod tests {
                 Some(&survivor.id),
                 "黑衣人 is revealed as 张三",
                 Some("摘下面具"),
-                Some(
-                    r#"{"judge_decision":"merge","link_type":"same_identity","survivor_hint":"entity_b","judge_confidence":0.96,"reason_code":"explicit_reveal"}"#,
-                ),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.96,
@@ -3834,9 +4097,16 @@ mod tests {
             .await
             .unwrap();
 
-        reduce_identity_claims(&[merge_claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = identity_merge_command(
+            &merge_claim.id,
+            &victim.id,
+            &survivor.id,
+            &span_id.0,
+            "entity_b",
+            0.96,
+            "explicit_reveal",
+        );
+        apply_identity_write(command, &pool).await.unwrap();
 
         let current = property_repo
             .get_current_property("b1", &survivor.id, "realm")
@@ -3897,9 +4167,7 @@ mod tests {
                 Some(&entity_b.id),
                 "黑衣人与张三极为相似",
                 Some("只是相似"),
-                Some(
-                    r#"{"judge_decision":"possible_same_identity","link_type":"possible_same_identity","survivor_hint":"unknown","judge_confidence":0.62,"reason_code":"weak_similarity"}"#,
-                ),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.62,
@@ -3908,9 +4176,15 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_identity_claims(&[claim.clone()], "b1", &pool)
-            .await
-            .unwrap();
+        let command = identity_link_command(
+            &claim.id,
+            &entity_a.id,
+            &entity_b.id,
+            &span_id.0,
+            "possible_same_identity",
+            0.62,
+        );
+        let result = apply_identity_write(command, &pool).await.unwrap();
 
         assert_eq!(result.identity_links_created.len(), 1);
         assert!(result.merge_operations_completed.is_empty());
@@ -3930,15 +4204,7 @@ mod tests {
                 .status,
             "active"
         );
-        assert_eq!(
-            claim_repo
-                .get_claim(&claim.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "accepted"
-        );
+        assert_eq!(result.claims_accepted, vec![claim.id.clone()]);
     }
 
     #[tokio::test]
@@ -3975,9 +4241,7 @@ mod tests {
                 Some(&entity_b.id),
                 "此张三并非彼张三",
                 Some("并非彼张三"),
-                Some(
-                    r#"{"judge_decision":"not_same_identity","link_type":"not_same_identity","survivor_hint":"unknown","judge_confidence":0.98,"reason_code":"explicit_not_same"}"#,
-                ),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.98,
@@ -3986,9 +4250,15 @@ mod tests {
             .await
             .unwrap();
 
-        let result = reduce_identity_claims(&[claim.clone()], "b1", &pool)
-            .await
-            .unwrap();
+        let command = identity_link_command(
+            &claim.id,
+            &entity_a.id,
+            &entity_b.id,
+            &span_id.0,
+            "not_same_identity",
+            0.98,
+        );
+        let result = apply_identity_write(command, &pool).await.unwrap();
 
         assert_eq!(result.identity_links_created.len(), 1);
         assert!(result.merge_operations_completed.is_empty());
@@ -4008,15 +4278,7 @@ mod tests {
                 .status,
             "active"
         );
-        assert_eq!(
-            claim_repo
-                .get_claim(&claim.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "accepted"
-        );
+        assert_eq!(result.claims_accepted, vec![claim.id.clone()]);
     }
 
     #[tokio::test]
@@ -4109,9 +4371,7 @@ mod tests {
                 Some(&survivor.id),
                 "黑衣人 is revealed as 张三",
                 Some("摘下面具"),
-                Some(
-                    r#"{"judge_decision":"merge","link_type":"same_identity","survivor_hint":"entity_b","judge_confidence":0.96,"reason_code":"explicit_reveal"}"#,
-                ),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.96,
@@ -4120,9 +4380,16 @@ mod tests {
             .await
             .unwrap();
 
-        reduce_identity_claims(&[merge_claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = identity_merge_command(
+            &merge_claim.id,
+            &victim.id,
+            &survivor.id,
+            &span_id.0,
+            "entity_b",
+            0.96,
+            "explicit_reveal",
+        );
+        apply_identity_write(command, &pool).await.unwrap();
 
         let migrated_rel = rel_repo.get_by_id(&rel.id).await.unwrap().unwrap();
         assert_eq!(migrated_rel.status, "inactive");
@@ -4280,9 +4547,7 @@ mod tests {
                 Some(&survivor.id),
                 "黑衣人 is revealed as 张三",
                 Some("摘下面具"),
-                Some(
-                    r#"{"judge_decision":"merge","link_type":"same_identity","survivor_hint":"entity_b","judge_confidence":0.96,"reason_code":"explicit_reveal"}"#,
-                ),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.96,
@@ -4291,9 +4556,16 @@ mod tests {
             .await
             .unwrap();
 
-        reduce_identity_claims(&[merge_claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = identity_merge_command(
+            &merge_claim.id,
+            &victim.id,
+            &survivor.id,
+            &span_id.0,
+            "entity_b",
+            0.96,
+            "explicit_reveal",
+        );
+        apply_identity_write(command, &pool).await.unwrap();
 
         let duplicate_after = rel_repo
             .get_by_id(&duplicate_rel.id)
@@ -4422,9 +4694,7 @@ mod tests {
                 Some(&survivor.id),
                 "黑衣人 is revealed as 张三",
                 Some("摘下面具"),
-                Some(
-                    r#"{"judge_decision":"merge","link_type":"same_identity","survivor_hint":"entity_b","judge_confidence":0.96,"reason_code":"explicit_reveal"}"#,
-                ),
+                None,
                 &span_id.0,
                 &run_id.0,
                 0.96,
@@ -4433,9 +4703,16 @@ mod tests {
             .await
             .unwrap();
 
-        reduce_identity_claims(&[merge_claim], "b1", &pool)
-            .await
-            .unwrap();
+        let command = identity_merge_command(
+            &merge_claim.id,
+            &victim.id,
+            &survivor.id,
+            &span_id.0,
+            "entity_b",
+            0.96,
+            "explicit_reveal",
+        );
+        apply_identity_write(command, &pool).await.unwrap();
 
         let migrated_rel = rel_repo.get_by_id(&rel.id).await.unwrap().unwrap();
         assert_eq!(migrated_rel.subject_character_id, survivor.id);

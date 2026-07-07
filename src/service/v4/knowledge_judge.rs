@@ -282,8 +282,8 @@ pub fn parse_judge_output_with_repair(raw: &str) -> anyhow::Result<KnowledgeJudg
 fn materialize_judge_output(raw: RawKnowledgeJudgeOutput) -> anyhow::Result<KnowledgeJudgeOutput> {
     let decision = parse_decision(&raw.decision)?;
     let card_action = parse_card_action(&raw.card_action)?;
-    let no_write = decision == KnowledgeJudgeDecision::Reject
-        || card_action == KnowledgeCardAction::Uncertain;
+    let no_write =
+        decision == KnowledgeJudgeDecision::Reject || card_action == KnowledgeCardAction::Uncertain;
     let assertion_status = if no_write {
         normalize_no_write_assertion_status(raw.assertion_status.as_deref())
     } else {
@@ -1299,7 +1299,10 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let docs = Arc::new(JsonDocumentService::new(pool.clone(), dir.to_str().unwrap()));
+        let docs = Arc::new(JsonDocumentService::new(
+            pool.clone(),
+            dir.to_str().unwrap(),
+        ));
         let ai_service = AiModelService::new(docs, dir.to_str().unwrap());
         let mut config = AiModelConfig::default();
         config.text = AiModelEndpointConfig {
@@ -1313,7 +1316,10 @@ mod tests {
         ai_service.save(config).await.unwrap();
 
         let judge = RealAiKnowledgeRevisionJudge::new(Arc::new(ai_service), pool.clone());
-        let err = judge.judge(&KnowledgeJudgeInput::for_test()).await.unwrap_err();
+        let err = judge
+            .judge(&KnowledgeJudgeInput::for_test())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("invalid assertion_status"));
 
         let runs = AiRunRepo::new(pool)
@@ -1322,7 +1328,15 @@ mod tests {
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "failed");
-        assert!(runs[0].output_json.as_deref().unwrap_or_default().contains("unsupported"));
-        assert!(runs[0].error.as_deref().unwrap_or_default().contains("invalid assertion_status"));
+        assert!(runs[0]
+            .output_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsupported"));
+        assert!(runs[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invalid assertion_status"));
     }
 }

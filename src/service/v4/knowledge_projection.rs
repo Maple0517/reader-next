@@ -1,6 +1,5 @@
 use crate::storage::db::v4::cache_repo::CacheRepo;
 use crate::storage::db::v4::entity_repo::EntityRepo;
-use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::knowledge_repo::{
     KnowledgeAssertionRecord, KnowledgeCardRecord, KnowledgeRepo,
 };
@@ -280,19 +279,14 @@ async fn build_assertion_view(
 async fn build_referenced_entities(
     pool: &SqlitePool,
     repo: &KnowledgeRepo,
-    book_id: &str,
+    _book_id: &str,
     assertion_id: &str,
 ) -> anyhow::Result<Vec<KnowledgeReferencedEntityView>> {
     let entity_repo = EntityRepo::new(pool.clone());
-    let identity_repo = IdentityRepo::new(pool.clone());
     let refs = repo.list_entities_for_assertion(assertion_id).await?;
     let mut views = Vec::new();
     for entity_ref in refs {
-        let entity_id = identity_repo
-            .resolve_redirect_target(book_id, &entity_ref.entity_id)
-            .await?
-            .unwrap_or(entity_ref.entity_id);
-        if let Some(entity) = entity_repo.get_by_id(&entity_id).await? {
+        if let Some(entity) = entity_repo.get_by_id(&entity_ref.entity_id).await? {
             views.push(KnowledgeReferencedEntityView {
                 entity_id: entity.id,
                 display_name: entity.display_name,
@@ -445,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detail_groups_assertions_and_resolves_referenced_entity_redirects() {
+    async fn detail_groups_assertions_and_preserves_canonical_referenced_entity_ids() {
         let (pool, repo, entity_repo, claim_id) = setup().await;
         let victim = entity_repo
             .create_entity("b1", "concept", "masked", "Masked Concept", None, 0.4, 1)
@@ -453,18 +447,6 @@ mod tests {
             .unwrap();
         let survivor = entity_repo
             .create_entity("b1", "concept", "truth", "Truth Concept", None, 0.9, 1)
-            .await
-            .unwrap();
-        IdentityRepo::new(pool.clone())
-            .create_identity_link(
-                "b1",
-                &victim.id,
-                &survivor.id,
-                "redirect",
-                0.9,
-                &claim_id,
-                "active",
-            )
             .await
             .unwrap();
         let card = repo
@@ -508,6 +490,18 @@ mod tests {
         repo.insert_assertion_entity("b1", &active.id, &victim.id, "related")
             .await
             .unwrap();
+        IdentityRepo::new(pool.clone())
+            .create_identity_link(
+                "b1",
+                &victim.id,
+                &survivor.id,
+                "redirect",
+                0.9,
+                &claim_id,
+                "active",
+            )
+            .await
+            .unwrap();
 
         let detail = project_knowledge_card_detail("b1", &card.id, 10, &pool)
             .await
@@ -517,7 +511,7 @@ mod tests {
         assert_eq!(detail.assertions_by_status["active"].len(), 1);
         assert_eq!(detail.assertions_by_status["rumor"].len(), 1);
         let referenced = &detail.assertions_by_status["active"][0].referenced_entities[0];
-        assert_eq!(referenced.entity_id, survivor.id);
-        assert_eq!(referenced.display_name, "Truth Concept");
+        assert_eq!(referenced.entity_id, victim.id);
+        assert_eq!(referenced.display_name, "Masked Concept");
     }
 }

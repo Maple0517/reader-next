@@ -1,98 +1,48 @@
-use crate::service::v4::extractor::{Observation, RiskLevel};
-use crate::service::v4::resolver::ResolvedObservation;
-use crate::storage::db::v4::chapter_repo::ChapterRepo;
+use crate::service::v4::extractor::{classify_risk, Observation};
 use crate::storage::db::v4::claim_repo::{ClaimRecord, ClaimRepo};
 
 /// Result of writing claims for a segment.
 #[derive(Debug, Default)]
 pub struct ClaimWriteResult {
-    /// Claims created (status = proposed for low/medium, quarantined/uncertain for high)
+    /// Claims created with their initial ledger lifecycle status.
     pub claims_created: Vec<ClaimRecord>,
-    /// Chapter summaries written (from Summary observations)
-    pub summaries_written: Vec<String>,
-    /// Skipped observations (Summary type writes to chapter_summaries, not claims)
+    /// Skipped observations handled outside claim ledger.
     pub skipped_count: usize,
 }
 
-/// Write claims from resolved observations.
+/// Write claim ledger records from parsed observations.
 ///
 /// Rules:
-/// - Summary → write chapter_summaries, no claim
+/// - Summary → no claim
 /// - MinorEvent → claim with status='proposed' (ledger-only, intentionally not reduced;
 ///   does not mean pending canonical work; does not block processing_progress)
-/// - High risk → claim with status='quarantined' or 'uncertain', not entering reducer
-/// - Low/Medium risk → claim with status='proposed', enters reducer
+/// - All domain claims start as `proposed`; domain processors own Invalid / NoWrite /
+///   Quarantine / Write decisions and all later lifecycle transitions.
 pub async fn write_claims(
-    resolved: &[ResolvedObservation],
+    observations: &[Observation],
     book_id: &str,
     chapter_index: i64,
     ai_run_id: &str,
     claim_repo: &ClaimRepo,
-    chapter_repo: &ChapterRepo,
 ) -> anyhow::Result<ClaimWriteResult> {
     let mut result = ClaimWriteResult::default();
 
-    for obs in resolved {
-        match &obs.observation {
-            // Summary: write to chapter_summaries, skip claim creation
-            Observation::Summary {
-                summary,
-                key_points,
-                ..
-            } => {
-                let key_points_json = serde_json::to_string(key_points).ok();
-                chapter_repo
-                    .upsert_chapter_summary(
-                        book_id,
-                        chapter_index,
-                        summary,
-                        key_points_json.as_deref(),
-                    )
-                    .await?;
-                result.summaries_written.push(summary.clone());
+    for obs in observations {
+        match obs {
+            Observation::Summary { .. } => {
                 result.skipped_count += 1;
             }
 
             // All other types: create claims
             _ => {
-                let claim_type = get_claim_type(&obs.observation);
-                let subject_mention = obs.observation.subject_mention().map(|s| s.to_string());
-                let object_mention = get_object_mention(&obs.observation);
-                let predicate = build_predicate(&obs.observation);
-                let (value_text, value_json) = get_value_fields(&obs.observation);
-                let primary_source_span_id = obs
-                    .observation
-                    .evidence_span_ids()
-                    .first()
-                    .cloned()
-                    .unwrap_or_default();
-
-                // Determine status based on risk level and claim type
-                let status = match &obs.observation {
-                    // RelationshipUpdate always enters Relationship Judge (status="proposed"),
-                    // never quarantined or uncertain — it's a Phase 2 special high-risk path.
-                    Observation::RelationshipUpdate { .. } => "proposed",
-                    // KnowledgeAssertion always enters Knowledge Revision Judge; risk is
-                    // observability/priority only and must not bypass the Phase 4 path.
-                    Observation::KnowledgeAssertion { .. } => "proposed",
-                    // Location observations always enter the Phase 5 place/map path.
-                    // They remain proposed until the place reducer transaction accepts them.
-                    Observation::LocationIntroduction { .. } | Observation::LocationEdge { .. } => {
-                        "proposed"
-                    }
-                    _ if is_identity_observation(&obs.observation) => "proposed",
-                    _ => match obs.risk_level {
-                        RiskLevel::High => {
-                            // High risk: quarantine or mark uncertain
-                            if is_critical_high_risk(&obs.observation) {
-                                "quarantined"
-                            } else {
-                                "uncertain"
-                            }
-                        }
-                        RiskLevel::Low | RiskLevel::Medium => "proposed",
-                    },
-                };
+                let claim_type = get_claim_type(obs);
+                let subject_mention = obs.subject_mention().map(|s| s.to_string());
+                let object_mention = get_object_mention(obs);
+                let predicate = build_predicate(obs);
+                let (value_text, value_json) = get_value_fields(obs);
+                let primary_source_span_id =
+                    obs.evidence_span_ids().first().cloned().unwrap_or_default();
+                let risk_level = classify_risk(obs);
 
                 let claim = claim_repo
                     .create_claim(
@@ -101,25 +51,20 @@ pub async fn write_claims(
                         &claim_type,
                         subject_mention.as_deref(),
                         object_mention.as_deref(),
-                        obs.subject_entity_id.as_deref(),
-                        obs.object_entity_id.as_deref(),
+                        None,
+                        None,
                         &predicate,
                         value_text.as_deref(),
                         value_json.as_deref(),
                         &primary_source_span_id,
                         ai_run_id,
-                        get_confidence(&obs.observation),
-                        obs.risk_level.as_str(),
+                        get_confidence(obs),
+                        risk_level.as_str(),
                     )
                     .await?;
 
-                // Update status if not 'proposed' (create_claim defaults to 'proposed')
-                if status != "proposed" {
-                    claim_repo.update_claim_status(&claim.id, status).await?;
-                }
-
                 // Add claim_source_spans for all evidence spans
-                for span_id in obs.observation.evidence_span_ids() {
+                for span_id in obs.evidence_span_ids() {
                     let role = if span_id == &primary_source_span_id {
                         "primary"
                     } else {
@@ -130,9 +75,6 @@ pub async fn write_claims(
                         .await?;
                 }
 
-                // Update claim record with actual status for return value
-                let mut claim = claim;
-                claim.status = status.to_string();
                 result.claims_created.push(claim);
             }
         }
@@ -445,16 +387,6 @@ fn get_value_fields(obs: &Observation) -> (Option<String>, Option<String>) {
     }
 }
 
-fn is_identity_observation(obs: &Observation) -> bool {
-    matches!(
-        obs,
-        Observation::IdentityReveal { .. }
-            | Observation::EntityMergeCandidate { .. }
-            | Observation::EntitySplitCandidate { .. }
-            | Observation::NotSameIdentity { .. }
-    )
-}
-
 fn build_identity_payload(
     identity_kind: &str,
     reason_hint: Option<&str>,
@@ -463,9 +395,6 @@ fn build_identity_payload(
     let mut payload = serde_json::json!({
         "reason_hint": reason_hint,
         "identity_kind": identity_kind,
-        "judge_decision": serde_json::Value::Null,
-        "judge_confidence": serde_json::Value::Null,
-        "survivor_hint": serde_json::Value::Null,
     });
     if let Some((key, value)) = variant_field {
         payload[key] = serde_json::Value::String(value.to_string());
@@ -473,32 +402,13 @@ fn build_identity_payload(
     payload
 }
 
-/// Check if an observation is critical high risk (should be quarantined vs uncertain).
-fn is_critical_high_risk(obs: &Observation) -> bool {
-    match obs {
-        Observation::PropertyUpdate {
-            dimension_key,
-            value_text,
-            ..
-        } => {
-            let value = value_text.as_deref().unwrap_or("").to_lowercase();
-            // Death, resurrection, identity reveal → quarantined
-            (dimension_key == "life_status"
-                && (value.contains("死") || value.contains("亡") || value.contains("复活")))
-                || (dimension_key == "identity" && value.contains("真实身份"))
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::v4::resolver::Resolution;
     use crate::storage::db;
     use sqlx::SqlitePool;
 
-    async fn setup() -> (SqlitePool, ClaimRepo, ChapterRepo) {
+    async fn setup() -> (SqlitePool, ClaimRepo) {
         let dir =
             std::env::temp_dir().join(format!("reader-v4-claimwriter-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -525,45 +435,45 @@ mod tests {
             .bind(&run_id).bind(&chapter_id).execute(&pool).await.unwrap();
 
         let claim_repo = ClaimRepo::new(pool.clone());
-        let chapter_repo = ChapterRepo::new(pool.clone());
-        (pool, claim_repo, chapter_repo)
+        (pool, claim_repo)
     }
 
     #[tokio::test]
-    async fn summary_writes_to_chapter_summaries() {
-        let (_pool, claim_repo, chapter_repo) = setup().await;
+    async fn summary_observation_is_skipped_by_claim_ledger() {
+        let (_pool, claim_repo) = setup().await;
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::Summary {
-                summary: "张三突破到筑基期".to_string(),
-                key_points: vec!["突破".to_string(), "筑基".to_string()],
-                has_important_changes: true,
-            },
-            subject_entity_id: None,
-            object_entity_id: None,
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::Low,
-            resolution: Resolution::Uncertain,
+        let observations = vec![Observation::Summary {
+            summary: "张三突破到筑基期".to_string(),
+            key_points: vec!["突破".to_string(), "筑基".to_string()],
+            has_important_changes: true,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, "run-1", &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, "run-1", &claim_repo)
             .await
             .unwrap();
 
         assert_eq!(result.claims_created.len(), 0);
-        assert_eq!(result.summaries_written.len(), 1);
-        assert_eq!(result.summaries_written[0], "张三突破到筑基期");
         assert_eq!(result.skipped_count, 1);
+    }
 
-        // Verify in DB
-        let summary = chapter_repo.get_chapter_summary("b1", 1).await.unwrap();
-        assert!(summary.is_some());
-        assert_eq!(summary.unwrap().summary, "张三突破到筑基期");
+    #[test]
+    fn claim_writer_does_not_own_summary_persistence() {
+        let source = include_str!("claim_writer.rs");
+        let summary_upsert = concat!("upsert_chapter", "_summary");
+        let summary_table = concat!("chapter", "_summaries");
+        assert!(
+            !source.contains(summary_upsert),
+            "ClaimWriter must write ledger/provenance only; summary persistence belongs outside the claim ledger"
+        );
+        assert!(
+            !source.contains(summary_table),
+            "ClaimWriter must not mention the summary table once ledger ownership is strict"
+        );
     }
 
     #[tokio::test]
     async fn low_risk_creates_proposed_claim() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         // Get the span_id and run_id from setup
         let span_id: (String,) =
@@ -577,40 +487,28 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::PropertyUpdate {
-                subject_mention: "张三".to_string(),
-                dimension_key: "realm".to_string(),
-                value_text: Some("筑基期".to_string()),
-                value_json: None,
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.9,
-            },
-            subject_entity_id: Some("entity-1".to_string()),
-            object_entity_id: None,
-            resolved_dimension_key: Some("realm".to_string()),
-            risk_level: RiskLevel::Low,
-            resolution: Resolution::MatchExisting {
-                entity_id: "entity-1".to_string(),
-            },
+        let observations = vec![Observation::PropertyUpdate {
+            subject_mention: "张三".to_string(),
+            dimension_key: "realm".to_string(),
+            value_text: Some("筑基期".to_string()),
+            value_json: None,
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.9,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
         assert_eq!(result.claims_created.len(), 1);
         assert_eq!(result.claims_created[0].status, "proposed");
         assert_eq!(result.claims_created[0].claim_type, "property_update");
-        assert_eq!(
-            result.claims_created[0].subject_entity_id.as_deref(),
-            Some("entity-1")
-        );
+        assert_eq!(result.claims_created[0].subject_entity_id.as_deref(), None);
     }
 
     #[tokio::test]
     async fn location_introduction_creates_proposed_claim() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
                 .fetch_one(&pool)
@@ -622,26 +520,19 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::LocationIntroduction {
-                place_mention: "青云城".to_string(),
-                place_type: "city".to_string(),
-                parent_place_mention: Some("东域".to_string()),
-                aliases: vec!["青云古城".to_string()],
-                description: Some("东域重城".to_string()),
-                importance_score: 0.8,
-                map_visible_hint: Some(true),
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.9,
-            },
-            subject_entity_id: None,
-            object_entity_id: None,
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::Low,
-            resolution: Resolution::CreateNew,
+        let observations = vec![Observation::LocationIntroduction {
+            place_mention: "青云城".to_string(),
+            place_type: "city".to_string(),
+            parent_place_mention: Some("东域".to_string()),
+            aliases: vec!["青云古城".to_string()],
+            description: Some("东域重城".to_string()),
+            importance_score: 0.8,
+            map_visible_hint: Some(true),
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.9,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -660,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn location_edge_creates_proposed_claim() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
                 .fetch_one(&pool)
@@ -672,25 +563,18 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::LocationEdge {
-                from_place_mention: "黑风谷".to_string(),
-                to_place_mention: "青云城".to_string(),
-                edge_type: "north_of".to_string(),
-                direction_hint: Some("north".to_string()),
-                distance_hint: Some("百里".to_string()),
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.86,
-                is_topological_hint: true,
-            },
-            subject_entity_id: None,
-            object_entity_id: None,
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::Uncertain,
+        let observations = vec![Observation::LocationEdge {
+            from_place_mention: "黑风谷".to_string(),
+            to_place_mention: "青云城".to_string(),
+            edge_type: "north_of".to_string(),
+            direction_hint: Some("north".to_string()),
+            distance_hint: Some("百里".to_string()),
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.86,
+            is_topological_hint: true,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -710,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn location_claims_preserve_source_spans() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
         let first_span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
                 .fetch_one(&pool)
@@ -740,25 +624,18 @@ mod tests {
             .await
             .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::LocationEdge {
-                from_place_mention: "青云城".to_string(),
-                to_place_mention: "黑风谷".to_string(),
-                edge_type: "route_to".to_string(),
-                direction_hint: None,
-                distance_hint: None,
-                evidence_span_ids: vec![first_span_id.0.clone(), second_span_id.clone()],
-                confidence: 0.8,
-                is_topological_hint: true,
-            },
-            subject_entity_id: None,
-            object_entity_id: None,
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::Uncertain,
+        let observations = vec![Observation::LocationEdge {
+            from_place_mention: "青云城".to_string(),
+            to_place_mention: "黑风谷".to_string(),
+            edge_type: "route_to".to_string(),
+            direction_hint: None,
+            distance_hint: None,
+            evidence_span_ids: vec![first_span_id.0.clone(), second_span_id.clone()],
+            confidence: 0.8,
+            is_topological_hint: true,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
         let claim_id = &result.claims_created[0].id;
@@ -776,8 +653,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn high_risk_death_quarantined() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+    async fn high_risk_death_stays_proposed_until_domain_decision() {
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -790,35 +667,26 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::PropertyUpdate {
-                subject_mention: "张三".to_string(),
-                dimension_key: "life_status".to_string(),
-                value_text: Some("死亡".to_string()),
-                value_json: None,
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.95,
-            },
-            subject_entity_id: Some("entity-1".to_string()),
-            object_entity_id: None,
-            resolved_dimension_key: Some("life_status".to_string()),
-            risk_level: RiskLevel::High,
-            resolution: Resolution::MatchExisting {
-                entity_id: "entity-1".to_string(),
-            },
+        let observations = vec![Observation::PropertyUpdate {
+            subject_mention: "张三".to_string(),
+            dimension_key: "life_status".to_string(),
+            value_text: Some("死亡".to_string()),
+            value_json: None,
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.95,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
         assert_eq!(result.claims_created.len(), 1);
-        assert_eq!(result.claims_created[0].status, "quarantined");
+        assert_eq!(result.claims_created[0].status, "proposed");
     }
 
     #[tokio::test]
-    async fn high_risk_non_critical_uncertain() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+    async fn high_risk_non_critical_stays_proposed_until_domain_decision() {
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -832,35 +700,26 @@ mod tests {
                 .unwrap();
 
         // High risk but not critical (e.g., affiliation change)
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::PropertyUpdate {
-                subject_mention: "张三".to_string(),
-                dimension_key: "affiliation".to_string(),
-                value_text: Some("魔道".to_string()),
-                value_json: None,
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.7,
-            },
-            subject_entity_id: Some("entity-1".to_string()),
-            object_entity_id: None,
-            resolved_dimension_key: Some("affiliation".to_string()),
-            risk_level: RiskLevel::High,
-            resolution: Resolution::MatchExisting {
-                entity_id: "entity-1".to_string(),
-            },
+        let observations = vec![Observation::PropertyUpdate {
+            subject_mention: "张三".to_string(),
+            dimension_key: "affiliation".to_string(),
+            value_text: Some("魔道".to_string()),
+            value_json: None,
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.7,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
         assert_eq!(result.claims_created.len(), 1);
-        assert_eq!(result.claims_created[0].status, "uncertain");
+        assert_eq!(result.claims_created[0].status, "proposed");
     }
 
     #[tokio::test]
     async fn minor_event_creates_proposed_claim() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -873,21 +732,14 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::MinorEvent {
-                description: "张三和李四切磋".to_string(),
-                involved_mentions: vec!["张三".to_string(), "李四".to_string()],
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.8,
-            },
-            subject_entity_id: None,
-            object_entity_id: None,
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::Low,
-            resolution: Resolution::Uncertain,
+        let observations = vec![Observation::MinorEvent {
+            description: "张三和李四切磋".to_string(),
+            involved_mentions: vec!["张三".to_string(), "李四".to_string()],
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.8,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -898,7 +750,7 @@ mod tests {
 
     #[tokio::test]
     async fn entity_introduction_creates_claim_with_value() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -911,23 +763,16 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::EntityIntroduction {
-                subject_mention: "一个年轻人".to_string(),
-                entity_type: "character".to_string(),
-                aliases: vec!["小张".to_string()],
-                short_summary: "新出场的角色".to_string(),
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.85,
-            },
-            subject_entity_id: None,
-            object_entity_id: None,
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::Low,
-            resolution: Resolution::CreateNew,
+        let observations = vec![Observation::EntityIntroduction {
+            subject_mention: "一个年轻人".to_string(),
+            entity_type: "character".to_string(),
+            aliases: vec!["小张".to_string()],
+            short_summary: "新出场的角色".to_string(),
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.85,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -939,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_source_spans_association_with_roles() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         // Get existing span and run
         let span_id: (String,) =
@@ -968,25 +813,16 @@ mod tests {
         sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES (?, 'b1', ?, 'hash', ?, 1, 10, 20, 'more text', datetime('now'))")
             .bind(&span_id_2).bind(&chapter_id.0).bind(&seg_id.0).execute(&pool).await.unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::PropertyUpdate {
-                subject_mention: "李四".to_string(),
-                dimension_key: "realm".to_string(),
-                value_text: Some("金丹期".to_string()),
-                value_json: None,
-                evidence_span_ids: vec![span_id.0.clone(), span_id_2.clone()],
-                confidence: 0.85,
-            },
-            subject_entity_id: Some("entity-2".to_string()),
-            object_entity_id: None,
-            resolved_dimension_key: Some("realm".to_string()),
-            risk_level: RiskLevel::Low,
-            resolution: Resolution::MatchExisting {
-                entity_id: "entity-2".to_string(),
-            },
+        let observations = vec![Observation::PropertyUpdate {
+            subject_mention: "李四".to_string(),
+            dimension_key: "realm".to_string(),
+            value_text: Some("金丹期".to_string()),
+            value_json: None,
+            evidence_span_ids: vec![span_id.0.clone(), span_id_2.clone()],
+            confidence: 0.85,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -1006,7 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn relationship_update_has_correct_object_mention() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -1019,29 +855,20 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::RelationshipUpdate {
-                subject_mention: "张三".to_string(),
-                object_mention: "李四".to_string(),
-                relation_hint: "师徒".to_string(),
-                relation_group: "mentorship".to_string(),
-                relation_label: "师父".to_string(),
-                directionality: "directed".to_string(),
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.9,
-                importance_hint: 0.8,
-                is_long_term_or_significant_hint: true,
-            },
-            subject_entity_id: Some("entity-1".to_string()),
-            object_entity_id: Some("entity-2".to_string()),
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::MatchExisting {
-                entity_id: "entity-1".to_string(),
-            },
+        let observations = vec![Observation::RelationshipUpdate {
+            subject_mention: "张三".to_string(),
+            object_mention: "李四".to_string(),
+            relation_hint: "师徒".to_string(),
+            relation_group: "mentorship".to_string(),
+            relation_label: "师父".to_string(),
+            directionality: "directed".to_string(),
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.9,
+            importance_hint: 0.8,
+            is_long_term_or_significant_hint: true,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -1054,7 +881,7 @@ mod tests {
 
     #[tokio::test]
     async fn relationship_update_has_correct_value_json() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -1067,29 +894,20 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::RelationshipUpdate {
-                subject_mention: "张三".to_string(),
-                object_mention: "李四".to_string(),
-                relation_hint: "宿敌".to_string(),
-                relation_group: "rivalry".to_string(),
-                relation_label: "对手".to_string(),
-                directionality: "undirected".to_string(),
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.85,
-                importance_hint: 0.7,
-                is_long_term_or_significant_hint: true,
-            },
-            subject_entity_id: Some("entity-1".to_string()),
-            object_entity_id: Some("entity-2".to_string()),
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::MatchExisting {
-                entity_id: "entity-1".to_string(),
-            },
+        let observations = vec![Observation::RelationshipUpdate {
+            subject_mention: "张三".to_string(),
+            object_mention: "李四".to_string(),
+            relation_hint: "宿敌".to_string(),
+            relation_group: "rivalry".to_string(),
+            relation_label: "对手".to_string(),
+            directionality: "undirected".to_string(),
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.85,
+            importance_hint: 0.7,
+            is_long_term_or_significant_hint: true,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -1108,8 +926,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relationship_update_always_status_proposed() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+    async fn relationship_update_records_ledger_without_routing_status() {
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -1122,30 +940,22 @@ mod tests {
                 .await
                 .unwrap();
 
-        // RelationshipUpdate with High risk — must be "proposed", not "uncertain" or "quarantined"
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::RelationshipUpdate {
-                subject_mention: "张三".to_string(),
-                object_mention: "李四".to_string(),
-                relation_hint: "敌对".to_string(),
-                relation_group: "hostility".to_string(),
-                relation_label: "宿敌".to_string(),
-                directionality: "undirected".to_string(),
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.95,
-                importance_hint: 0.9,
-                is_long_term_or_significant_hint: true,
-            },
-            subject_entity_id: Some("entity-1".to_string()),
-            object_entity_id: Some("entity-2".to_string()),
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::MatchExisting {
-                entity_id: "entity-1".to_string(),
-            },
+        // RelationshipUpdate with High risk is ledger-recorded first. The
+        // decision/materializer layer owns whether it becomes a canonical write.
+        let observations = vec![Observation::RelationshipUpdate {
+            subject_mention: "张三".to_string(),
+            object_mention: "李四".to_string(),
+            relation_hint: "敌对".to_string(),
+            relation_group: "hostility".to_string(),
+            relation_label: "宿敌".to_string(),
+            directionality: "undirected".to_string(),
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.95,
+            importance_hint: 0.9,
+            is_long_term_or_significant_hint: true,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -1156,7 +966,7 @@ mod tests {
 
     #[tokio::test]
     async fn identity_reveal_is_proposed_and_preserves_all_evidence_spans() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         let span_id_1: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -1182,23 +992,16 @@ mod tests {
         sqlx::query("INSERT INTO source_spans (id, book_id, chapter_id, chapter_hash, segment_id, span_index, start_offset, end_offset, text_excerpt, created_at) VALUES (?, 'b1', ?, 'hash', ?, 1, 10, 20, 'more text', datetime('now'))")
             .bind(&span_id_2).bind(&chapter_id.0).bind(&seg_id.0).execute(&pool).await.unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::IdentityReveal {
-                revealed_mention: "黑衣人".to_string(),
-                canonical_mention: "张三".to_string(),
-                reveal_type: "disguise".to_string(),
-                reason_hint: Some("摘下面具".to_string()),
-                evidence_span_ids: vec![span_id_1.0.clone(), span_id_2.clone()],
-                confidence: 0.95,
-            },
-            subject_entity_id: Some("entity-shadow".to_string()),
-            object_entity_id: Some("entity-zhangsan".to_string()),
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::Uncertain,
+        let observations = vec![Observation::IdentityReveal {
+            revealed_mention: "黑衣人".to_string(),
+            canonical_mention: "张三".to_string(),
+            reveal_type: "disguise".to_string(),
+            reason_hint: Some("摘下面具".to_string()),
+            evidence_span_ids: vec![span_id_1.0.clone(), span_id_2.clone()],
+            confidence: 0.95,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -1215,11 +1018,14 @@ mod tests {
         assert_eq!(payload["identity_kind"], "same_identity");
         assert_eq!(payload["reveal_type"], "disguise");
         assert_eq!(payload["reason_hint"], "摘下面具");
+        assert!(payload.get("judge_decision").is_none());
+        assert!(payload.get("judge_confidence").is_none());
+        assert!(payload.get("survivor_hint").is_none());
     }
 
     #[tokio::test]
     async fn not_same_identity_maps_to_proposed_claim_type() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
 
         let span_id: (String,) =
             sqlx::query_as("SELECT id FROM source_spans WHERE book_id = 'b1' LIMIT 1")
@@ -1232,22 +1038,15 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::NotSameIdentity {
-                entity_a_mention: "此张三".to_string(),
-                entity_b_mention: "彼张三".to_string(),
-                reason_hint: Some("并非同一人".to_string()),
-                evidence_span_ids: vec![span_id.0.clone()],
-                confidence: 0.9,
-            },
-            subject_entity_id: Some("entity-a".to_string()),
-            object_entity_id: Some("entity-b".to_string()),
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::Uncertain,
+        let observations = vec![Observation::NotSameIdentity {
+            entity_a_mention: "此张三".to_string(),
+            entity_b_mention: "彼张三".to_string(),
+            reason_hint: Some("并非同一人".to_string()),
+            evidence_span_ids: vec![span_id.0.clone()],
+            confidence: 0.9,
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 
@@ -1255,13 +1054,13 @@ mod tests {
         let claim = &result.claims_created[0];
         assert_eq!(claim.claim_type, "not_same_identity");
         assert_eq!(claim.status, "proposed");
-        assert_eq!(claim.subject_entity_id.as_deref(), Some("entity-a"));
-        assert_eq!(claim.object_entity_id.as_deref(), Some("entity-b"));
+        assert_eq!(claim.subject_entity_id.as_deref(), None);
+        assert_eq!(claim.object_entity_id.as_deref(), None);
     }
 
     #[tokio::test]
     async fn knowledge_assertion_creates_proposed_claim_with_complete_value_json() {
-        let (pool, claim_repo, chapter_repo) = setup().await;
+        let (pool, claim_repo) = setup().await;
         let run_id: (String,) =
             sqlx::query_as("SELECT id FROM ai_runs WHERE book_id = 'b1' LIMIT 1")
                 .fetch_one(&pool)
@@ -1273,41 +1072,34 @@ mod tests {
                 .await
                 .unwrap();
 
-        let resolved = vec![ResolvedObservation {
-            observation: Observation::KnowledgeAssertion {
-                category: "power_system".to_string(),
-                topic: "修炼境界".to_string(),
-                assertion_text: "修炼境界分为炼气、筑基、金丹。".to_string(),
-                confidence: 0.9,
-                importance_score: 0.8,
-                evidence_span_ids: vec![span_id.0.clone()],
-                referenced_entity_mentions: vec![
-                    crate::service::v4::extractor::KnowledgeEntityMention {
-                        mention: "金丹".to_string(),
-                        entity_type_hint: Some("realm".to_string()),
-                        role: "realm".to_string(),
-                        confidence: 0.9,
-                        resolved_entity_id: None,
-                    },
-                    crate::service::v4::extractor::KnowledgeEntityMention {
-                        mention: "未解析实体".to_string(),
-                        entity_type_hint: None,
-                        role: "related".to_string(),
-                        confidence: 0.4,
-                        resolved_entity_id: None,
-                    },
-                ],
-                status_hint: Some("fact".to_string()),
-                reason_hint: Some("旁白说明境界体系".to_string()),
-            },
-            subject_entity_id: None,
-            object_entity_id: None,
-            resolved_dimension_key: None,
-            risk_level: RiskLevel::High,
-            resolution: Resolution::Uncertain,
+        let observations = vec![Observation::KnowledgeAssertion {
+            category: "power_system".to_string(),
+            topic: "修炼境界".to_string(),
+            assertion_text: "修炼境界分为炼气、筑基、金丹。".to_string(),
+            confidence: 0.9,
+            importance_score: 0.8,
+            evidence_span_ids: vec![span_id.0.clone()],
+            referenced_entity_mentions: vec![
+                crate::service::v4::extractor::KnowledgeEntityMention {
+                    mention: "金丹".to_string(),
+                    entity_type_hint: Some("realm".to_string()),
+                    role: "realm".to_string(),
+                    confidence: 0.9,
+                    resolved_entity_id: None,
+                },
+                crate::service::v4::extractor::KnowledgeEntityMention {
+                    mention: "未解析实体".to_string(),
+                    entity_type_hint: None,
+                    role: "related".to_string(),
+                    confidence: 0.4,
+                    resolved_entity_id: None,
+                },
+            ],
+            status_hint: Some("fact".to_string()),
+            reason_hint: Some("旁白说明境界体系".to_string()),
         }];
 
-        let result = write_claims(&resolved, "b1", 1, &run_id.0, &claim_repo, &chapter_repo)
+        let result = write_claims(&observations, "b1", 1, &run_id.0, &claim_repo)
             .await
             .unwrap();
 

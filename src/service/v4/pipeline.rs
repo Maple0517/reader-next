@@ -1,94 +1,37 @@
+use crate::service::v4::character_processor::process_character_claims_for_segment;
 use crate::service::v4::claim_writer;
 use crate::service::v4::context_builder::ContextBuilder;
 use crate::service::v4::extractor::Extractor;
-use crate::service::v4::identity_judge::{self, IdentityGateResult, IdentityJudge};
-use crate::service::v4::knowledge_judge::{
-    self, KnowledgeGateResult, KnowledgeJudgeAssertionInput, KnowledgeRevisionJudge,
-};
-use crate::service::v4::map_conflict_judge::{
-    self, MapConflictDecision, MapConflictJudge, MapConflictJudgeInput,
-};
-use crate::service::v4::map_gate::{self, MapGateContext, MapGateResult};
-use crate::service::v4::place_resolver::{PlaceResolutionAction, PlaceResolver};
+use crate::service::v4::identity_judge::{self, IdentityJudge};
+use crate::service::v4::identity_processor::process_identity_claims_for_segment;
+use crate::service::v4::knowledge_judge::{self, KnowledgeRevisionJudge};
+use crate::service::v4::knowledge_processor;
+use crate::service::v4::map_conflict_judge::{self, MapConflictJudge};
+use crate::service::v4::place_processor;
 use crate::service::v4::projection;
-use crate::service::v4::relationship_judge::{self, GateResult, JudgeDecision, JudgeOutput};
+#[cfg(test)]
+use crate::service::v4::relationship_judge::{JudgeDecision, JudgeOutput};
+#[cfg(test)]
+use crate::service::v4::relationship_processor::MockJudge;
+use crate::service::v4::relationship_processor::{
+    process_relationship_claims_for_segment, DefaultJudge, Judge,
+};
 use crate::service::v4::relationship_projection;
-use crate::service::v4::resolver;
-use crate::service::v4::topic_resolver::{TopicCandidateMatch, TopicResolver};
-use crate::service::v4::{place_reducer, reducer};
+use crate::service::v4::summary_processor;
 use crate::storage::db::v4::ai_run_repo::AiRunRepo;
 use crate::storage::db::v4::chapter_repo::{self, ChapterRepo};
-use crate::storage::db::v4::claim_repo::{ClaimRecord, ClaimRepo, SourceSpanRecord};
+#[cfg(test)]
+use crate::storage::db::v4::claim_repo::ClaimRecord;
+use crate::storage::db::v4::claim_repo::ClaimRepo;
 use crate::storage::db::v4::entity_repo::EntityRepo;
-use crate::storage::db::v4::identity_repo::{IdentityLinkRecord, IdentityRepo};
-use crate::storage::db::v4::knowledge_repo::KnowledgeRepo;
+#[cfg(test)]
+use crate::storage::db::v4::identity_repo::IdentityRepo;
 use crate::storage::db::v4::progress_repo::ProgressRepo;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
 
 const PROMPT_VERSION: &str = "v1";
 const SCHEMA_VERSION: i64 = 1;
 const DEFAULT_MODEL: &str = "unknown";
-
-/// Trait for making relationship judge decisions.
-///
-/// Implementations:
-/// - `DefaultJudge`: placeholder — marks all relationship claims as uncertain.
-/// - `MockJudge`: deterministic test judge (accepts all).
-/// - Real AI judge: TODO (needs AiModelService wiring).
-#[axum::async_trait]
-pub trait Judge: Send + Sync {
-    async fn judge(&self, claim: &ClaimRecord) -> anyhow::Result<JudgeOutput>;
-}
-
-/// Placeholder judge that marks all relationship claims as uncertain.
-#[derive(Default)]
-pub struct DefaultJudge;
-
-impl DefaultJudge {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[axum::async_trait]
-impl Judge for DefaultJudge {
-    async fn judge(&self, _claim: &ClaimRecord) -> anyhow::Result<JudgeOutput> {
-        Ok(JudgeOutput {
-            decision: JudgeDecision::Uncertain,
-            reason_code: "default_judge".to_string(),
-            confidence: 0.0,
-            normalized_relation_group: None,
-            normalized_relation_label: None,
-            directionality: None,
-            current_state: None,
-            strength: None,
-            polarity: None,
-            importance_score: None,
-            redirect_to: None,
-            redirect_dimension_key: None,
-            explanation_for_log: "Default judge: no real AI judge wired yet".to_string(),
-        })
-    }
-}
-
-/// Mock judge for testing. Returns the configured `JudgeOutput` for every claim.
-pub struct MockJudge {
-    pub output: JudgeOutput,
-}
-
-impl MockJudge {
-    pub fn new(output: JudgeOutput) -> Self {
-        Self { output }
-    }
-}
-
-#[axum::async_trait]
-impl Judge for MockJudge {
-    async fn judge(&self, _claim: &ClaimRecord) -> anyhow::Result<JudgeOutput> {
-        Ok(self.output.clone())
-    }
-}
 
 /// Process a single chapter through the full V4 pipeline.
 ///
@@ -98,11 +41,9 @@ impl Judge for MockJudge {
 /// 3. Create chapter_processing_run
 /// 4. Segment chapter text
 /// 5. Upsert segments + source_spans
-/// 6. For each segment: context -> extract -> resolve -> claim_writer -> reducer
-///    Phase 1 entity/property reducer runs first (ensures new characters are created).
-///    Phase 2: structural gate -> judge -> relationship_reducer -> second-pass property_reducer.
-///    Phase 3 identity and Phase 4 knowledge run as independent canonical stages.
-/// 7. Invalidate + rebuild projection cache (including relationship cache)
+/// 6. For each segment: adapter/extract -> claim ledger -> domain processors
+///    Domain processors own resolution, gates, judges, materialization, and reducer calls.
+/// 7. Invalidate + rebuild projection cache
 /// 8. Update chapter_processing_runs to success
 /// 9. Update processing_progress.max_processed_chapter
 pub async fn process_chapter(
@@ -342,7 +283,7 @@ async fn process_chapter_with_all_judges(
         }
     }
 
-    // 6. For each segment: context -> extract -> resolve -> claim_writer -> reducer
+    // 6. For each segment: adapter/extract -> claim ledger -> domain processors
     for (segment_id, segment_text, span_ids) in &segment_info {
         // a. Create AI run for this segment
         let input_hash = crate::util::hash::md5_hex(segment_text);
@@ -370,26 +311,32 @@ async fn process_chapter_with_all_judges(
         // Store observations as output_json in ai_run
         let output_json = serde_json::to_string(&observations).ok();
 
-        // d. Resolve observations against entities
-        let resolved = resolver::resolve(&observations, &entity_repo, book_id).await?;
-
-        // e. Write claims
-        let claim_result = claim_writer::write_claims(
-            &resolved,
+        // d. Write ledger-only summary side path before claim ledger.
+        summary_processor::write_chapter_summaries(
+            &observations,
             book_id,
             chapter_index,
-            &ai_run.id,
-            &claim_repo,
             &chapter_repo,
         )
         .await?;
 
-        // f. Phase 2/3 pipeline: split relationship + identity claims from generic reducer input
+        // e. Write claims
+        let claim_result = claim_writer::write_claims(
+            &observations,
+            book_id,
+            chapter_index,
+            &ai_run.id,
+            &claim_repo,
+        )
+        .await?;
+
+        // f. Split ledger claims by domain lane. Domain processors own decision + reducer apply.
         let mut relationship_claims = Vec::new();
         let mut identity_claims = Vec::new();
         let mut knowledge_claims = Vec::new();
         let mut location_claims = Vec::new();
-        let mut other_claims = Vec::new();
+        let mut character_claims = Vec::new();
+        let mut ledger_only_claims = Vec::new();
         for claim in claim_result.claims_created.iter().cloned() {
             if claim.claim_type == "relationship_update" {
                 relationship_claims.push(claim);
@@ -402,422 +349,71 @@ async fn process_chapter_with_all_judges(
                 "location_introduction" | "location_edge"
             ) {
                 location_claims.push(claim);
+            } else if matches!(
+                claim.claim_type.as_str(),
+                "entity_introduction" | "alias" | "property_update"
+            ) {
+                character_claims.push(claim);
             } else {
-                other_claims.push(claim);
+                ledger_only_claims.push(claim);
             }
         }
 
-        // g. Phase 1 reducer FIRST (entity + property) — ensures new characters enter entities
-        let _reduction_result = reducer::reduce_claims(&other_claims, book_id, pool).await?;
+        // g. Character/profile processor FIRST — ensures new characters enter entities
+        if !character_claims.is_empty() {
+            process_character_claims_for_segment(pool, &claim_repo, &character_claims).await?;
+        }
+        if !ledger_only_claims.is_empty() {
+            tracing::debug!(
+                "Preserved {} ledger-only V4 claims without canonical write",
+                ledger_only_claims.len()
+            );
+        }
 
         // h. Phase 3: process identity claims after Phase 1 entities/properties exist
         if !identity_claims.is_empty() {
             let default_identity_judge = identity_judge::DefaultIdentityJudge::new();
             let identity_judge_ref = identity_judge.unwrap_or(&default_identity_judge);
-            let identity_repo = IdentityRepo::new(pool.clone());
-            let active_identity_links = identity_repo
-                .list_identity_links_by_book(book_id, Some("active"))
-                .await
-                .unwrap_or_default();
-            let mut identity_reducer_claims = Vec::new();
-
-            for claim in &identity_claims {
-                let claim = re_resolve_identity_claim(book_id, &entity_repo, claim).await?;
-                persist_claim_entity_ids(pool, &claim).await?;
-
-                let entity_a = match &claim.subject_entity_id {
-                    Some(id) => entity_repo.get_by_id(id).await?,
-                    None => None,
-                };
-                let entity_b = match &claim.object_entity_id {
-                    Some(id) => entity_repo.get_by_id(id).await?,
-                    None => None,
-                };
-                let blocked = blocked_by_active_not_same_identity(
-                    &active_identity_links,
-                    claim.subject_entity_id.as_deref(),
-                    claim.object_entity_id.as_deref(),
-                );
-
-                match identity_judge::structural_gate(
-                    &claim,
-                    entity_a.as_ref(),
-                    entity_b.as_ref(),
-                    blocked,
-                ) {
-                    IdentityGateResult::Pass => match identity_judge_ref.judge(&claim).await {
-                        Ok(output) => {
-                            if let Err(err) = identity_judge::validate_judge_decision(
-                                &output,
-                                claim.subject_entity_id.is_some()
-                                    && claim.object_entity_id.is_some(),
-                            ) {
-                                claim_repo
-                                    .update_claim_value_json(
-                                        &claim.id,
-                                        &merge_identity_gate_reason(
-                                            claim.value_json.as_deref(),
-                                            "rejected",
-                                            &format!("invalid judge output: {err}"),
-                                        )?,
-                                    )
-                                    .await?;
-                                claim_repo
-                                    .update_claim_status(&claim.id, "rejected")
-                                    .await?;
-                                continue;
-                            }
-
-                            let updated_json =
-                                merge_identity_judge_output(claim.value_json.as_deref(), &output)?;
-                            claim_repo
-                                .update_claim_value_json(&claim.id, &updated_json)
-                                .await?;
-                            let mut claim_for_reducer = claim.clone();
-                            claim_for_reducer.value_json = Some(updated_json);
-
-                            match output.decision {
-                                identity_judge::IdentityJudgeDecision::Reject => {
-                                    claim_repo
-                                        .update_claim_status(&claim.id, "rejected")
-                                        .await?;
-                                }
-                                identity_judge::IdentityJudgeDecision::Uncertain => {
-                                    claim_repo
-                                        .update_claim_status(&claim.id, "uncertain")
-                                        .await?;
-                                }
-                                identity_judge::IdentityJudgeDecision::Merge
-                                | identity_judge::IdentityJudgeDecision::PossibleSameIdentity
-                                | identity_judge::IdentityJudgeDecision::NotSameIdentity
-                                | identity_judge::IdentityJudgeDecision::SplitRequired => {
-                                    identity_reducer_claims.push(claim_for_reducer);
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                "Identity judge failed for claim {}: {}. Marking as rejected.",
-                                claim.id,
-                                err
-                            );
-                            claim_repo
-                                .update_claim_status(&claim.id, "rejected")
-                                .await?;
-                        }
-                    },
-                    IdentityGateResult::Reject(reason) => {
-                        claim_repo
-                            .update_claim_value_json(
-                                &claim.id,
-                                &merge_identity_gate_reason(
-                                    claim.value_json.as_deref(),
-                                    "rejected",
-                                    &reason,
-                                )?,
-                            )
-                            .await?;
-                        claim_repo
-                            .update_claim_status(&claim.id, "rejected")
-                            .await?;
-                    }
-                    IdentityGateResult::Uncertain(reason) => {
-                        claim_repo
-                            .update_claim_value_json(
-                                &claim.id,
-                                &merge_identity_gate_reason(
-                                    claim.value_json.as_deref(),
-                                    "uncertain",
-                                    &reason,
-                                )?,
-                            )
-                            .await?;
-                        claim_repo
-                            .update_claim_status(&claim.id, "uncertain")
-                            .await?;
-                    }
-                }
-            }
-
-            if !identity_reducer_claims.is_empty() {
-                reducer::reduce_identity_claims(&identity_reducer_claims, book_id, pool).await?;
-            }
+            process_identity_claims_for_segment(
+                book_id,
+                pool,
+                &claim_repo,
+                &entity_repo,
+                &identity_claims,
+                identity_judge_ref,
+            )
+            .await?;
         }
 
         // i. Phase 2: process relationship_update claims
         if !relationship_claims.is_empty() {
             let default_judge = DefaultJudge::new();
             let judge_ref = judge.unwrap_or(&default_judge);
-
-            // Re-resolve relationship claims using newly created entities.
-            // After Phase 1 reduction, new characters may have been added to entities.
-            let mut re_resolved_claims = Vec::new();
-            for rel_claim in &relationship_claims {
-                let mut claim = rel_claim.clone();
-                if let Some(ref subject_mention) = claim.subject_mention {
-                    if let Ok(Some(entity)) = entity_repo
-                        .find_entity_by_alias(book_id, subject_mention)
-                        .await
-                    {
-                        claim.subject_entity_id = Some(entity.id);
-                    }
-                }
-                if let Some(ref object_mention) = claim.object_mention {
-                    if let Ok(Some(entity)) = entity_repo
-                        .find_entity_by_alias(book_id, object_mention)
-                        .await
-                    {
-                        claim.object_entity_id = Some(entity.id);
-                    }
-                }
-                re_resolved_claims.push(claim);
-            }
-
-            // Run Structural Gate on each relationship claim
-            let mut gate_accepted = Vec::new();
-            let mut redirect_claims = Vec::new();
-
-            for claim in &re_resolved_claims {
-                let subject_entity = match &claim.subject_entity_id {
-                    Some(id) => entity_repo.get_by_id(id).await?,
-                    None => None,
-                };
-                let object_entity = match &claim.object_entity_id {
-                    Some(id) => entity_repo.get_by_id(id).await?,
-                    None => None,
-                };
-
-                let gate_result = relationship_judge::structural_gate(
-                    claim,
-                    subject_entity.as_ref(),
-                    object_entity.as_ref(),
-                );
-
-                match gate_result {
-                    GateResult::Pass => {
-                        gate_accepted.push(claim.clone());
-                    }
-                    GateResult::Reject(reason) => {
-                        tracing::debug!(
-                            "Relationship claim {} rejected by structural gate: {}",
-                            claim.id,
-                            reason
-                        );
-                        claim_repo
-                            .update_claim_status(&claim.id, "rejected")
-                            .await?;
-                    }
-                    GateResult::Redirect {
-                        target,
-                        dimension_key,
-                    } => {
-                        if target == "property_update" {
-                            if let Some(dim_key) = dimension_key {
-                                let value_text = claim.object_mention.clone().unwrap_or_default();
-                                let redirect_json = serde_json::json!({
-                                    "redirected_from_claim_id": claim.id,
-                                });
-                                let derived_claim = claim_repo
-                                    .create_claim(
-                                        book_id,
-                                        chapter_index,
-                                        "property_update",
-                                        claim.subject_mention.as_deref(),
-                                        claim.object_mention.as_deref(),
-                                        claim.subject_entity_id.as_deref(),
-                                        claim.object_entity_id.as_deref(),
-                                        &format!("{} = {}", dim_key, value_text),
-                                        Some(&value_text),
-                                        Some(&redirect_json.to_string()),
-                                        &claim.primary_source_span_id,
-                                        &ai_run.id,
-                                        claim.confidence,
-                                        "low",
-                                    )
-                                    .await?;
-                                redirect_claims.push(derived_claim);
-                            }
-                        }
-                        claim_repo
-                            .update_claim_status(&claim.id, "redirected")
-                            .await?;
-                    }
-                    GateResult::Uncertain(reason) => {
-                        tracing::debug!("Relationship claim {} uncertain: {}", claim.id, reason);
-                        claim_repo
-                            .update_claim_status(&claim.id, "uncertain")
-                            .await?;
-                    }
-                }
-            }
-
-            // Run AI Semantic Judge on gate-accepted claims
-            let mut judge_accepted = Vec::new();
-            for claim in &gate_accepted {
-                match judge_ref.judge(claim).await {
-                    Ok(judge_output) => {
-                        match judge_output.decision {
-                            JudgeDecision::Accept => {
-                                let mut accepted_claim = claim.clone();
-                                // Write normalized fields back to claim.value_json
-                                let mut vj: serde_json::Value = accepted_claim
-                                    .value_json
-                                    .as_ref()
-                                    .and_then(|j| serde_json::from_str(j).ok())
-                                    .unwrap_or(serde_json::Value::Null);
-                                if let serde_json::Value::Object(ref mut map) = vj {
-                                    if let Some(group) = &judge_output.normalized_relation_group {
-                                        map.insert(
-                                            "normalized_relation_group".to_string(),
-                                            serde_json::Value::String(group.clone()),
-                                        );
-                                    }
-                                    if let Some(label) = &judge_output.normalized_relation_label {
-                                        map.insert(
-                                            "normalized_relation_label".to_string(),
-                                            serde_json::Value::String(label.clone()),
-                                        );
-                                    }
-                                    if let Some(dir) = &judge_output.directionality {
-                                        map.insert(
-                                            "directionality".to_string(),
-                                            serde_json::Value::String(dir.clone()),
-                                        );
-                                    }
-                                    if let Some(state) = &judge_output.current_state {
-                                        map.insert(
-                                            "current_state".to_string(),
-                                            serde_json::Value::String(state.clone()),
-                                        );
-                                    }
-                                    if let Some(strength) = judge_output.strength {
-                                        map.insert(
-                                            "strength".to_string(),
-                                            serde_json::Value::Number(
-                                                serde_json::Number::from_f64(strength)
-                                                    .unwrap_or(serde_json::Number::from(0)),
-                                            ),
-                                        );
-                                    }
-                                    if let Some(polarity) = &judge_output.polarity {
-                                        map.insert(
-                                            "polarity".to_string(),
-                                            serde_json::Value::String(polarity.clone()),
-                                        );
-                                    }
-                                    if let Some(importance) = judge_output.importance_score {
-                                        map.insert(
-                                            "importance_score".to_string(),
-                                            serde_json::Value::Number(
-                                                serde_json::Number::from_f64(importance)
-                                                    .unwrap_or(serde_json::Number::from(0)),
-                                            ),
-                                        );
-                                    }
-                                    map.insert(
-                                        "judge_confidence".to_string(),
-                                        serde_json::Value::Number(
-                                            serde_json::Number::from_f64(judge_output.confidence)
-                                                .unwrap_or(serde_json::Number::from(0)),
-                                        ),
-                                    );
-                                    map.insert(
-                                        "judge_reason_code".to_string(),
-                                        serde_json::Value::String(judge_output.reason_code.clone()),
-                                    );
-                                }
-                                accepted_claim.value_json = Some(vj.to_string());
-                                claim_repo
-                                    .update_claim_value_json(&claim.id, &vj.to_string())
-                                    .await?;
-                                judge_accepted.push(accepted_claim);
-                            }
-                            JudgeDecision::Reject => {
-                                claim_repo
-                                    .update_claim_status(&claim.id, "rejected")
-                                    .await?;
-                            }
-                            JudgeDecision::Redirect => {
-                                let redirect_to =
-                                    judge_output.redirect_to.as_deref().unwrap_or("minor_event");
-                                let dim_key = judge_output.redirect_dimension_key.clone();
-
-                                if redirect_to == "property_update" {
-                                    if let Some(dim_key) = dim_key {
-                                        let value_text =
-                                            claim.object_mention.clone().unwrap_or_default();
-                                        let redirect_json = serde_json::json!({
-                                            "redirected_from_claim_id": claim.id,
-                                        });
-                                        let derived_claim = claim_repo
-                                            .create_claim(
-                                                book_id,
-                                                chapter_index,
-                                                "property_update",
-                                                claim.subject_mention.as_deref(),
-                                                claim.object_mention.as_deref(),
-                                                claim.subject_entity_id.as_deref(),
-                                                claim.object_entity_id.as_deref(),
-                                                &format!("{} = {}", dim_key, value_text),
-                                                Some(&value_text),
-                                                Some(&redirect_json.to_string()),
-                                                &claim.primary_source_span_id,
-                                                &ai_run.id,
-                                                judge_output.confidence,
-                                                "low",
-                                            )
-                                            .await?;
-                                        redirect_claims.push(derived_claim);
-                                    }
-                                }
-                                // minor_event redirects: ledger-only, no canonical processing
-                                claim_repo
-                                    .update_claim_status(&claim.id, "redirected")
-                                    .await?;
-                            }
-                            JudgeDecision::Uncertain => {
-                                claim_repo
-                                    .update_claim_status(&claim.id, "uncertain")
-                                    .await?;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "AI judge failed for claim {}: {}. Marking as rejected.",
-                            claim.id,
-                            e
-                        );
-                        claim_repo
-                            .update_claim_status(&claim.id, "rejected")
-                            .await?;
-                    }
-                }
-            }
-
-            // Run relationship_reducer on accepted claims (independent transaction)
-            let _rel_reduction =
-                reducer::reduce_relationship_claims(&judge_accepted, book_id, pool).await?;
-
-            // Second-pass property_reducer for derived redirect property_update claims
-            if !redirect_claims.is_empty() {
-                let _redirect_reduction =
-                    reducer::reduce_claims(&redirect_claims, book_id, pool).await?;
-            }
+            process_relationship_claims_for_segment(
+                book_id,
+                chapter_index,
+                pool,
+                &claim_repo,
+                &entity_repo,
+                &ai_run.id,
+                &relationship_claims,
+                judge_ref,
+            )
+            .await?;
         }
 
         // j. Phase 4: process knowledge assertions after Phase 1/2/3 canonical writes
         if !knowledge_claims.is_empty() {
             let default_knowledge_judge = knowledge_judge::DefaultKnowledgeRevisionJudge::new();
             let knowledge_judge_ref = knowledge_judge.unwrap_or(&default_knowledge_judge);
-            process_knowledge_claims_for_segment(
+            knowledge_processor::process_knowledge_claims_for_segment(
                 book_id,
                 chapter_index,
                 pool,
-                knowledge_judge_ref,
                 &claim_repo,
                 segment_id,
                 &knowledge_claims,
+                knowledge_judge_ref,
             )
             .await?;
         }
@@ -826,33 +422,16 @@ async fn process_chapter_with_all_judges(
         if !location_claims.is_empty() {
             let default_map_judge = map_conflict_judge::DefaultMapConflictJudge::new();
             let map_judge_ref = map_conflict_judge.unwrap_or(&default_map_judge);
-            if let Err(err) = process_location_claims_for_segment(
+            place_processor::process_place_claims_for_segment(
                 book_id,
                 chapter_index,
                 pool,
-                map_judge_ref,
                 &claim_repo,
-                &entity_repo,
+                segment_id,
                 &location_claims,
+                map_judge_ref,
             )
-            .await
-            {
-                tracing::warn!(
-                    "Phase 5 map processing failed for book {} chapter {}: {}",
-                    book_id,
-                    chapter_index,
-                    err
-                );
-                let claim_ids = location_claims
-                    .iter()
-                    .map(|claim| claim.id.clone())
-                    .collect::<Vec<_>>();
-                if !claim_ids.is_empty() {
-                    let _ = claim_repo
-                        .batch_update_claim_status(&claim_ids, "uncertain")
-                        .await;
-                }
-            }
+            .await?;
         }
 
         // l. Mark AI run as success with output_json
@@ -880,737 +459,6 @@ async fn process_chapter_with_all_judges(
     Ok(())
 }
 
-async fn process_location_claims_for_segment(
-    book_id: &str,
-    chapter_index: i64,
-    pool: &SqlitePool,
-    map_judge: &dyn MapConflictJudge,
-    claim_repo: &ClaimRepo,
-    entity_repo: &EntityRepo,
-    location_claims: &[ClaimRecord],
-) -> anyhow::Result<()> {
-    let identity_repo = IdentityRepo::new(pool.clone());
-    let place_resolver = PlaceResolver::new(EntityRepo::new(pool.clone()), identity_repo);
-    let mut introduction_claims = Vec::new();
-    let mut edge_claims = Vec::new();
-
-    for claim in location_claims
-        .iter()
-        .filter(|claim| claim.claim_type == "location_introduction")
-    {
-        match prepare_location_introduction_claim(&place_resolver, claim_repo, pool, book_id, claim)
-            .await?
-        {
-            Some(prepared) => introduction_claims.push(prepared),
-            None => {
-                claim_repo
-                    .update_claim_status(&claim.id, "uncertain")
-                    .await?;
-            }
-        }
-    }
-
-    if !introduction_claims.is_empty() {
-        place_reducer::reduce_location_claims(&introduction_claims, book_id, pool).await?;
-    }
-
-    let existing_parent_links = load_existing_parent_links(book_id, pool).await?;
-    for claim in location_claims
-        .iter()
-        .filter(|claim| claim.claim_type == "location_edge")
-    {
-        match prepare_location_edge_claim(
-            &place_resolver,
-            claim_repo,
-            entity_repo,
-            pool,
-            book_id,
-            chapter_index,
-            map_judge,
-            claim,
-            &existing_parent_links,
-        )
-        .await?
-        {
-            Some(prepared) => edge_claims.push(prepared),
-            None => {}
-        }
-    }
-
-    if !edge_claims.is_empty() {
-        place_reducer::reduce_location_claims(&edge_claims, book_id, pool).await?;
-    }
-
-    Ok(())
-}
-
-async fn prepare_location_introduction_claim(
-    place_resolver: &PlaceResolver,
-    claim_repo: &ClaimRepo,
-    pool: &SqlitePool,
-    book_id: &str,
-    claim: &ClaimRecord,
-) -> anyhow::Result<Option<ClaimRecord>> {
-    let mut value = parse_value_json_object(claim.value_json.as_deref());
-    let place_type = value
-        .get("place_type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let parent_place_mention = value
-        .get("parent_place_mention")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let aliases = value
-        .get("aliases")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let Some(place_mention) = claim.subject_mention.as_deref() else {
-        return Ok(None);
-    };
-    let resolution = place_resolver
-        .resolve_place(
-            book_id,
-            place_mention,
-            &place_type,
-            parent_place_mention.as_deref(),
-            &aliases,
-            claim.confidence,
-        )
-        .await?;
-    if resolution.action == PlaceResolutionAction::Uncertain {
-        return Ok(None);
-    }
-
-    if let Some(parent_id) = resolution.parent_place_id {
-        value.insert(
-            "parent_place_id".to_string(),
-            serde_json::Value::String(parent_id),
-        );
-    }
-    if let Some(org_id) = resolution.organization_link_candidate_id {
-        value.insert(
-            "organization_link_candidate_id".to_string(),
-            serde_json::Value::String(org_id),
-        );
-        value
-            .entry("entity_link_type".to_string())
-            .or_insert_with(|| serde_json::Value::String("organization_place_pair".to_string()));
-    }
-    insert_claim_evidence_span_ids(&mut value, claim);
-
-    let updated_json = serde_json::Value::Object(value).to_string();
-    claim_repo
-        .update_claim_value_json(&claim.id, &updated_json)
-        .await?;
-    let mut prepared = claim.clone();
-    prepared.subject_entity_id = resolution.place_entity_id;
-    prepared.value_json = Some(updated_json);
-    persist_claim_entity_ids(pool, &prepared).await?;
-    Ok(Some(prepared))
-}
-
-async fn prepare_location_edge_claim(
-    place_resolver: &PlaceResolver,
-    claim_repo: &ClaimRepo,
-    entity_repo: &EntityRepo,
-    pool: &SqlitePool,
-    book_id: &str,
-    chapter_index: i64,
-    map_judge: &dyn MapConflictJudge,
-    claim: &ClaimRecord,
-    existing_parent_links: &[(String, String)],
-) -> anyhow::Result<Option<ClaimRecord>> {
-    let mut value = parse_value_json_object(claim.value_json.as_deref());
-    let Some(from_mention) = claim.subject_mention.as_deref() else {
-        claim_repo
-            .update_claim_status(&claim.id, "uncertain")
-            .await?;
-        return Ok(None);
-    };
-    let Some(to_mention) = claim.object_mention.as_deref() else {
-        claim_repo
-            .update_claim_status(&claim.id, "uncertain")
-            .await?;
-        return Ok(None);
-    };
-
-    let from_resolution = place_resolver
-        .resolve_place(
-            book_id,
-            from_mention,
-            "unknown",
-            None,
-            &[],
-            claim.confidence,
-        )
-        .await?;
-    let to_resolution = place_resolver
-        .resolve_place(book_id, to_mention, "unknown", None, &[], claim.confidence)
-        .await?;
-    let (Some(from_place_id), Some(to_place_id)) = (
-        from_resolution.place_entity_id.clone(),
-        to_resolution.place_entity_id.clone(),
-    ) else {
-        claim_repo
-            .update_claim_status(&claim.id, "uncertain")
-            .await?;
-        return Ok(None);
-    };
-
-    value.insert(
-        "from_place_id".to_string(),
-        serde_json::Value::String(from_place_id.clone()),
-    );
-    value.insert(
-        "to_place_id".to_string(),
-        serde_json::Value::String(to_place_id.clone()),
-    );
-    insert_claim_evidence_span_ids(&mut value, claim);
-
-    let mut prepared = claim.clone();
-    prepared.subject_entity_id = Some(from_place_id.clone());
-    prepared.object_entity_id = Some(to_place_id.clone());
-    prepared.value_json = Some(serde_json::Value::Object(value.clone()).to_string());
-    persist_claim_entity_ids(pool, &prepared).await?;
-
-    let from_place = entity_repo.get_by_id(&from_place_id).await?;
-    let to_place = entity_repo.get_by_id(&to_place_id).await?;
-    match map_gate::structural_gate(MapGateContext {
-        claim: &prepared,
-        from_place: from_place.as_ref(),
-        to_place: to_place.as_ref(),
-        existing_parent_links,
-    }) {
-        MapGateResult::Pass => {}
-        MapGateResult::Reject(reason) => {
-            merge_map_gate_reason(&mut value, "reject", &reason);
-            let updated_json = serde_json::Value::Object(value).to_string();
-            claim_repo
-                .update_claim_value_json(&claim.id, &updated_json)
-                .await?;
-            set_claim_risk_level(pool, &claim.id, "medium").await?;
-            prepared.risk_level = "medium".to_string();
-            prepared.value_json = Some(updated_json);
-            return Ok(Some(prepared));
-        }
-        MapGateResult::Uncertain(reason) => {
-            merge_map_gate_reason(&mut value, "uncertain", &reason);
-            let updated_json = serde_json::Value::Object(value).to_string();
-            claim_repo
-                .update_claim_value_json(&claim.id, &updated_json)
-                .await?;
-            claim_repo
-                .update_claim_status(&claim.id, "uncertain")
-                .await?;
-            return Ok(None);
-        }
-    }
-
-    let edge_type = value
-        .get("edge_type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("connected_to")
-        .to_string();
-    let judge_input = MapConflictJudgeInput {
-        book_id: book_id.to_string(),
-        chapter_index,
-        claim_id: claim.id.clone(),
-        claim_type: claim.claim_type.clone(),
-        from_place_mention: from_mention.to_string(),
-        to_place_mention: to_mention.to_string(),
-        edge_type,
-        evidence_spans: claim_evidence_span_ids(claim),
-        existing_map_context: load_existing_map_context(book_id, pool).await?,
-        boundary_warnings: Vec::new(),
-    };
-    let judge_output = map_judge.judge(&judge_input).await?;
-    merge_map_judge_output(&mut value, &judge_output)?;
-    let updated_json = serde_json::Value::Object(value).to_string();
-    claim_repo
-        .update_claim_value_json(&claim.id, &updated_json)
-        .await?;
-    prepared.value_json = Some(updated_json);
-
-    if judge_output.decision == MapConflictDecision::Uncertain {
-        claim_repo
-            .update_claim_status(&claim.id, "uncertain")
-            .await?;
-        return Ok(None);
-    }
-
-    set_claim_risk_level(pool, &claim.id, "medium").await?;
-    prepared.risk_level = "medium".to_string();
-    Ok(Some(prepared))
-}
-
-async fn load_existing_parent_links(
-    book_id: &str,
-    pool: &SqlitePool,
-) -> anyhow::Result<Vec<(String, String)>> {
-    let rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT entity_id, parent_place_id
-         FROM place_details
-         WHERE book_id = ? AND status = 'active' AND parent_place_id IS NOT NULL",
-    )
-    .bind(book_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
-}
-
-async fn set_claim_risk_level(
-    pool: &SqlitePool,
-    claim_id: &str,
-    risk_level: &str,
-) -> anyhow::Result<()> {
-    sqlx::query("UPDATE claims SET risk_level = ?, updated_at = ? WHERE id = ?")
-        .bind(risk_level)
-        .bind(chrono::Utc::now().to_rfc3339())
-        .bind(claim_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-async fn load_existing_map_context(
-    book_id: &str,
-    pool: &SqlitePool,
-) -> anyhow::Result<Vec<String>> {
-    let rows = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT from_place_id, to_place_id, edge_type
-         FROM place_edges
-         WHERE book_id = ? AND status = 'active'
-         ORDER BY created_at DESC
-         LIMIT 20",
-    )
-    .bind(book_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(from, to, edge_type)| format!("{from} {edge_type} {to}"))
-        .collect())
-}
-
-fn insert_claim_evidence_span_ids(
-    value: &mut serde_json::Map<String, serde_json::Value>,
-    claim: &ClaimRecord,
-) {
-    let ids = claim_evidence_span_ids(claim)
-        .into_iter()
-        .map(serde_json::Value::String)
-        .collect::<Vec<_>>();
-    value.insert(
-        "evidence_span_ids".to_string(),
-        serde_json::Value::Array(ids),
-    );
-}
-
-fn claim_evidence_span_ids(claim: &ClaimRecord) -> Vec<String> {
-    let primary = claim.primary_source_span_id.trim();
-    if primary.is_empty() {
-        Vec::new()
-    } else {
-        vec![primary.to_string()]
-    }
-}
-
-fn merge_map_gate_reason(
-    value: &mut serde_json::Map<String, serde_json::Value>,
-    decision: &str,
-    reason: &str,
-) {
-    value.insert(
-        "judge_decision".to_string(),
-        serde_json::Value::String(decision.to_string()),
-    );
-    value.insert(
-        "reason_code".to_string(),
-        serde_json::Value::String(reason.to_string()),
-    );
-}
-
-fn merge_map_judge_output(
-    value: &mut serde_json::Map<String, serde_json::Value>,
-    output: &map_conflict_judge::MapConflictJudgeOutput,
-) -> anyhow::Result<()> {
-    let decision = match output.decision {
-        MapConflictDecision::Accept => "accept",
-        MapConflictDecision::Conflict => "conflict",
-        MapConflictDecision::Uncertain => "uncertain",
-        MapConflictDecision::Reject => "reject",
-    };
-    value.insert(
-        "judge_decision".to_string(),
-        serde_json::Value::String(decision.to_string()),
-    );
-    if let Some(edge_type) = &output.normalized_edge_type {
-        value.insert(
-            "normalized_edge_type".to_string(),
-            serde_json::Value::String(edge_type.clone()),
-        );
-    }
-    if let Some(direction) = &output.normalized_direction_hint {
-        value.insert(
-            "normalized_direction_hint".to_string(),
-            serde_json::Value::String(direction.clone()),
-        );
-    }
-    if let Some(distance) = &output.normalized_distance_hint {
-        value.insert(
-            "normalized_distance_hint".to_string(),
-            serde_json::Value::String(distance.clone()),
-        );
-    }
-    if let Some(conflict_type) = &output.conflict_type {
-        value.insert(
-            "conflict_type".to_string(),
-            serde_json::Value::String(conflict_type.clone()),
-        );
-    }
-    value.insert(
-        "reason_code".to_string(),
-        serde_json::Value::String(output.reason_code.clone()),
-    );
-    value.insert(
-        "judge_confidence".to_string(),
-        serde_json::Value::Number(
-            serde_json::Number::from_f64(output.confidence)
-                .ok_or_else(|| anyhow::anyhow!("invalid map judge confidence"))?,
-        ),
-    );
-    value.insert("judge_output".to_string(), serde_json::to_value(output)?);
-    Ok(())
-}
-
-async fn process_knowledge_claims_for_segment(
-    book_id: &str,
-    chapter_index: i64,
-    pool: &SqlitePool,
-    knowledge_judge: &dyn KnowledgeRevisionJudge,
-    claim_repo: &ClaimRepo,
-    segment_id: &str,
-    knowledge_claims: &[ClaimRecord],
-) -> anyhow::Result<()> {
-    let knowledge_repo = KnowledgeRepo::new(pool.clone());
-    let topic_resolver = TopicResolver::new(knowledge_repo);
-    let source_spans = claim_repo.list_spans_by_segment(segment_id).await?;
-    let mut reducer_claims = Vec::new();
-    let mut judge_outputs = HashMap::new();
-    let entity_repo = EntityRepo::new(pool.clone());
-
-    for original_claim in knowledge_claims {
-        let claim = re_resolve_knowledge_claim_references(
-            book_id,
-            &entity_repo,
-            claim_repo,
-            original_claim,
-        )
-        .await?;
-        let fields = match parse_knowledge_claim_value(&claim) {
-            Ok(fields) => fields,
-            Err(err) => {
-                claim_repo
-                    .update_claim_status(&claim.id, "rejected")
-                    .await?;
-                tracing::debug!("Knowledge claim {} rejected: {}", claim.id, err);
-                continue;
-            }
-        };
-        let topic_resolution = topic_resolver
-            .resolve(book_id, &fields.category, &fields.topic, chapter_index)
-            .await?;
-
-        match knowledge_judge::structural_gate(&claim, &source_spans, Some(&topic_resolution)) {
-            KnowledgeGateResult::Pass => {}
-            KnowledgeGateResult::Reject(reason) => {
-                claim_repo
-                    .update_claim_status(&claim.id, "rejected")
-                    .await?;
-                tracing::debug!(
-                    "Knowledge claim {} rejected by structural gate: {}",
-                    claim.id,
-                    reason
-                );
-                continue;
-            }
-            KnowledgeGateResult::Uncertain(reason) => {
-                claim_repo
-                    .update_claim_status(&claim.id, "uncertain")
-                    .await?;
-                tracing::debug!("Knowledge claim {} uncertain: {}", claim.id, reason);
-                continue;
-            }
-        }
-
-        let input = build_knowledge_judge_input(
-            book_id,
-            chapter_index,
-            &claim,
-            &fields,
-            &topic_resolution,
-            &source_spans,
-            pool,
-        )
-        .await?;
-
-        match knowledge_judge.judge(&input).await {
-            Ok(output) => {
-                let matching_candidate_count = topic_resolution
-                    .candidates
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.match_kind != TopicCandidateMatch::RecentSameCategory
-                    })
-                    .count();
-                if let Err(err) = knowledge_judge::validate_judge_output_for_context(
-                    &output,
-                    matching_candidate_count,
-                ) {
-                    claim_repo
-                        .update_claim_status(&claim.id, "rejected")
-                        .await?;
-                    tracing::warn!(
-                        "Knowledge judge output invalid for claim {}: {}",
-                        claim.id,
-                        err
-                    );
-                    continue;
-                }
-                if output.decision == knowledge_judge::KnowledgeJudgeDecision::Reject {
-                    claim_repo
-                        .update_claim_status(&claim.id, "rejected")
-                        .await?;
-                    continue;
-                }
-                if output.card_action == knowledge_judge::KnowledgeCardAction::Uncertain {
-                    claim_repo
-                        .update_claim_status(&claim.id, "uncertain")
-                        .await?;
-                    continue;
-                }
-
-                let value_json =
-                    merge_knowledge_judge_output(claim.value_json.as_deref(), &output)?;
-                claim_repo
-                    .update_claim_value_json(&claim.id, &value_json)
-                    .await?;
-                let mut reducer_claim = claim.clone();
-                reducer_claim.value_json = Some(value_json);
-                judge_outputs.insert(claim.id.clone(), output);
-                reducer_claims.push(reducer_claim);
-            }
-            Err(err) => {
-                claim_repo
-                    .update_claim_status(&claim.id, "rejected")
-                    .await?;
-                tracing::warn!("Knowledge judge failed for claim {}: {}", claim.id, err);
-            }
-        }
-    }
-
-    if !reducer_claims.is_empty() {
-        if let Err(err) =
-            reducer::reduce_knowledge_claims(&reducer_claims, book_id, pool, &judge_outputs).await
-        {
-            tracing::warn!(
-                "Knowledge reducer failed for book {} chapter {}: {}. Marking knowledge claims uncertain.",
-                book_id,
-                chapter_index,
-                err
-            );
-            for claim in &reducer_claims {
-                claim_repo
-                    .update_claim_status(&claim.id, "uncertain")
-                    .await?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn re_resolve_knowledge_claim_references(
-    book_id: &str,
-    entity_repo: &EntityRepo,
-    claim_repo: &ClaimRepo,
-    claim: &ClaimRecord,
-) -> anyhow::Result<ClaimRecord> {
-    let Some(raw_value_json) = claim.value_json.as_deref() else {
-        return Ok(claim.clone());
-    };
-    let mut value: serde_json::Value = serde_json::from_str(raw_value_json)?;
-    let mut changed = false;
-    if let Some(mentions) = value
-        .get_mut("referenced_entity_mentions")
-        .and_then(|value| value.as_array_mut())
-    {
-        for mention in mentions {
-            let has_resolved = mention
-                .get("resolved_entity_id")
-                .and_then(|value| value.as_str())
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false);
-            if has_resolved {
-                continue;
-            }
-            let Some(name) = mention.get("mention").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            if let Some(entity_id) = find_entity_id_for_mention(entity_repo, book_id, name).await? {
-                mention["resolved_entity_id"] = serde_json::Value::String(entity_id);
-                changed = true;
-            }
-        }
-    }
-    if !changed {
-        return Ok(claim.clone());
-    }
-
-    let updated_json = value.to_string();
-    claim_repo
-        .update_claim_value_json(&claim.id, &updated_json)
-        .await?;
-    let mut updated_claim = claim.clone();
-    updated_claim.value_json = Some(updated_json);
-    Ok(updated_claim)
-}
-
-struct KnowledgePipelineClaimFields {
-    category: String,
-    topic: String,
-    assertion_text: String,
-    status_hint: Option<String>,
-}
-
-fn parse_knowledge_claim_value(
-    claim: &ClaimRecord,
-) -> anyhow::Result<KnowledgePipelineClaimFields> {
-    let value: serde_json::Value = serde_json::from_str(
-        claim
-            .value_json
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("knowledge claim missing value_json"))?,
-    )?;
-    let category = required_json_string(&value, "category")
-        .ok_or_else(|| anyhow::anyhow!("knowledge claim missing category"))?;
-    let topic = required_json_string(&value, "topic_display")
-        .or_else(|| required_json_string(&value, "raw_topic"))
-        .ok_or_else(|| anyhow::anyhow!("knowledge claim missing topic"))?;
-    let assertion_text = required_json_string(&value, "assertion_text")
-        .or_else(|| claim.value_text.clone())
-        .ok_or_else(|| anyhow::anyhow!("knowledge claim missing assertion_text"))?;
-    let status_hint = required_json_string(&value, "status_hint");
-    Ok(KnowledgePipelineClaimFields {
-        category,
-        topic,
-        assertion_text,
-        status_hint,
-    })
-}
-
-async fn build_knowledge_judge_input(
-    book_id: &str,
-    chapter_index: i64,
-    claim: &ClaimRecord,
-    fields: &KnowledgePipelineClaimFields,
-    topic_resolution: &crate::service::v4::topic_resolver::TopicResolution,
-    source_spans: &[SourceSpanRecord],
-    pool: &SqlitePool,
-) -> anyhow::Result<knowledge_judge::KnowledgeJudgeInput> {
-    let knowledge_repo = KnowledgeRepo::new(pool.clone());
-    let mut existing_assertions = Vec::new();
-    for candidate in &topic_resolution.candidates {
-        for assertion in knowledge_repo
-            .list_assertions_for_card(&candidate.card_id)
-            .await?
-        {
-            existing_assertions.push(KnowledgeJudgeAssertionInput {
-                assertion_id: assertion.id,
-                card_id: assertion.card_id,
-                assertion_text: assertion.assertion_text,
-                status: assertion.status,
-                chapter_index: assertion.chapter_index,
-            });
-        }
-    }
-
-    Ok(knowledge_judge::KnowledgeJudgeInput {
-        book_id: book_id.to_string(),
-        chapter_index,
-        claim_id: claim.id.clone(),
-        category: fields.category.clone(),
-        assertion_text: fields.assertion_text.clone(),
-        status_hint: fields.status_hint.clone(),
-        proposed_topic: topic_resolution.proposed.clone(),
-        candidate_cards: topic_resolution.candidates.clone(),
-        existing_assertions,
-        evidence_spans: source_spans
-            .iter()
-            .filter(|span| span.id == claim.primary_source_span_id)
-            .map(|span| span.text_excerpt.clone())
-            .collect(),
-    })
-}
-
-fn merge_knowledge_judge_output(
-    current_value_json: Option<&str>,
-    output: &knowledge_judge::KnowledgeJudgeOutput,
-) -> anyhow::Result<String> {
-    let mut value = parse_value_json_object(current_value_json);
-    value.insert(
-        "judge_decision".to_string(),
-        serde_json::Value::String(format!("{:?}", output.decision)),
-    );
-    value.insert(
-        "card_action".to_string(),
-        serde_json::Value::String(format!("{:?}", output.card_action)),
-    );
-    if let Some(card_id) = &output.target_card_id {
-        value.insert(
-            "target_card_id".to_string(),
-            serde_json::Value::String(card_id.clone()),
-        );
-    }
-    value.insert(
-        "assertion_status".to_string(),
-        serde_json::Value::String(output.assertion_status.clone()),
-    );
-    value.insert(
-        "judge_confidence".to_string(),
-        serde_json::Value::Number(
-            serde_json::Number::from_f64(output.confidence)
-                .unwrap_or_else(|| serde_json::Number::from(0)),
-        ),
-    );
-    value.insert(
-        "reason_code".to_string(),
-        serde_json::Value::String(output.reason_code.clone()),
-    );
-    value.insert(
-        "explanation_for_log".to_string(),
-        serde_json::Value::String(output.explanation_for_log.clone()),
-    );
-    Ok(serde_json::Value::Object(value).to_string())
-}
-
-fn required_json_string(value: &serde_json::Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn is_identity_claim_type(claim_type: &str) -> bool {
     matches!(
         claim_type,
@@ -1619,166 +467,6 @@ fn is_identity_claim_type(claim_type: &str) -> bool {
             | "entity_split_candidate"
             | "not_same_identity"
     )
-}
-
-async fn re_resolve_identity_claim(
-    book_id: &str,
-    entity_repo: &EntityRepo,
-    claim: &ClaimRecord,
-) -> anyhow::Result<ClaimRecord> {
-    let mut updated = claim.clone();
-    if updated.subject_entity_id.is_none() {
-        if let Some(mention) = updated.subject_mention.as_deref() {
-            updated.subject_entity_id =
-                find_entity_id_for_mention(entity_repo, book_id, mention).await?;
-        }
-    }
-    if updated.object_entity_id.is_none() {
-        if let Some(mention) = updated.object_mention.as_deref() {
-            updated.object_entity_id =
-                find_entity_id_for_mention(entity_repo, book_id, mention).await?;
-        }
-    }
-    Ok(updated)
-}
-
-async fn find_entity_id_for_mention(
-    entity_repo: &EntityRepo,
-    book_id: &str,
-    mention: &str,
-) -> anyhow::Result<Option<String>> {
-    if let Some(entity) = entity_repo.find_entity_by_alias(book_id, mention).await? {
-        return Ok(Some(entity.id));
-    }
-    Ok(entity_repo
-        .get_by_canonical_name(book_id, mention)
-        .await?
-        .map(|entity| entity.id))
-}
-
-async fn persist_claim_entity_ids(pool: &SqlitePool, claim: &ClaimRecord) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE claims SET subject_entity_id = ?, object_entity_id = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(claim.subject_entity_id.as_deref())
-    .bind(claim.object_entity_id.as_deref())
-    .bind(chrono::Utc::now().to_rfc3339())
-    .bind(&claim.id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-fn blocked_by_active_not_same_identity(
-    active_links: &[IdentityLinkRecord],
-    left: Option<&str>,
-    right: Option<&str>,
-) -> bool {
-    let (Some(left), Some(right)) = (left, right) else {
-        return false;
-    };
-    let pair = canonicalize_identity_pair(left, right);
-    active_links.iter().any(|link| {
-        link.status == "active"
-            && link.link_type == "not_same_identity"
-            && canonicalize_identity_pair(&link.entity_a_id, &link.entity_b_id) == pair
-    })
-}
-
-fn canonicalize_identity_pair(left: &str, right: &str) -> (String, String) {
-    if left <= right {
-        (left.to_string(), right.to_string())
-    } else {
-        (right.to_string(), left.to_string())
-    }
-}
-
-fn merge_identity_judge_output(
-    current_value_json: Option<&str>,
-    output: &identity_judge::IdentityJudgeOutput,
-) -> anyhow::Result<String> {
-    let mut value = parse_value_json_object(current_value_json);
-    value.insert(
-        "judge_decision".to_string(),
-        serde_json::Value::String(
-            match &output.decision {
-                identity_judge::IdentityJudgeDecision::Merge => "merge",
-                identity_judge::IdentityJudgeDecision::PossibleSameIdentity => {
-                    "possible_same_identity"
-                }
-                identity_judge::IdentityJudgeDecision::NotSameIdentity => "not_same_identity",
-                identity_judge::IdentityJudgeDecision::Reject => "reject",
-                identity_judge::IdentityJudgeDecision::Uncertain => "uncertain",
-                identity_judge::IdentityJudgeDecision::SplitRequired => "split_required",
-            }
-            .to_string(),
-        ),
-    );
-    value.insert(
-        "judge_confidence".to_string(),
-        serde_json::Value::Number(
-            serde_json::Number::from_f64(output.confidence)
-                .unwrap_or_else(|| serde_json::Number::from(0)),
-        ),
-    );
-    value.insert(
-        "reason_code".to_string(),
-        serde_json::Value::String(output.reason_code.clone()),
-    );
-    value.insert(
-        "link_type".to_string(),
-        serde_json::Value::String(output.link_type.clone()),
-    );
-    value.insert(
-        "survivor_hint".to_string(),
-        serde_json::Value::String(output.survivor_hint.clone()),
-    );
-    value.insert(
-        "explanation_for_log".to_string(),
-        serde_json::Value::String(output.explanation_for_log.clone()),
-    );
-    value.insert(
-        "property_conflicts".to_string(),
-        serde_json::Value::Array(
-            output
-                .property_conflicts
-                .iter()
-                .cloned()
-                .map(serde_json::Value::String)
-                .collect(),
-        ),
-    );
-    value.insert(
-        "relationship_migration_hint".to_string(),
-        serde_json::Value::String(output.relationship_migration_hint.clone()),
-    );
-    Ok(serde_json::Value::Object(value).to_string())
-}
-
-fn merge_identity_gate_reason(
-    current_value_json: Option<&str>,
-    gate_decision: &str,
-    reason: &str,
-) -> anyhow::Result<String> {
-    let mut value = parse_value_json_object(current_value_json);
-    value.insert(
-        "judge_decision".to_string(),
-        serde_json::Value::String(gate_decision.to_string()),
-    );
-    value.insert(
-        "gate_reason".to_string(),
-        serde_json::Value::String(reason.to_string()),
-    );
-    Ok(serde_json::Value::Object(value).to_string())
-}
-
-fn parse_value_json_object(
-    current_value_json: Option<&str>,
-) -> serde_json::Map<String, serde_json::Value> {
-    current_value_json
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2221,6 +909,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pipeline_does_not_directly_mutate_claim_lifecycle_status() {
+        let source = include_str!("pipeline.rs");
+        let batch_update_status = concat!("batch_update_claim", "_status");
+        let update_status = concat!(".update_claim", "_status");
+
+        assert!(
+            !source.contains(batch_update_status),
+            "pipeline must orchestrate domain processors, not batch-update claim lifecycle status"
+        );
+        assert!(
+            !source.contains(update_status),
+            "pipeline must orchestrate domain processors, not update claim lifecycle status"
+        );
+    }
+
+    #[test]
+    fn pipeline_does_not_resolve_entities_before_claim_ledger() {
+        let source = include_str!("pipeline.rs");
+        let pre_ledger_resolve = concat!("resolver::", "resolve(&observations");
+        assert!(
+            !source.contains(pre_ledger_resolve),
+            "pipeline must not resolve canonical ids before the claim ledger; domain processors own resolution"
+        );
+    }
+
     #[tokio::test]
     async fn process_long_chapter_creates_unique_source_spans() {
         let pool = setup_pool().await;
@@ -2248,7 +962,10 @@ mod tests {
             .list_active_segments(&chapter.id)
             .await
             .unwrap();
-        assert!(segments.len() > 1, "long chapter should split into segments");
+        assert!(
+            segments.len() > 1,
+            "long chapter should split into segments"
+        );
 
         let claim_repo = ClaimRepo::new(pool.clone());
         let mut all_span_indexes = Vec::new();
@@ -2441,9 +1158,12 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(identity_claim.value_json.as_deref().expect("value_json"))
                 .unwrap();
-        assert_eq!(payload["judge_decision"], "merge");
-        assert_eq!(payload["judge_confidence"], 0.96);
-        assert_eq!(payload["reason_code"], "explicit_reveal");
+        assert!(
+            payload.get("judge_decision").is_none(),
+            "judge output must stay inside identity decision/materializer"
+        );
+        assert!(payload.get("judge_confidence").is_none());
+        assert!(payload.get("reason_code").is_none());
     }
 
     #[tokio::test]
@@ -2486,7 +1206,8 @@ mod tests {
         .await
         .unwrap();
 
-        let knowledge_repo = crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
+        let knowledge_repo =
+            crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
         let cards = knowledge_repo
             .list_cards("b1", Some("power_system"), Some("active"))
             .await
@@ -2545,7 +1266,8 @@ mod tests {
         .await
         .unwrap();
 
-        let knowledge_repo = crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
+        let knowledge_repo =
+            crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
         let cards = knowledge_repo
             .list_cards("b1", Some("power_system"), Some("active"))
             .await
@@ -2601,14 +1323,16 @@ mod tests {
         .await
         .unwrap();
 
-        let unsupported_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_assertions WHERE status = 'unsupported'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let unsupported_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_assertions WHERE status = 'unsupported'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(unsupported_count, 0);
 
-        let knowledge_repo = crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
+        let knowledge_repo =
+            crate::storage::db::v4::knowledge_repo::KnowledgeRepo::new(pool.clone());
         let cards = knowledge_repo
             .list_cards("b1", Some("power_system"), Some("active"))
             .await
@@ -3164,6 +1888,16 @@ mod tests {
             .collect();
         assert_eq!(rel_claims.len(), 1);
         assert_eq!(rel_claims[0].status, "accepted");
+        let rel_value: serde_json::Value =
+            serde_json::from_str(rel_claims[0].value_json.as_deref().expect("value_json")).unwrap();
+        assert!(
+            rel_value.get("normalized_relation_group").is_none(),
+            "relationship judge output should materialize a typed command, not mutate claim.value_json"
+        );
+        assert!(
+            rel_value.get("judge_confidence").is_none(),
+            "relationship judge confidence should stay in decision/command trace, not claim.value_json"
+        );
     }
 
     #[tokio::test]
@@ -3271,6 +2005,144 @@ mod tests {
         assert!(
             !property_claims.is_empty(),
             "should have at least one property_update claim (redirected from relationship)"
+        );
+    }
+
+    #[tokio::test]
+    async fn relationship_segment_processor_owns_redirect_lifecycle() {
+        let pool = setup_pool().await;
+        let chapter_repo = ChapterRepo::new(pool.clone());
+        let claim_repo = ClaimRepo::new(pool.clone());
+        let entity_repo = EntityRepo::new(pool.clone());
+        let ai_run_repo = AiRunRepo::new(pool.clone());
+
+        let chapter = chapter_repo
+            .upsert_chapter("b1", 1, Some("第一章"), "张三进入青云门。", "hash-1")
+            .await
+            .unwrap();
+        let segment = chapter_repo
+            .create_segment(
+                "b1",
+                &chapter.id,
+                "hash-1",
+                0,
+                "paragraph",
+                None,
+                None,
+                Some(0),
+                Some(18),
+                Some("segment-hash"),
+            )
+            .await
+            .unwrap();
+        let span = claim_repo
+            .create_span(
+                "b1",
+                &chapter.id,
+                "hash-1",
+                &segment.id,
+                0,
+                0,
+                18,
+                "张三进入青云门。",
+            )
+            .await
+            .unwrap();
+        let ai_run = ai_run_repo
+            .create_run(
+                "b1",
+                &chapter.id,
+                Some(&segment.id),
+                "extract",
+                "test-model",
+                PROMPT_VERSION,
+                SCHEMA_VERSION,
+                "input-hash",
+            )
+            .await
+            .unwrap();
+        let subject = entity_repo
+            .create_entity("b1", "character", "张三", "张三", None, 0.8, 1)
+            .await
+            .unwrap();
+        entity_repo
+            .create_alias("b1", &subject.id, "张三", "canonical", 1, 0.95, None)
+            .await
+            .unwrap();
+        let place = entity_repo
+            .create_entity("b1", "place", "青云门", "青云门", None, 0.6, 1)
+            .await
+            .unwrap();
+        entity_repo
+            .create_alias("b1", &place.id, "青云门", "canonical", 1, 0.9, None)
+            .await
+            .unwrap();
+
+        let value_json = serde_json::json!({
+            "relation_hint": "进入",
+            "relation_group": "alliance",
+            "relation_label": "归属",
+            "directionality": "undirected",
+            "importance_hint": 0.7,
+            "is_long_term_or_significant_hint": true
+        })
+        .to_string();
+        let relationship_claim = claim_repo
+            .create_claim(
+                "b1",
+                1,
+                "relationship_update",
+                Some("张三"),
+                Some("青云门"),
+                Some(&subject.id),
+                Some(&place.id),
+                "张三 -> 青云门",
+                Some("归属"),
+                Some(&value_json),
+                &span.id,
+                &ai_run.id,
+                0.85,
+                "low",
+            )
+            .await
+            .unwrap();
+        let judge = mock_accept_judge();
+
+        let result = process_relationship_claims_for_segment(
+            "b1",
+            1,
+            &pool,
+            &claim_repo,
+            &entity_repo,
+            &ai_run.id,
+            &[relationship_claim.clone()],
+            &judge,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.claims_redirected, 1);
+        assert_eq!(result.derived_property_claims, 1);
+        let updated_relationship_claim = claim_repo
+            .get_claim(&relationship_claim.id)
+            .await
+            .unwrap()
+            .expect("relationship claim");
+        assert_eq!(updated_relationship_claim.status, "redirected");
+
+        let claims = claim_repo.list_claims_by_chapter("b1", 1).await.unwrap();
+        let property_claim = claims
+            .iter()
+            .find(|claim| claim.claim_type == "property_update")
+            .expect("derived property claim");
+        assert_eq!(property_claim.status, "accepted");
+        assert_eq!(
+            property_claim.subject_entity_id.as_deref(),
+            Some(subject.id.as_str())
+        );
+        assert_eq!(
+            property_claim.object_entity_id.as_deref(),
+            Some(place.id.as_str())
         );
     }
 
@@ -3984,9 +2856,10 @@ mod tests {
             "real Phase 4 knowledge smoke should produce at least one knowledge card"
         );
         assert!(
-            assertions
-                .iter()
-                .any(|assertion| matches!(assertion.status.as_str(), "active" | "rumor" | "uncertain" | "false_in_world")),
+            assertions.iter().any(|assertion| matches!(
+                assertion.status.as_str(),
+                "active" | "rumor" | "uncertain" | "false_in_world"
+            )),
             "real Phase 4 knowledge smoke should persist at least one canonical knowledge assertion"
         );
         assert!(
