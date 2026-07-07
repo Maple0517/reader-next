@@ -2,6 +2,7 @@
 import { ref, computed, reactive, watch } from 'vue'
 import { useAppStore } from './app'
 import { useBookshelfStore } from './bookshelf'
+import { writeProgressToWebdav } from '../utils/webdavSync'
 import { useAiBookStore } from './aiBook'
 import {
   getChapterList,
@@ -1353,6 +1354,16 @@ export const useReaderStore = defineStore('reader', () => {
     await saveBookProgress(payload).then(() => {
       progressDirty.value = false
       lastServerProgressKey.value = `${payload.bookUrl}::${payload.index}::${payload.position}`
+      // Also write progress to WebDAV for Legado sync (fire-and-forget)
+      if (book.value) {
+        writeProgressToWebdav({
+          ...book.value,
+          durChapterIndex: index,
+          durChapterPos: Math.round(progress * 1000),
+          durChapterTime: Date.now(),
+          durChapterTitle: chapters.value[index]?.title,
+        }).catch(() => undefined)
+      }
     }).catch(() => undefined)
   }
 
