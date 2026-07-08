@@ -18,36 +18,36 @@ defineProps<{
 <style scoped>
 .v4-metric-card {
   display: grid;
-  gap: 6px;
-  min-height: 76px;
-  padding: 14px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 82%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 68%, transparent);
+  gap: 4px;
+  min-height: 56px;
+  padding: 8px;
+  border: 1px solid var(--v4-line);
+  background: var(--v4-surface);
 }
 
 .v4-metric-card-label,
 .v4-metric-card-meta {
-  color: var(--color-text-tertiary);
-  font-size: 12px;
+  color: var(--v4-muted);
+  font-size: 10px;
   font-weight: 750;
 }
 
 .v4-metric-card-value {
-  color: var(--color-text);
-  font-size: 20px;
-  line-height: 1.1;
+  color: var(--v4-ink);
+  font-size: 17px;
+  line-height: 1;
+  font-weight: 850;
 }
 
 .v4-metric-card.tone-danger .v4-metric-card-value {
-  color: var(--color-danger);
+  color: var(--v4-danger);
 }
 
 .v4-metric-card.tone-warning .v4-metric-card-value {
-  color: var(--color-warning);
+  color: var(--v4-warn);
 }
 
 .v4-metric-card.tone-success .v4-metric-card-value {
-  color: var(--color-success);
+  color: var(--v4-success);
 }
 </style>
