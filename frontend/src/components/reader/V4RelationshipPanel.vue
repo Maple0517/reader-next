@@ -33,51 +33,102 @@
         >{{ groupLabel(g) }} ({{ groupCount(g) }})</button>
       </div>
 
-      <!-- Empty from filter -->
       <p v-if="!filteredEdges.length && total > 0" class="rel-filter-empty">
         当前筛选无匹配关系
       </p>
 
-      <!-- Relationship list grouped -->
-      <div v-else-if="filteredEdges.length" class="rel-list">
-        <section v-for="group in displayGroups" :key="group.name" class="rel-group">
-          <div :class="['rel-group-header', `group-color-${group.name}`]">
-            <span :class="['rel-dot', `group-color-${group.name}`]" aria-hidden="true"></span>
-            <strong>{{ groupLabel(group.name) }}</strong>
-            <span class="rel-group-count">{{ group.edges.length }}</span>
-          </div>
-          <div class="rel-items">
-            <article
-              v-for="edge in group.edges"
-              :key="edge.id"
-              :data-edge-id="edge.id"
-              :class="['rel-item', { 'low-importance': edge.importanceScore < 0.3 }]"
-              @click="toggleExpand(edge.id)"
-            >
-              <div class="rel-item-head">
-                <span class="rel-source">{{ nodeName(edge.sourceId) }}</span>
-                <span class="rel-arrow">{{ edge.directionality === 'directed' ? '→' : '↔' }}</span>
-                <span class="rel-target">{{ nodeName(edge.targetId) }}</span>
-                <span class="rel-label">{{ edge.label }}</span>
-                <span :class="['rel-polarity', `polarity-${edge.polarity}`]">{{ polarityLabel(edge.polarity) }}</span>
-                <span class="rel-strength">{{ formatStrength(edge.strength) }}</span>
-              </div>
-              <div
-                v-if="expandedIds.has(edge.id)"
-                :data-edge-detail="edge.id"
-                class="rel-item-detail"
+      <div v-else-if="filteredEdges.length" class="relationship-workbench">
+        <section class="relationship-edge-list" aria-label="关系边列表" data-test="relationship-edge-list">
+          <section v-for="group in displayGroups" :key="group.name" class="rel-group">
+            <div :class="['rel-group-header', `group-color-${group.name}`]">
+              <span :class="['rel-dot', `group-color-${group.name}`]" aria-hidden="true"></span>
+              <strong>{{ groupLabel(group.name) }}</strong>
+              <span class="rel-group-count">{{ group.edges.length }}</span>
+            </div>
+            <div class="rel-items">
+              <article
+                v-for="edge in group.edges"
+                :key="edge.id"
+                :data-edge-id="edge.id"
+                :class="['rel-item', { active: selectedEdgeId === edge.id, 'low-importance': edge.importanceScore < 0.3 }]"
+                @click="selectEdge(edge.id)"
               >
-                <div v-if="edge.currentState" class="rel-detail-row">
-                  <span>{{ edge.currentState }}</span>
+                <div class="rel-item-head">
+                  <span class="rel-source">{{ nodeName(edge.sourceId) }}</span>
+                  <span class="rel-arrow">{{ edge.directionality === 'directed' ? '→' : '↔' }}</span>
+                  <span class="rel-target">{{ nodeName(edge.targetId) }}</span>
+                  <span class="rel-label">{{ edge.label }}</span>
+                  <span :class="['rel-polarity', `polarity-${edge.polarity}`]">{{ polarityLabel(edge.polarity) }}</span>
+                  <span class="rel-strength">{{ formatStrength(edge.strength) }}</span>
                 </div>
-                <div class="rel-detail-row">
-                  <span>置信度 {{ (edge.confidence * 100).toFixed(0) }}%</span>
-                  <span>第{{ edge.firstSeenChapter }}~{{ edge.lastSeenChapter }}章</span>
+                <div
+                  v-if="expandedIds.has(edge.id)"
+                  :data-edge-detail="edge.id"
+                  class="rel-item-detail"
+                >
+                  <div v-if="edge.currentState" class="rel-detail-row">
+                    <span>{{ edge.currentState }}</span>
+                  </div>
+                  <div class="rel-detail-row">
+                    <span>置信度 {{ (edge.confidence * 100).toFixed(0) }}%</span>
+                    <span>第{{ edge.firstSeenChapter }}~{{ edge.lastSeenChapter }}章</span>
+                  </div>
                 </div>
-              </div>
-            </article>
+              </article>
+            </div>
+          </section>
+        </section>
+
+        <section class="relationship-network" aria-label="关系网络" data-test="relationship-network">
+          <div class="relationship-network-nodes">
+            <span
+              v-for="node in visibleNetworkNodes"
+              :key="node.id"
+              class="relationship-node"
+              :class="{ active: selectedEdge && (selectedEdge.sourceId === node.id || selectedEdge.targetId === node.id) }"
+            >
+              {{ node.name }}
+            </span>
+          </div>
+          <div class="relationship-network-edges">
+            <button
+              v-for="edge in filteredEdges"
+              :key="edge.id"
+              type="button"
+              :class="['relationship-network-edge', `group-color-${edge.group}`, { active: selectedEdgeId === edge.id }]"
+              @click="selectEdge(edge.id)"
+            >
+              <span>{{ nodeName(edge.sourceId) }}</span>
+              <strong>{{ edge.directionality === 'directed' ? '→' : '↔' }} {{ edge.label }}</strong>
+              <span>{{ nodeName(edge.targetId) }}</span>
+            </button>
           </div>
         </section>
+
+        <aside class="relationship-edge-inspector" aria-label="选中关系" data-test="relationship-edge-inspector">
+          <div class="relationship-inspector-head">
+            <h3>选中关系</h3>
+            <span v-if="selectedEdge" :class="['rel-label', `group-color-${selectedEdge.group}`]">{{ groupLabel(selectedEdge.group) }}</span>
+          </div>
+          <template v-if="selectedEdge">
+            <div class="relationship-inspector-title">
+              <strong>{{ nodeName(selectedEdge.sourceId) }}</strong>
+              <span>{{ selectedEdge.directionality === 'directed' ? '→' : '↔' }}</span>
+              <strong>{{ nodeName(selectedEdge.targetId) }}</strong>
+            </div>
+            <dl class="relationship-inspector-facts">
+              <div><dt>标签</dt><dd>{{ selectedEdge.label }}</dd></div>
+              <div v-if="selectedEdge.currentState"><dt>当前状态</dt><dd>{{ selectedEdge.currentState }}</dd></div>
+              <div><dt>立场</dt><dd>{{ polarityLabel(selectedEdge.polarity) }}</dd></div>
+              <div><dt>强度</dt><dd>{{ formatStrength(selectedEdge.strength) }}</dd></div>
+              <div><dt>置信</dt><dd>{{ (selectedEdge.confidence * 100).toFixed(0) }}%</dd></div>
+              <div><dt>事件</dt><dd>事件 {{ selectedEdge.eventCount }}</dd></div>
+              <div><dt>章节</dt><dd>第{{ selectedEdge.firstSeenChapter }}~{{ selectedEdge.lastSeenChapter }}章</dd></div>
+              <div><dt>证据</dt><dd>{{ selectedEdge.evidenceAvailable ? '有证据可追溯' : '证据待补齐' }}</dd></div>
+            </dl>
+          </template>
+          <p v-else class="relationship-inspector-empty">选择一条关系查看状态、强度和证据摘要。</p>
+        </aside>
       </div>
     </V4PanelShell>
   </section>
@@ -104,6 +155,7 @@ const listState = useV4PanelState(
 
 const activeGroup = ref<string | null>(null)
 const expandedIds = ref(new Set<string>())
+const selectedEdgeId = ref<string | null>(null)
 
 const nodes = computed(() => listState.data.value?.nodes ?? [])
 const edges = computed(() => listState.data.value?.edges ?? [])
@@ -124,6 +176,18 @@ const nodeMap = computed(() => {
 const filteredEdges = computed(() => {
   if (!activeGroup.value) return edges.value
   return edges.value.filter((e) => e.group === activeGroup.value)
+})
+const selectedEdge = computed(() => {
+  if (!selectedEdgeId.value) return null
+  return edges.value.find((edge) => edge.id === selectedEdgeId.value) ?? null
+})
+const visibleNetworkNodes = computed(() => {
+  const ids = new Set<string>()
+  for (const edge of filteredEdges.value) {
+    ids.add(edge.sourceId)
+    ids.add(edge.targetId)
+  }
+  return nodes.value.filter((node) => ids.has(node.id))
 })
 
 interface DisplayGroup {
@@ -155,7 +219,8 @@ function nodeName(id: string): string {
   return nodeMap.value.get(id)?.name || id
 }
 
-function toggleExpand(id: string) {
+function selectEdge(id: string) {
+  selectedEdgeId.value = id
   const s = new Set(expandedIds.value)
   if (s.has(id)) s.delete(id)
   else s.add(id)
@@ -264,11 +329,19 @@ defineExpose({ reload: () => listState.reload() })
   font-weight: 600;
 }
 
-/* ── Relationship list ── */
+.relationship-workbench {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.85fr) minmax(280px, 1.2fr) minmax(240px, 0.95fr);
+  gap: 14px;
+  align-items: start;
+}
 
-.rel-list {
+.relationship-edge-list {
   display: grid;
   gap: 14px;
+  max-height: 680px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .rel-group {
@@ -320,6 +393,11 @@ defineExpose({ reload: () => listState.reload() })
 .rel-item:hover {
   border-color: color-mix(in srgb, currentColor 14%, transparent);
   background: color-mix(in srgb, currentColor 4%, transparent);
+}
+
+.rel-item.active {
+  border-color: color-mix(in srgb, var(--color-primary) 42%, transparent);
+  background: color-mix(in srgb, var(--color-primary) 9%, transparent);
 }
 
 .rel-item.low-importance {
@@ -398,6 +476,131 @@ defineExpose({ reload: () => listState.reload() })
   margin: 0;
   padding: 2px 0 0;
   opacity: 0.5;
+}
+
+.relationship-network,
+.relationship-edge-inspector {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--color-bg-sunken) 70%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 64%, transparent);
+}
+
+.relationship-network-nodes {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 112px;
+  align-content: center;
+  justify-content: center;
+  padding: 14px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-bg) 78%, transparent);
+}
+
+.relationship-node {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  padding: 0 11px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-bg-sunken) 80%, transparent);
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.relationship-node.active {
+  background: color-mix(in srgb, var(--color-primary) 14%, var(--color-bg));
+  color: var(--color-primary);
+}
+
+.relationship-network-edges {
+  display: grid;
+  gap: 7px;
+}
+
+.relationship-network-edge {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  color: inherit;
+  cursor: pointer;
+}
+
+.relationship-network-edge.active {
+  background: color-mix(in srgb, currentColor 11%, transparent);
+  font-weight: 850;
+}
+
+.relationship-network-edge span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationship-network-edge span:last-child {
+  text-align: right;
+}
+
+.relationship-inspector-head,
+.relationship-inspector-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.relationship-inspector-head h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 16px;
+}
+
+.relationship-inspector-title {
+  justify-content: flex-start;
+  color: var(--color-text);
+}
+
+.relationship-inspector-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.relationship-inspector-facts div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 48%, transparent);
+}
+
+.relationship-inspector-facts dt,
+.relationship-inspector-empty {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.relationship-inspector-facts dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+
+@media (max-width: 980px) {
+  .relationship-workbench {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Group colors ── */

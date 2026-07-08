@@ -50,6 +50,30 @@ describe('V4CharacterPanel', () => {
     expect(card.text()).toContain('玄子')
   })
 
+  it('uses a directory and inspector layout for the character page', async () => {
+    getV4CharactersMock.mockResolvedValue({
+      characters: [
+        {
+          id: 'char-1',
+          name: '林玄',
+          aliases: ['玄子'],
+          summary: '外门弟子，刚入青云门。',
+          importance: 0.8,
+          firstSeenChapter: 0,
+          lastSeenChapter: 4,
+          visibilityScore: 0.9,
+        },
+      ],
+      total: 1,
+    })
+
+    const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="character-directory"]').text()).toContain('林玄')
+    expect(wrapper.get('[data-test="character-inspector"]').text()).toContain('选择角色')
+  })
+
   it('maps importance to correct level labels', async () => {
     getV4CharactersMock.mockResolvedValue({
       characters: [
@@ -169,6 +193,60 @@ describe('V4CharacterPanel', () => {
     expect(wrapper.text()).toContain('炼气一层')
     expect(wrapper.text()).toContain('青云门')
     expect(wrapper.text()).toContain('关系 2')
+  })
+
+  it('groups currentStates into a prominent state matrix', async () => {
+    getV4CharactersMock.mockResolvedValue({
+      characters: [
+        {
+          id: 'char-1',
+          name: '林玄',
+          aliases: [],
+          summary: null,
+          importance: 0.8,
+          firstSeenChapter: 0,
+          lastSeenChapter: 4,
+          visibilityScore: 0.9,
+        },
+      ],
+      total: 1,
+    })
+    getV4CharacterCardMock.mockResolvedValue({
+      character: {
+        id: 'char-1',
+        name: '林玄',
+        aliases: [],
+        summary: '掌握入门心法。',
+        importance: 0.8,
+        firstSeenChapter: 0,
+        lastSeenChapter: 4,
+        currentStates: {
+          affiliation: { label: '门派', value: '青云门', updatedChapter: 2, confidence: 0.8 },
+          realm: { label: '境界', value: '炼气一层', updatedChapter: 4, confidence: 0.92 },
+          equipment: { label: '装备', value: '青木剑', updatedChapter: 4, confidence: 0.75 },
+          location: { label: '位置', value: '外门演武场', updatedChapter: 4, confidence: 0.86 },
+          goal: { label: '目标', value: '通过入门考核', updatedChapter: 4, confidence: 0.7 },
+          debt: { label: '债务', value: '欠灵石三枚', updatedChapter: 3, confidence: 0.6 },
+        },
+      },
+      relationshipCount: 2,
+      recentChanges: [],
+      evidenceAvailable: true,
+    })
+
+    const wrapper = mount(V4CharacterPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+    await wrapper.get('[data-character-id="char-1"]').trigger('click')
+    await flushPromises()
+
+    const matrix = wrapper.get('[data-test="character-state-matrix"]')
+    expect(matrix.text()).toContain('当前状态')
+    expect(matrix.get('[data-test="state-group-social"]').text()).toContain('门派')
+    expect(matrix.get('[data-test="state-group-power"]').text()).toContain('境界')
+    expect(matrix.get('[data-test="state-group-power"]').text()).toContain('装备')
+    expect(matrix.get('[data-test="state-group-story"]').text()).toContain('位置')
+    expect(matrix.get('[data-test="state-group-story"]').text()).toContain('目标')
+    expect(matrix.get('[data-test="state-group-other"]').text()).toContain('债务')
   })
 
   it('renders evidence placeholder as deferred UI instead of absent evidence', async () => {

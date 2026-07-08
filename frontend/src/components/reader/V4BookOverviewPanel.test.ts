@@ -97,6 +97,53 @@ describe('V4BookOverviewPanel', () => {
     expect(wrapper.text()).not.toContain('digest.characterStates')
   })
 
+  it('renders dashboard sections with live task and attention signals', async () => {
+    getV4MemoryMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      bookName: '山海旧事',
+      author: '佚名',
+      maxReadChapter: 12,
+      maxProcessedChapter: 4,
+      processing: true,
+      characterCount: 8,
+      relationshipCount: 6,
+      knowledgeCount: 9,
+    })
+    getV4MemoryStatusMock.mockResolvedValue({
+      maxReadChapter: 12,
+      maxProcessedChapter: 4,
+      processing: true,
+      lastError: '上一轮 projection refresh 失败',
+    })
+    getV4CatchupStatusMock.mockResolvedValue({
+      status: 'running',
+      targetChapter: 10,
+      currentChapter: 5,
+      maxProcessedChapter: 4,
+      lastError: null,
+    })
+    getV4MapMock.mockResolvedValue({ placeCount: 4, activeEdgeCount: 3, conflictCount: 0, topPlaces: [] })
+    getV4QualityMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      qualityMetrics: {},
+      auditRuns: [],
+      findings: [],
+      corrections: [],
+      reprocessJobs: [],
+      promptRegressionRuns: [],
+    })
+
+    const wrapper = mount(V4BookOverviewPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="overview-live-task"]').text()).toContain('任务运行中')
+    expect(wrapper.get('[data-test="overview-live-task"]').text()).toContain('第 6 章')
+    expect(wrapper.get('[data-test="overview-live-task"]').text()).toContain('第 11 章')
+    expect(wrapper.get('[data-test="overview-domain-health"]').text()).toContain('角色')
+    expect(wrapper.get('[data-test="overview-domain-health"]').text()).toContain('地点')
+    expect(wrapper.get('[data-test="overview-attention-list"]').text()).toContain('上一轮 projection refresh 失败')
+  })
+
   it('uses V4PanelShell with title "书籍概览"', async () => {
     getV4MemoryMock.mockResolvedValue({
       bookUrl: 'book-1',

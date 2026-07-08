@@ -15,29 +15,38 @@
       </button>
     </template>
 
-    <nav v-if="categories.length" class="v4-knowledge-categories" aria-label="知识分类">
-      <button
-        type="button"
-        :class="{ active: activeCategory === '' }"
-        data-test="knowledge-category-all"
-        @click="loadOverview"
-      >
-        全部 · {{ overviewTotal }}
-      </button>
-      <button
-        v-for="item in categories"
-        :key="item.category"
-        type="button"
-        :class="{ active: activeCategory === item.category }"
-        :data-test="`knowledge-category-${item.category}`"
-        @click="loadCategory(item.category)"
-      >
-        {{ categoryLabel(item.category) }} · {{ item.count }}
-      </button>
-    </nav>
+    <section class="v4-knowledge-atlas" data-test="knowledge-atlas">
+      <div class="v4-knowledge-atlas-head">
+        <div>
+          <span>Knowledge Atlas</span>
+          <strong>按主题浏览世界知识</strong>
+        </div>
+      </div>
+
+      <nav v-if="categories.length" class="v4-knowledge-categories" aria-label="知识分类">
+        <button
+          type="button"
+          :class="{ active: activeCategory === '' }"
+          data-test="knowledge-category-all"
+          @click="loadOverview"
+        >
+          全部 · {{ overviewTotal }}
+        </button>
+        <button
+          v-for="item in categories"
+          :key="item.category"
+          type="button"
+          :class="{ active: activeCategory === item.category }"
+          :data-test="`knowledge-category-${item.category}`"
+          @click="loadCategory(item.category)"
+        >
+          {{ categoryLabel(item.category) }} · {{ item.count }}
+        </button>
+      </nav>
+    </section>
 
     <div class="v4-knowledge-grid">
-      <section class="v4-knowledge-card-list" aria-label="知识主题列表">
+      <section class="v4-knowledge-card-list" aria-label="知识主题列表" data-test="knowledge-topic-cards">
         <p v-if="!cards.length" class="v4-knowledge-empty-text">暂无知识主题</p>
         <article
           v-for="card in cards"
@@ -60,7 +69,7 @@
         </article>
       </section>
 
-      <section class="v4-knowledge-assertions" aria-label="知识断言详情">
+      <section class="v4-knowledge-assertions" aria-label="知识断言详情" data-test="knowledge-topic-inspector">
         <p v-if="detailLoading" class="v4-knowledge-detail-state">断言加载中...</p>
         <p v-else-if="!selectedDetail" class="v4-knowledge-detail-state">选择一个知识主题查看断言历史。</p>
         <template v-else>
@@ -274,6 +283,37 @@ defineExpose({ reload: () => listState.reload() })
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.v4-knowledge-atlas {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--color-bg-sunken) 68%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 62%, transparent);
+}
+
+.v4-knowledge-atlas-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.v4-knowledge-atlas-head div {
+  display: grid;
+  gap: 4px;
+}
+
+.v4-knowledge-atlas-head span {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.v4-knowledge-atlas-head strong {
+  color: var(--color-text);
+  font-size: 18px;
 }
 
 .v4-knowledge-categories button {

@@ -59,28 +59,26 @@ const emit = defineEmits<{
 
 <style scoped>
 .v4-panel-shell {
-  padding: 5px;
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 82%, transparent);
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, #fff 24%, transparent),
-    0 14px 45px color-mix(in srgb, var(--color-text) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 84%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-bg) 96%, var(--color-bg-sunken) 4%);
 }
 
 .v4-panel-shell-inner {
   min-height: 100%;
-  padding: clamp(16px, 2.2vw, 22px);
-  border-radius: 17px;
-  background: color-mix(in srgb, var(--color-bg) 94%, var(--color-primary) 6%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 68%, transparent);
+  padding: 14px;
+  border-radius: 8px;
+  background: transparent;
 }
 
 .v4-panel-shell-header {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   align-items: flex-start;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
 }
 
 .v4-panel-shell-header h2,
@@ -90,8 +88,8 @@ const emit = defineEmits<{
 
 .v4-panel-shell-header h2 {
   color: var(--color-text);
-  font-size: 20px;
-  letter-spacing: -0.02em;
+  font-size: 18px;
+  letter-spacing: 0;
 }
 
 .v4-panel-shell-header p {

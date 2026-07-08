@@ -157,6 +157,26 @@ describe('V4RelationshipPanel', () => {
     expect(directedItem.text()).toContain('暗恋')
   })
 
+  it('renders network, edge list, and selected edge inspector regions', async () => {
+    getV4RelationshipsMock.mockResolvedValue(MOCK_RESPONSE)
+    const wrapper = mount(V4RelationshipPanel, { props: { bookUrl: 'book-1' } })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="relationship-network"]').text()).toContain('林玄')
+    expect(wrapper.get('[data-test="relationship-edge-list"]').text()).toContain('暗恋')
+    expect(wrapper.get('[data-test="relationship-edge-inspector"]').text()).toContain('选中关系')
+
+    await wrapper.get('[data-edge-id="e1"]').trigger('click')
+    await flushPromises()
+
+    const inspector = wrapper.get('[data-test="relationship-edge-inspector"]')
+    expect(inspector.text()).toContain('林玄')
+    expect(inspector.text()).toContain('苏瑶')
+    expect(inspector.text()).toContain('暗恋')
+    expect(inspector.text()).toContain('事件 5')
+    expect(inspector.text()).not.toContain('claim-1')
+  })
+
   it('renders undirected arrow for undirected edges', async () => {
     getV4RelationshipsMock.mockResolvedValue(MOCK_RESPONSE)
     const wrapper = mount(V4RelationshipPanel, { props: { bookUrl: 'book-1' } })

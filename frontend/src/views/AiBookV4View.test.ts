@@ -87,9 +87,10 @@ describe('AiBookV4View shell', () => {
     })
     getV4CatchupStatusMock.mockResolvedValue({
       status: 'idle',
-      targetChapterIndex: null,
-      currentChapterIndex: null,
-      error: null,
+      targetChapter: null,
+      currentChapter: null,
+      maxProcessedChapter: 5,
+      lastError: null,
     })
     generateV4ChapterMemoryMock.mockResolvedValue({})
     startV4CatchupMock.mockResolvedValue({})
@@ -104,7 +105,7 @@ describe('AiBookV4View shell', () => {
     expect(getShelfBookMock).toHaveBeenCalledWith('book-1')
     expect(getV4MemoryStatusMock).toHaveBeenCalledWith('book-1')
     expect(wrapper.text()).toContain('山海旧事')
-    expect(wrapper.text()).toContain('AI Book Memory V4')
+    expect(wrapper.text()).toContain('V4 Memory Console')
     expect(wrapper.text()).not.toContain('后端 V3 视图模型')
     expect(wrapper.text()).not.toContain('V3 角色')
   })
@@ -120,32 +121,50 @@ describe('AiBookV4View shell', () => {
     expect(wrapper.text()).toContain('缺少 bookUrl')
   })
 
-  it('mounts V4-only tab panels without nested V3/V4 toggles', async () => {
+  it('mounts V4 console rail pages without nested V3/V4 toggles', async () => {
     const AiBookV4View = await import('./AiBookV4View.vue').then((mod) => mod.default)
     const wrapper = mount(AiBookV4View)
     await flushPromises()
 
-    expect(wrapper.findAll('.v4-tabs button').map((button) => button.text())).toEqual([
+    expect(wrapper.find('[data-test="v4-domain-rail"]').exists()).toBe(true)
+    expect(wrapper.findAll('[data-test="v4-domain-rail"] button').map((button) => button.text())).toEqual([
       '总览',
+      '任务',
       '角色',
       '关系',
       '知识',
-      '地图',
-      '身份',
+      '地点',
       '质量',
     ])
+    expect(wrapper.findAll('[data-test="v4-domain-rail"] button').some((button) => button.text() === '身份')).toBe(false)
     expect(wrapper.text()).not.toContain('V3 角色')
     expect(wrapper.text()).not.toContain('V4 角色')
     expect(wrapper.text()).not.toContain('V3 关系')
     expect(wrapper.text()).not.toContain('V4 关系')
     expect(wrapper.get('[data-test="v4-overview-panel"]').text()).toContain('book-1')
 
-    await wrapper.findAll('.v4-tabs button').find((button) => button.text() === '角色')!.trigger('click')
+    await wrapper.findAll('[data-test="v4-domain-rail"] button').find((button) => button.text() === '任务')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="v4-task-panel"]').text()).toContain('当前任务')
+    await wrapper.findAll('[data-test="v4-domain-rail"] button').find((button) => button.text() === '角色')!.trigger('click')
     expect(wrapper.get('[data-test="v4-character-panel"]').text()).toContain('book-1')
-    await wrapper.findAll('.v4-tabs button').find((button) => button.text() === '关系')!.trigger('click')
+    await wrapper.findAll('[data-test="v4-domain-rail"] button').find((button) => button.text() === '关系')!.trigger('click')
     expect(wrapper.get('[data-test="v4-relationship-panel"]').text()).toContain('book-1')
-    await wrapper.findAll('.v4-tabs button').find((button) => button.text() === '质量')!.trigger('click')
+    await wrapper.findAll('[data-test="v4-domain-rail"] button').find((button) => button.text() === '质量')!.trigger('click')
     expect(wrapper.get('[data-test="v4-quality-panel"]').text()).toContain('book-1')
+  })
+
+  it('uses the compact Visual Companion console masthead instead of a large hero header', async () => {
+    const AiBookV4View = await import('./AiBookV4View.vue').then((mod) => mod.default)
+    const wrapper = mount(AiBookV4View)
+    await flushPromises()
+
+    const masthead = wrapper.get('[data-test="v4-console-masthead"]')
+    expect(masthead.text()).toContain('山海旧事')
+    expect(masthead.text()).toContain('V4 Memory Console')
+    expect(wrapper.find('.v4-hero-card').exists()).toBe(false)
+    expect(wrapper.find('.v4-hero-surface').exists()).toBe(false)
+    expect(wrapper.find('.v4-status-grid').exists()).toBe(false)
   })
 
   it('does not import V3 AI Book store, API, or view-model types', () => {

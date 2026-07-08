@@ -37,7 +37,7 @@
 
     <div class="map-layout" :class="`map-layout--${viewMode}`">
       <!-- Left: place navigation / hierarchy tree -->
-      <aside class="map-sidebar" aria-label="地点导航">
+      <aside class="map-sidebar" aria-label="地点导航" data-test="place-directory">
         <template v-if="viewMode === 'hierarchy'">
           <p v-if="!flatHierarchy.length" class="map-empty-hint">暂无层级关系资料</p>
           <div
@@ -70,7 +70,7 @@
       </aside>
 
       <!-- Center: topology canvas or list -->
-      <div class="map-main">
+      <div class="map-main" data-test="place-map-canvas">
         <template v-if="viewMode === 'topology'">
           <svg
             v-if="topologyNodes.length && hasLayoutData"
@@ -139,7 +139,7 @@
       </div>
 
       <!-- Right: selected place detail -->
-      <section class="map-detail" aria-label="地点详情">
+      <section class="map-detail" aria-label="地点详情" data-test="place-inspector">
         <p v-if="detailLoading" class="map-empty-hint">地点详情加载中...</p>
         <V4EmptyState v-else-if="!selectedDetail" title="选择地点" message="点击左侧地点查看详情。" />
         <template v-else>

@@ -15,47 +15,50 @@
       </button>
     </template>
 
-    <div class="v4-character-grid" aria-label="角色列表">
-      <button
-        v-for="character in visibleCharacters"
-        :key="character.id"
-        type="button"
-        class="v4-character-card"
-        :class="{ active: selectedCharacterId === character.id }"
-        :data-character-id="character.id"
-        @click="selectCharacter(character.id)"
-      >
-        <span class="v4-character-avatar">{{ character.name.charAt(0) }}</span>
-        <span class="v4-character-name">{{ character.name }}</span>
-        <span v-if="character.aliases.length" class="v4-character-aliases">{{ character.aliases.join('、') }}</span>
-        <span class="v4-character-importance" :class="importanceClass(character.importance)">{{ importanceLabel(character.importance) }}</span>
-        <span class="v4-character-chapters">{{ formatChapter(character.firstSeenChapter) }} ~ {{ formatChapter(character.lastSeenChapter) }}</span>
-      </button>
-      <button
-        v-if="hiddenCharacterCount > 0 || showAllCharacters"
-        type="button"
-        class="v4-character-toggle"
-        @click="showAllCharacters = !showAllCharacters"
-      >
-        {{ showAllCharacters ? '收起次要角色' : `显示其余 ${hiddenCharacterCount} 位角色` }}
-      </button>
-    </div>
+    <div class="v4-character-workbench">
+      <section class="v4-character-directory" aria-label="角色目录" data-test="character-directory">
+        <div class="v4-character-grid">
+          <button
+            v-for="character in visibleCharacters"
+            :key="character.id"
+            type="button"
+            class="v4-character-card"
+            :class="{ active: selectedCharacterId === character.id }"
+            :data-character-id="character.id"
+            @click="selectCharacter(character.id)"
+          >
+            <span class="v4-character-avatar">{{ character.name.charAt(0) }}</span>
+            <span class="v4-character-name">{{ character.name }}</span>
+            <span v-if="character.aliases.length" class="v4-character-aliases">{{ character.aliases.join('、') }}</span>
+            <span class="v4-character-importance" :class="importanceClass(character.importance)">{{ importanceLabel(character.importance) }}</span>
+            <span class="v4-character-chapters">{{ formatChapter(character.firstSeenChapter) }} ~ {{ formatChapter(character.lastSeenChapter) }}</span>
+          </button>
+          <button
+            v-if="hiddenCharacterCount > 0 || showAllCharacters"
+            type="button"
+            class="v4-character-toggle"
+            @click="showAllCharacters = !showAllCharacters"
+          >
+            {{ showAllCharacters ? '收起次要角色' : `显示其余 ${hiddenCharacterCount} 位角色` }}
+          </button>
+        </div>
+      </section>
 
-    <aside class="v4-character-detail" aria-label="角色详情">
-      <V4EmptyState
-        v-if="!selectedCharacterId && !detailLoading"
-        title="选择角色"
-        message="点击卡片查看当前状态、摘要和证据情况。"
-      />
-      <V4LoadingState v-else-if="detailLoading" title="正在加载人物卡" />
-      <V4ErrorState
-        v-else-if="detailError"
-        title="人物卡加载失败"
-        :message="detailError"
-        retry-label="重试"
-        :on-retry="reloadDetail"
-      />
-      <article v-else-if="detail" class="v4-character-detail-card">
+      <aside class="v4-character-detail" aria-label="角色详情" data-test="character-inspector">
+        <V4EmptyState
+          v-if="!selectedCharacterId && !detailLoading"
+          title="选择角色"
+          message="点击卡片查看当前状态、摘要和证据情况。"
+        />
+        <V4LoadingState v-else-if="detailLoading" title="正在加载人物卡" />
+        <V4ErrorState
+          v-else-if="detailError"
+          title="人物卡加载失败"
+          :message="detailError"
+          retry-label="重试"
+          :on-retry="reloadDetail"
+        />
+        <article v-else-if="detail" class="v4-character-detail-card">
         <div class="v4-character-detail-head">
           <div>
             <h3>{{ detail.character.name }}</h3>
@@ -65,19 +68,34 @@
           <span class="v4-character-detail-count">关系 {{ detail.relationshipCount }}</span>
         </div>
 
-        <dl v-if="detailStates.length" class="v4-character-states">
-          <div v-for="state in detailStates" :key="state.key">
-            <dt>{{ state.label }}</dt>
-            <dd>{{ state.value }}</dd>
-            <small>{{ formatChapter(state.updatedChapter) }} · 置信 {{ formatScore(state.confidence) }}</small>
+        <section v-if="groupedStateSections.length" class="v4-character-state-matrix" data-test="character-state-matrix">
+          <div class="v4-character-state-matrix-head">
+            <span>当前状态</span>
+            <strong>{{ detailStates.length }} 项</strong>
           </div>
-        </dl>
+          <section
+            v-for="section in groupedStateSections"
+            :key="section.key"
+            class="v4-character-state-group"
+            :data-test="`state-group-${section.key}`"
+          >
+            <h4>{{ section.title }}</h4>
+            <dl class="v4-character-states">
+              <div v-for="state in section.states" :key="state.key">
+                <dt>{{ state.label }}</dt>
+                <dd>{{ state.value }}</dd>
+                <small>{{ formatChapter(state.updatedChapter) }} · 置信 {{ formatScore(state.confidence) }}</small>
+              </div>
+            </dl>
+          </section>
+        </section>
 
         <div class="v4-character-evidence">
           {{ detail.evidenceAvailable ? '有证据可追溯' : '证据面板待接入' }}
         </div>
-      </article>
-    </aside>
+        </article>
+      </aside>
+    </div>
   </V4PanelShell>
 </template>
 
@@ -108,6 +126,23 @@ const detailError = ref('')
 const showAllCharacters = ref(false)
 let detailRequestId = 0
 const DEFAULT_VISIBLE_CHARACTER_COUNT = 12
+const STATE_GROUPS = [
+  {
+    key: 'social',
+    title: '身份社会',
+    dimensions: new Set(['identity', 'affiliation', 'occupation', 'rank']),
+  },
+  {
+    key: 'power',
+    title: '能力战斗',
+    dimensions: new Set(['realm', 'ability', 'equipment']),
+  },
+  {
+    key: 'story',
+    title: '剧情当前',
+    dimensions: new Set(['location', 'mental_state', 'goal', 'life_status']),
+  },
+] as const
 
 const characters = computed<V4CharacterListItem[]>(() => listState.data.value?.characters || [])
 const visibleCharacters = computed<V4CharacterListItem[]>(() => {
@@ -122,6 +157,23 @@ const hiddenCharacterCount = computed(() =>
 const detailStates = computed(() => {
   const currentStates: V4CharacterCardView['currentStates'] = detail.value?.character.currentStates || {}
   return Object.entries(currentStates).map(([key, value]) => ({ key, ...value }))
+})
+const groupedStateSections = computed(() => {
+  const states = detailStates.value
+  const usedKeys = new Set<string>()
+  const sections: Array<{ key: string; title: string; states: typeof states }> = STATE_GROUPS
+    .map((group) => {
+      const groupStates = states.filter((state) => group.dimensions.has(state.key))
+      groupStates.forEach((state) => usedKeys.add(state.key))
+      return { key: group.key, title: group.title, states: groupStates }
+    })
+    .filter((section) => section.states.length > 0)
+
+  const otherStates = states.filter((state) => !usedKeys.has(state.key))
+  if (otherStates.length > 0) {
+    sections.push({ key: 'other', title: '其他状态', states: otherStates })
+  }
+  return sections
 })
 
 watch(
@@ -214,9 +266,16 @@ function summarizeError(error: unknown) {
   transform: translateY(1px) scale(0.98);
 }
 
+.v4-character-workbench {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.82fr) minmax(340px, 1.18fr);
+  gap: 16px;
+  align-items: start;
+}
+
 .v4-character-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: 1fr;
   gap: 12px;
 }
 
@@ -322,10 +381,6 @@ function summarizeError(error: unknown) {
   cursor: pointer;
 }
 
-.v4-character-detail {
-  margin-top: 20px;
-}
-
 .v4-character-detail-card {
   display: grid;
   gap: 14px;
@@ -377,6 +432,42 @@ function summarizeError(error: unknown) {
   font-weight: 900;
 }
 
+.v4-character-state-matrix {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--color-bg-sunken) 70%, transparent);
+}
+
+.v4-character-state-matrix-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.v4-character-state-matrix-head span,
+.v4-character-state-group h4 {
+  color: var(--color-text);
+  font-weight: 900;
+}
+
+.v4-character-state-matrix-head strong {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.v4-character-state-group {
+  display: grid;
+  gap: 8px;
+}
+
+.v4-character-state-group h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
 .v4-character-states {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -421,6 +512,10 @@ function summarizeError(error: unknown) {
 }
 
 @media (max-width: 768px) {
+  .v4-character-workbench {
+    grid-template-columns: 1fr;
+  }
+
   .v4-character-grid {
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   }

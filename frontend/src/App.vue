@@ -42,8 +42,10 @@ import WebdavManager from './components/WebdavManager.vue'
 const route = useRoute()
 const appStore = useAppStore()
 
-const showHeader = computed(() => route.name !== 'reader')
-const showBottomNav = computed(() => route.name !== 'reader')
+const immersiveRouteNames = new Set(['reader', 'ai-book'])
+const isImmersiveRoute = computed(() => immersiveRouteNames.has(String(route.name || '')))
+const showHeader = computed(() => !isImmersiveRoute.value)
+const showBottomNav = computed(() => !isImmersiveRoute.value)
 
 onMounted(() => {
   appStore.fetchUserInfo()

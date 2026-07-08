@@ -10,14 +10,27 @@
     </section>
 
     <section v-else class="v4-shell" aria-label="AI Book Memory V4">
-      <header class="v4-hero-card">
-        <div class="v4-hero-surface">
-          <div class="v4-title-block">
-            <button class="v4-back-button" type="button" @click="goBack">返回</button>
-            <p class="v4-kicker">AI Book Memory V4</p>
-            <h1>{{ bookTitle }}</h1>
-            <p class="v4-subtitle">{{ bookAuthor }} · {{ processingSummary }}</p>
+      <V4ConsoleShell
+        :rail-items="railItems"
+        :active-key="activeDomain"
+        :loading="loading"
+        :error="loadError"
+        @select="selectDomain"
+      >
+        <template #header>
+          <div class="v4-console-masthead" data-test="v4-console-masthead">
+            <div class="v4-title-block">
+              <button class="v4-back-button" type="button" @click="goBack">返回</button>
+              <div>
+                <p class="v4-kicker">{{ bookTitle }} · V4 Memory Console</p>
+                <p class="v4-subtitle">{{ bookAuthor }} · {{ processingSummary }}</p>
+              </div>
+            </div>
+
             <div class="v4-action-row" aria-label="V4 memory actions">
+              <span class="v4-status-chip">已读 {{ formatChapterNumber(memoryStatus?.maxReadChapter) }}</span>
+              <span class="v4-status-chip">已处理 {{ formatChapterNumber(memoryStatus?.maxProcessedChapter) }}</span>
+              <span class="v4-status-chip">当前 {{ currentChapterLabel }}</span>
               <button
                 class="v4-action-button"
                 type="button"
@@ -54,49 +67,16 @@
             <p v-if="actionMessage" class="v4-action-message" role="status">{{ actionMessage }}</p>
             <p v-else-if="actionError" class="v4-action-message is-error" role="alert">{{ actionError }}</p>
           </div>
+        </template>
 
-          <div class="v4-status-grid" aria-label="V4 processing status">
-            <article class="v4-status-card">
-              <span>已读边界</span>
-              <strong>{{ formatChapterNumber(memoryStatus?.maxReadChapter) }}</strong>
-            </article>
-            <article class="v4-status-card">
-              <span>已处理</span>
-              <strong>{{ formatChapterNumber(memoryStatus?.maxProcessedChapter) }}</strong>
-            </article>
-            <article class="v4-status-card">
-              <span>当前阅读</span>
-              <strong>{{ currentChapterLabel }}</strong>
-            </article>
-          </div>
-        </div>
-      </header>
-
-      <div v-if="loading" class="v4-state-card" role="status">正在加载 V4 资料...</div>
-      <div v-else-if="loadError" class="v4-state-card is-error" role="alert">{{ loadError }}</div>
-
-      <nav class="v4-tabs" aria-label="V4 memory sections">
-        <button
-          v-for="tab in tabs"
-          :key="tab.key"
-          type="button"
-          :class="{ active: activeTab === tab.key }"
-          :aria-selected="activeTab === tab.key"
-          @click="activeTab = tab.key"
-        >
-          {{ tab.label }}
-        </button>
-      </nav>
-
-      <main class="v4-content">
-        <V4BookOverviewPanel v-if="activeTab === 'overview'" :key="overviewRefreshKey" :book-url="bookUrl" />
-        <V4CharacterPanel v-else-if="activeTab === 'characters'" :book-url="bookUrl" />
-        <V4RelationshipPanel v-else-if="activeTab === 'relationships'" :book-url="bookUrl" :body-style="{}" />
-        <V4KnowledgePanel v-else-if="activeTab === 'knowledge'" :book-url="bookUrl" />
-        <V4MapPanel v-else-if="activeTab === 'map'" :book-url="bookUrl" />
-        <V4IdentityPanel v-else-if="activeTab === 'identity'" :book-url="bookUrl" />
-        <V4QualityPanel v-else-if="activeTab === 'quality'" :book-url="bookUrl" :body-style="{}" />
-      </main>
+        <V4BookOverviewPanel v-if="activeDomain === 'overview'" :key="overviewRefreshKey" :book-url="bookUrl" />
+        <V4TaskProgressPanel v-else-if="activeDomain === 'task'" :book-url="bookUrl" />
+        <V4CharacterPanel v-else-if="activeDomain === 'characters'" :book-url="bookUrl" />
+        <V4RelationshipPanel v-else-if="activeDomain === 'relationships'" :book-url="bookUrl" :body-style="{}" />
+        <V4KnowledgePanel v-else-if="activeDomain === 'knowledge'" :book-url="bookUrl" />
+        <V4MapPanel v-else-if="activeDomain === 'map'" :book-url="bookUrl" />
+        <V4QualityPanel v-else-if="activeDomain === 'quality'" :book-url="bookUrl" :body-style="{}" />
+      </V4ConsoleShell>
     </section>
   </div>
 </template>
@@ -114,31 +94,32 @@ import {
 } from '../api/v4/book'
 import V4BookOverviewPanel from '../components/reader/V4BookOverviewPanel.vue'
 import V4CharacterPanel from '../components/reader/V4CharacterPanel.vue'
-import V4IdentityPanel from '../components/reader/V4IdentityPanel.vue'
 import V4KnowledgePanel from '../components/reader/V4KnowledgePanel.vue'
 import V4MapPanel from '../components/reader/V4MapPanel.vue'
 import V4QualityPanel from '../components/reader/V4QualityPanel.vue'
 import V4RelationshipPanel from '../components/reader/V4RelationshipPanel.vue'
+import V4TaskProgressPanel from '../components/reader/V4TaskProgressPanel.vue'
+import V4ConsoleShell from '../components/reader/v4/V4ConsoleShell.vue'
 import type { Book } from '../types'
 import type { V4CatchupStatusResponse, V4MemoryStatusResponse } from '../types/v4'
 
-type V4TabKey = 'overview' | 'characters' | 'relationships' | 'knowledge' | 'map' | 'identity' | 'quality'
+type V4DomainKey = 'overview' | 'task' | 'characters' | 'relationships' | 'knowledge' | 'map' | 'quality'
 type V4ActionKey = 'refresh' | 'generate' | 'catchup' | 'reset'
 
 const route = useRoute()
 const router = useRouter()
 
-const tabs: Array<{ key: V4TabKey; label: string }> = [
+const railItems: Array<{ key: V4DomainKey; label: string }> = [
   { key: 'overview', label: '总览' },
+  { key: 'task', label: '任务' },
   { key: 'characters', label: '角色' },
   { key: 'relationships', label: '关系' },
   { key: 'knowledge', label: '知识' },
-  { key: 'map', label: '地图' },
-  { key: 'identity', label: '身份' },
+  { key: 'map', label: '地点' },
   { key: 'quality', label: '质量' },
 ]
 
-const activeTab = ref<V4TabKey>('overview')
+const activeDomain = ref<V4DomainKey>('overview')
 const book = ref<Book | null>(null)
 const memoryStatus = ref<V4MemoryStatusResponse | null>(null)
 const catchupStatus = ref<V4CatchupStatusResponse | null>(null)
@@ -302,6 +283,12 @@ function goBack() {
   router.back()
 }
 
+function selectDomain(key: string) {
+  if (railItems.some((item) => item.key === key)) {
+    activeDomain.value = key as V4DomainKey
+  }
+}
+
 function normalizeQueryValue(value: unknown) {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : ''
   return typeof value === 'string' ? value : ''
@@ -329,15 +316,12 @@ function summarizeError(error: unknown, fallback: string) {
 }
 
 .v4-shell {
-  max-width: 1180px;
+  max-width: 1320px;
   margin: 0 auto;
-  padding: 22px clamp(16px, 3vw, 32px) calc(120px + var(--safe-area-bottom));
+  padding: 14px clamp(12px, 2vw, 24px) calc(120px + var(--safe-area-bottom));
 }
 
-.v4-hero-card,
-.v4-empty-shell,
-.v4-state-card,
-.v4-placeholder-panel {
+.v4-empty-shell {
   border-radius: 24px;
   background: color-mix(in srgb, var(--color-bg-soft) 88%, transparent);
   box-shadow:
@@ -345,28 +329,20 @@ function summarizeError(error: unknown, fallback: string) {
     0 18px 60px color-mix(in srgb, var(--color-text) 8%, transparent);
 }
 
-.v4-hero-card {
-  padding: 6px;
-}
-
-.v4-hero-surface {
+.v4-console-masthead {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
-  gap: 18px;
-  align-items: stretch;
-  min-height: 210px;
-  padding: clamp(20px, 3vw, 30px);
-  border-radius: 19px;
-  background: color-mix(in srgb, var(--color-bg) 92%, var(--color-primary) 8%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 70%, transparent);
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-bg) 96%, var(--color-primary) 4%);
 }
 
 .v4-title-block {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .v4-kicker {
@@ -378,21 +354,13 @@ function summarizeError(error: unknown, fallback: string) {
   text-transform: uppercase;
 }
 
-.v4-title-block h1,
-.v4-empty-shell h1,
-.v4-placeholder-panel h2 {
+.v4-empty-shell h1 {
   margin: 0;
   color: var(--color-text);
   line-height: 1.08;
 }
 
-.v4-title-block h1 {
-  font-size: clamp(32px, 5vw, 58px);
-  letter-spacing: -0.045em;
-}
-
 .v4-subtitle,
-.v4-placeholder-panel p,
 .v4-empty-shell p {
   margin: 0;
   color: var(--color-text-secondary);
@@ -400,8 +368,7 @@ function summarizeError(error: unknown, fallback: string) {
 }
 
 .v4-back-button,
-.v4-action-button,
-.v4-tabs button {
+.v4-action-button {
   border: 0;
   cursor: pointer;
   transition:
@@ -413,22 +380,20 @@ function summarizeError(error: unknown, fallback: string) {
 .v4-back-button {
   display: inline-flex;
   align-items: center;
-  min-height: 34px;
-  padding: 0 14px;
-  border-radius: 999px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
   background: var(--color-bg-sunken);
   color: var(--color-text-secondary);
   font-weight: 700;
 }
 
-.v4-back-button:hover,
-.v4-tabs button:hover {
+.v4-back-button:hover {
   transform: translateY(-1px);
 }
 
 .v4-back-button:active,
-.v4-action-button:active,
-.v4-tabs button:active {
+.v4-action-button:active {
   transform: translateY(1px) scale(0.99);
 }
 
@@ -436,13 +401,12 @@ function summarizeError(error: unknown, fallback: string) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 4px;
 }
 
 .v4-action-button {
-  min-height: 36px;
-  padding: 0 13px;
-  border-radius: 999px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
   background: var(--color-bg-sunken);
   color: var(--color-text);
   font-weight: 800;
@@ -463,6 +427,18 @@ function summarizeError(error: unknown, fallback: string) {
   opacity: 0.52;
 }
 
+.v4-status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .v4-action-message {
   margin: 0;
   color: var(--color-text-secondary);
@@ -474,70 +450,9 @@ function summarizeError(error: unknown, fallback: string) {
   color: var(--color-danger);
 }
 
-.v4-status-grid {
-  display: grid;
-  gap: 10px;
-}
-
-.v4-status-card {
-  display: grid;
-  align-content: center;
-  gap: 6px;
-  min-height: 58px;
-  padding: 14px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 82%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 70%, transparent);
-}
-
-.v4-status-card span {
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.v4-status-card strong {
-  color: var(--color-text);
-  font-size: 18px;
-}
-
-.v4-state-card,
-.v4-placeholder-panel,
 .v4-empty-shell {
   margin-top: 16px;
   padding: 22px;
-}
-
-.v4-state-card.is-error {
-  color: var(--color-danger);
-}
-
-.v4-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 18px;
-  padding: 6px;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 88%, transparent);
-}
-
-.v4-tabs button {
-  min-height: 38px;
-  padding: 0 14px;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-weight: 800;
-}
-
-.v4-tabs button.active {
-  background: var(--color-primary);
-  color: #fff;
-}
-
-.v4-content {
-  margin-top: 16px;
 }
 
 .v4-empty-shell {
@@ -552,12 +467,9 @@ function summarizeError(error: unknown, fallback: string) {
     padding: 16px 16px calc(112px + var(--safe-area-bottom));
   }
 
-  .v4-hero-surface {
-    grid-template-columns: 1fr;
-  }
-
-  .v4-title-block h1 {
-    font-size: 34px;
+  .v4-title-block {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

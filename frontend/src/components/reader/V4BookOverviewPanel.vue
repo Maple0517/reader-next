@@ -15,51 +15,36 @@
     </template>
 
     <div v-if="overview" class="v4-overview">
+      <section class="v4-live-task-card" aria-label="实时任务" data-test="overview-live-task">
+        <div>
+          <span>实时任务</span>
+          <strong>{{ liveTaskTitle }}</strong>
+          <p>{{ liveTaskDetail }}</p>
+        </div>
+        <div class="v4-live-task-status">{{ processingLabel }}</div>
+      </section>
+
       <section class="v4-processing-strip" aria-label="处理进度">
-        <article>
-          <span>已处理</span>
-          <strong>已处理 {{ formatChapter(overview.status?.maxProcessedChapter ?? overview.memory?.maxProcessedChapter) }}</strong>
-        </article>
-        <article>
-          <span>已读边界</span>
-          <strong>已读 {{ formatChapter(overview.status?.maxReadChapter ?? overview.memory?.maxReadChapter) }}</strong>
-        </article>
-        <article>
-          <span>补齐任务</span>
-          <strong>{{ catchupLabel }}</strong>
-        </article>
-        <article :class="{ 'is-error': Boolean(overview.status?.lastError) }">
-          <span>处理状态</span>
-          <strong>{{ processingLabel }}</strong>
-        </article>
+        <V4MetricCard label="已处理" :value="`已处理 ${formatChapter(overview.status?.maxProcessedChapter ?? overview.memory?.maxProcessedChapter)}`" />
+        <V4MetricCard label="已读边界" :value="`已读 ${formatChapter(overview.status?.maxReadChapter ?? overview.memory?.maxReadChapter)}`" />
+        <V4MetricCard label="补齐任务" :value="catchupLabel" />
+        <V4MetricCard label="处理状态" :value="processingLabel" :tone="overview.status?.lastError ? 'danger' : undefined" />
       </section>
 
-      <section class="v4-domain-grid" aria-label="领域概要">
-        <article class="v4-domain-card">
-          <span>角色</span>
-          <strong>角色 {{ countLabel(overview.memory?.characterCount) }}</strong>
-        </article>
-        <article class="v4-domain-card">
-          <span>关系</span>
-          <strong>关系 {{ countLabel(overview.memory?.relationshipCount) }}</strong>
-        </article>
-        <article class="v4-domain-card">
-          <span>知识</span>
-          <strong>知识 {{ countLabel(overview.memory?.knowledgeCount) }}</strong>
-        </article>
-        <article class="v4-domain-card" :class="{ unavailable: Boolean(overview.mapError) }">
-          <span>{{ overview.mapError ? '地图不可用' : '地点' }}</span>
-          <strong>{{ overview.mapError ? '打开地图 tab 查看' : `地点 ${countLabel(overview.mapOverview?.placeCount)}` }}</strong>
-          <small>{{ mapAttentionLabel }}</small>
-        </article>
-        <article class="v4-domain-card">
-          <span>质量发现</span>
-          <strong>质量发现 {{ qualityFindingCount }}</strong>
-          <small>纠错 {{ qualityCorrectionCount }}</small>
-        </article>
+      <section class="v4-domain-grid" aria-label="领域概要" data-test="overview-domain-health">
+        <V4MetricCard label="角色" :value="`角色 ${countLabel(overview.memory?.characterCount)}`" />
+        <V4MetricCard label="关系" :value="`关系 ${countLabel(overview.memory?.relationshipCount)}`" />
+        <V4MetricCard label="知识" :value="`知识 ${countLabel(overview.memory?.knowledgeCount)}`" />
+        <V4MetricCard
+          :label="overview.mapError ? '地图不可用' : '地点'"
+          :value="overview.mapError ? '打开地图页查看' : `地点 ${countLabel(overview.mapOverview?.placeCount)}`"
+          :meta="mapAttentionLabel"
+          :tone="overview.mapError ? 'danger' : undefined"
+        />
+        <V4MetricCard label="质量发现" :value="`质量发现 ${qualityFindingCount}`" :meta="`纠错 ${qualityCorrectionCount}`" />
       </section>
 
-      <section class="v4-attention-panel" aria-label="需要关注">
+      <section class="v4-attention-panel" aria-label="需要关注" data-test="overview-attention-list">
         <h3>需要注意</h3>
         <ul>
           <li v-if="overview.status?.lastError">{{ overview.status.lastError }}</li>
@@ -77,6 +62,7 @@ import { computed } from 'vue'
 import { getV4CatchupStatus, getV4Map, getV4Memory, getV4MemoryStatus, getV4Quality } from '../../api/v4/book'
 import { useV4PanelState } from '../../composables/useV4PanelState'
 import V4PanelShell from './v4/V4PanelShell.vue'
+import V4MetricCard from './v4/V4MetricCard.vue'
 
 const props = defineProps<{
   bookUrl: string
@@ -120,6 +106,24 @@ const catchupLabel = computed(() => {
     return `${current} / ${target}`
   }
   return catchup.status
+})
+const liveTaskTitle = computed(() => {
+  const catchup = overview.value?.catchup
+  if (catchup?.status === 'running') return '任务运行中'
+  if (catchup?.status === 'failed') return '任务失败'
+  if (catchup?.status === 'completed') return '任务完成'
+  if (catchup?.status === 'cancel_requested') return '正在取消'
+  if (catchup?.status === 'cancelled') return '任务已取消'
+  return overview.value?.status?.processing ? '任务运行中' : '暂无运行任务'
+})
+const liveTaskDetail = computed(() => {
+  const catchup = overview.value?.catchup
+  if (catchup?.status === 'running') {
+    return `当前 ${formatChapter(catchup.currentChapter)}，目标 ${formatChapter(catchup.targetChapter)}`
+  }
+  if (overview.value?.status?.lastError) return overview.value.status.lastError
+  if (catchup?.status === 'completed') return `已处理到 ${formatChapter(catchup.maxProcessedChapter)}`
+  return `已处理到 ${formatChapter(overview.value?.status?.maxProcessedChapter ?? overview.value?.memory?.maxProcessedChapter)}`
 })
 const processingLabel = computed(() => {
   const status = overview.value?.status
@@ -176,8 +180,6 @@ function summarizeError(error: unknown) {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
-.v4-processing-strip article,
-.v4-domain-card,
 .v4-attention-panel {
   padding: 14px;
   border-radius: 18px;
@@ -185,30 +187,49 @@ function summarizeError(error: unknown) {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 64%, transparent);
 }
 
-.v4-processing-strip article,
-.v4-domain-card {
-  display: grid;
-  gap: 6px;
+.v4-live-task-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  min-height: 118px;
+  padding: 18px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--color-primary) 9%, var(--color-bg-sunken));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 64%, transparent);
 }
 
-.v4-processing-strip span,
-.v4-domain-card span,
-.v4-domain-card small {
+.v4-live-task-card div:first-child {
+  display: grid;
+  gap: 8px;
+}
+
+.v4-live-task-card span {
   color: var(--color-text-tertiary);
   font-size: 12px;
   font-weight: 800;
 }
 
-.v4-processing-strip strong,
-.v4-domain-card strong {
+.v4-live-task-card strong {
   color: var(--color-text);
-  font-size: 18px;
+  font-size: 28px;
   letter-spacing: -0.02em;
 }
 
-.v4-processing-strip article.is-error strong,
-.v4-domain-card.unavailable strong {
-  color: var(--color-danger);
+.v4-live-task-card p {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.v4-live-task-status {
+  display: grid;
+  min-width: 88px;
+  min-height: 88px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-bg) 82%, transparent);
+  color: var(--color-primary);
+  font-weight: 900;
 }
 
 .v4-attention-panel {
@@ -238,6 +259,10 @@ function summarizeError(error: unknown) {
 }
 
 @media (max-width: 640px) {
+  .v4-live-task-card {
+    display: grid;
+  }
+
   .v4-processing-strip,
   .v4-domain-grid {
     grid-template-columns: 1fr;

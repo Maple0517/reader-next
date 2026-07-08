@@ -43,7 +43,69 @@ describe('V4QualityPanel', () => {
     promptRegressionMock.mockReset()
   })
 
-  it('renders seven quality sections with Chinese labels and review-first actions', async () => {
+  it('renders a governance workbench with queue navigation, triage list, and review inspector', async () => {
+    getV4QualityMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      qualityMetrics: {
+        quarantinedClaimCount: 2,
+        auditFindingCount: 1,
+        correctionCount: 1,
+      },
+      quarantine: [
+        {
+          id: 'workflow-1',
+          claimId: 'claim-1',
+          reasonCode: 'identity_risk',
+          reasonText: 'Identity reveal needs source review',
+          suggestedAction: 'accept',
+          status: 'open',
+          priority: 10,
+          claim: { id: 'claim-1', claimType: 'identity_reveal', status: 'quarantined', chapterIndex: 8 },
+          sourceSpans: [{ id: 'span-1', chapterIndex: 8, textExcerpt: '他终于承认自己就是旧名。' }],
+          aiRun: { id: 'run-1', runType: 'resolve', promptVersion: 'p6' },
+        },
+      ],
+      auditRuns: [{ id: 'audit-1', auditType: 'full_book_quality', status: 'completed', summaryJson: { findingCount: 1 } }],
+      findings: [{
+        id: 'finding-1',
+        findingType: 'duplicate_entity_candidate',
+        severity: 'high',
+        targetType: 'entity',
+        targetId: 'char-a',
+        reasonCode: 'alias_overlap',
+        reasonText: 'Two entities share alias',
+        suggestedAction: 'create_correction',
+        status: 'open',
+        evidenceJson: { confidence: 0.91 },
+      }],
+      corrections: [{ id: 'correction-1', targetType: 'claim', targetId: 'claim-1', correctionType: 'reject_claim', status: 'validated', source: 'audit' }],
+      reprocessJobs: [{ id: 'job-1', scopeType: 'chapter', mode: 'dry_run_compare', status: 'queued', dryRun: true, reason: 'review before write' }],
+      promptRegressionRuns: [{ id: 'reg-1', fixtureSet: 'phase6', status: 'completed', summaryJson: { passed: 14, failed: 1 } }],
+    })
+
+    const wrapper = mount(await import('./V4QualityPanel.vue').then((mod) => mod.default), {
+      props: { bookUrl: 'book-1' },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="quality-queue-nav"]').text()).toContain('隔离')
+    expect(wrapper.get('[data-test="quality-queue-nav"]').text()).toContain('审计发现')
+    expect(wrapper.get('[data-test="quality-queue-nav"]').text()).toContain('修正')
+    expect(wrapper.get('[data-test="quality-queue-nav"]').text()).toContain('重处理')
+    expect(wrapper.get('[data-test="quality-queue-nav"]').text()).toContain('Prompt 回归')
+
+    expect(wrapper.get('[data-test="quality-triage-list"]').text()).toContain('identity_risk')
+    expect(wrapper.get('[data-test="quality-triage-list"]').text()).toContain('duplicate_entity_candidate')
+    expect(wrapper.get('[data-test="quality-triage-list"]').text()).toContain('reject_claim')
+
+    const inspector = wrapper.get('[data-test="quality-review-inspector"]')
+    expect(inspector.text()).toContain('Identity reveal needs source review')
+    expect(inspector.text()).toContain('identity_reveal')
+    expect(inspector.text()).toContain('他终于承认自己就是旧名。')
+    expect(inspector.text()).toContain('resolve')
+  })
+
+  it('renders quality queues with Chinese labels and review-first actions', async () => {
     getV4QualityMock.mockResolvedValue({
       bookUrl: 'book-1',
       qualityMetrics: {
@@ -99,12 +161,11 @@ describe('V4QualityPanel', () => {
 
     // Chinese section labels
     expect(wrapper.text()).toContain('概览')
-    expect(wrapper.text()).toContain('隔离声明')
+    expect(wrapper.text()).toContain('隔离 Claims')
     expect(wrapper.text()).toContain('审计发现')
     expect(wrapper.text()).toContain('修正')
     expect(wrapper.text()).toContain('重处理')
     expect(wrapper.text()).toContain('Prompt 回归测试')
-    expect(wrapper.text()).toContain('指标')
 
     // No English labels
     expect(wrapper.text()).not.toContain('Overview')
@@ -195,6 +256,39 @@ describe('V4QualityPanel', () => {
 
     expect(wrapper.text()).toContain('尚未运行质量审计 / metrics')
     expect(wrapper.text()).toContain('catchup 不会自动生成审计结果')
+    expect(wrapper.find('[data-test="quality-queue-nav"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="quality-triage-list"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="quality-review-inspector"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="quality-run-audit"]').exists()).toBe(true)
+  })
+
+  it('keeps the empty governance workbench visually close to the console target', async () => {
+    getV4QualityMock.mockResolvedValue({
+      bookUrl: 'book-1',
+      qualityMetrics: {},
+      quarantine: [],
+      auditRuns: [],
+      findings: [],
+      corrections: [],
+      reprocessJobs: [],
+      promptRegressionRuns: [],
+    })
+
+    const wrapper = mount(await import('./V4QualityPanel.vue').then((mod) => mod.default), {
+      props: { bookUrl: 'book-1' },
+    })
+    await flushPromises()
+
+    const shell = wrapper.findComponent({ name: 'V4PanelShell' })
+    expect(shell.props('title')).toBe('质量治理')
+    expect(shell.props('subtitle')).toContain('最需要人介入')
+
+    expect(wrapper.get('[data-test="quality-governance-toolbar"]').text()).toContain('运行审计')
+    expect(wrapper.get('[data-test="quality-governance-toolbar"]').text()).toContain('模拟运行')
+    expect(wrapper.get('[data-test="quality-empty-triage-row"]').text()).toContain('当前队列暂无待处理项')
+    expect(wrapper.get('[data-test="quality-review-inspector"]').text()).toContain('边界提示')
+    expect(wrapper.get('[data-test="quality-review-inspector"]').text()).toContain('不允许前端或 projection 直接改 canonical')
+    expect(wrapper.find('.v4-quality-footer-actions').exists()).toBe(false)
   })
 
   it('uses V4PanelShell with correct title and subtitle', async () => {
@@ -216,6 +310,6 @@ describe('V4QualityPanel', () => {
 
     const shell = wrapper.findComponent({ name: 'V4PanelShell' })
     expect(shell.exists()).toBe(true)
-    expect(shell.props('title')).toBe('质量控制')
+    expect(shell.props('title')).toBe('质量治理')
   })
 })

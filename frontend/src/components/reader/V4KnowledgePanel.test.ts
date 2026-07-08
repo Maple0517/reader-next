@@ -134,6 +134,68 @@ describe('V4KnowledgePanel', () => {
     expect(wrapper.text()).not.toContain('地图')
   })
 
+  it('uses Knowledge Atlas cards with a selected topic inspector', async () => {
+    getV4KnowledgeMock.mockResolvedValue({
+      total: 1,
+      categories: [{ category: 'world_rule', count: 1 }],
+      cards: [
+        {
+          id: 'card-1',
+          category: 'world_rule',
+          topicKey: 'rule-1',
+          topicDisplay: '魔法规则',
+          currentSummary: '魔法需要咒文和材料。',
+          confidence: 0.8,
+          importanceScore: 0.7,
+          firstSeenChapter: 1,
+          lastUpdatedChapter: 3,
+          assertionCount: 2,
+        },
+      ],
+    })
+    getV4KnowledgeCardMock.mockResolvedValue({
+      card: {
+        id: 'card-1',
+        category: 'world_rule',
+        topicKey: 'rule-1',
+        topicDisplay: '魔法规则',
+        currentSummary: '魔法需要咒文和材料。',
+        confidence: 0.8,
+        importanceScore: 0.7,
+        firstSeenChapter: 1,
+        lastUpdatedChapter: 3,
+        assertionCount: 2,
+      },
+      assertionsByStatus: {
+        active: [
+          {
+            id: 'assertion-1',
+            assertionText: '咒文可以触发魔法。',
+            status: 'active',
+            confidence: 0.9,
+            importanceScore: 0.8,
+            chapterIndex: 3,
+            referencedEntities: [],
+          },
+        ],
+      },
+    })
+
+    const wrapper = mount(V4KnowledgePanel, { props: { bookUrl: 'test-book' } })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="knowledge-atlas"]').text()).toContain('Knowledge Atlas')
+    expect(wrapper.get('[data-test="knowledge-topic-cards"]').text()).toContain('魔法规则')
+    expect(wrapper.get('[data-test="knowledge-topic-inspector"]').text()).toContain('选择一个知识主题')
+    expect(wrapper.text()).not.toContain('咒文可以触发魔法。')
+
+    await wrapper.get('[data-test="knowledge-card-card-1"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="knowledge-topic-inspector"]').text()).toContain('魔法规则')
+    expect(wrapper.get('[data-test="knowledge-topic-inspector"]').text()).toContain('咒文可以触发魔法。')
+  })
+
   it('uses V4PanelShell with title and subtitle showing category/card counts', async () => {
     getV4KnowledgeMock.mockResolvedValue({
       total: 5,

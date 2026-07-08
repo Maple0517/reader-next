@@ -119,6 +119,61 @@ describe('V4MapPanel', () => {
     expect(wrapper.find('.map-topology-canvas').exists()).toBe(true)
   })
 
+  it('uses map canvas, place directory, and place inspector regions', async () => {
+    getV4MapMock.mockResolvedValue({
+      placeCount: 2,
+      activeEdgeCount: 1,
+      conflictCount: 0,
+      topPlaces: [],
+    })
+    getV4MapPlacesMock.mockResolvedValue({
+      total: 2,
+      places: [
+        { id: 'place-a', name: '青云城', placeType: 'city' },
+        { id: 'place-b', name: '黑风谷', placeType: 'dungeon' },
+      ],
+      hierarchy: [],
+    })
+    getV4MapGraphMock.mockResolvedValue({
+      nodes: [
+        { placeId: 'place-a', label: '青云城', placeType: 'city' },
+        { placeId: 'place-b', label: '黑风谷', placeType: 'dungeon' },
+      ],
+      edges: [{ edgeId: 'edge-1', fromPlaceId: 'place-a', toPlaceId: 'place-b', edgeType: 'route_to' }],
+      layout: null,
+      warnings: [],
+    })
+    getV4MapLayoutMock.mockResolvedValue({
+      nodes: [
+        { placeId: 'place-a', label: '青云城', placeType: 'city', x: 100, y: 100 },
+        { placeId: 'place-b', label: '黑风谷', placeType: 'dungeon', x: 200, y: 200 },
+      ],
+      edges: [],
+      warnings: [],
+    })
+    getV4MapConflictsMock.mockResolvedValue({ total: 0, conflicts: [] })
+    getV4MapPlaceDetailMock.mockResolvedValue({
+      id: 'place-a',
+      name: '青云城',
+      placeType: 'city',
+      linkedOrganizations: [],
+    })
+
+    const wrapper = mount(await import('./V4MapPanel.vue').then((mod) => mod.default), {
+      props: { bookUrl: 'book-1' },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="place-directory"]').text()).toContain('青云城')
+    expect(wrapper.get('[data-test="place-map-canvas"]').text()).toContain('青云城')
+    expect(wrapper.get('[data-test="place-inspector"]').text()).toContain('选择地点')
+
+    await wrapper.get('[data-test="map-place-place-a"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="place-inspector"]').text()).toContain('青云城')
+  })
+
   it('renders places, hierarchy, graph fallback, detail, conflict indicators, and avoids editor/image map UI', async () => {
     getV4MapMock.mockResolvedValue({
       placeCount: 2,
