@@ -1,0 +1,2900 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>V4 记忆数据库控制台 - Visual Companion</title>
+  <style>
+    :root {
+      --bg: #f5f1ea;
+      --surface: #fffdf9;
+      --line: #d8d0c3;
+      --ink: #181612;
+      --muted: #655f55;
+      --soft: #ebe4d8;
+      --blue: #3657d6;
+      --green: #26704f;
+      --amber: #9a6416;
+      --red: #b83a3a;
+      --violet: #6550b9;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+
+    main {
+      width: min(1500px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 28px 0 40px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: end;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 26px;
+      line-height: 1.15;
+      font-weight: 850;
+    }
+
+    h2 {
+      font-size: 17px;
+      font-weight: 850;
+    }
+
+    h3 {
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .sub {
+      margin-top: 8px;
+      color: var(--muted);
+      max-width: 760px;
+      font-size: 14px;
+    }
+
+    .status-strip {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      font-size: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--muted);
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .pill.blue { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 34%, var(--line)); }
+    .pill.green { color: var(--green); border-color: color-mix(in srgb, var(--green) 34%, var(--line)); }
+    .pill.amber { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 34%, var(--line)); }
+    .pill.red { color: var(--red); border-color: color-mix(in srgb, var(--red) 34%, var(--line)); }
+    .pill.violet { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 34%, var(--line)); }
+
+    .option-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .option {
+      min-width: 0;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      padding: 14px;
+    }
+
+    .option.recommended {
+      border: 2px solid var(--blue);
+      padding: 13px;
+    }
+
+    .option-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .option-title small {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .mock {
+      border: 1px solid var(--line);
+      background: #f9f6ef;
+      min-height: 530px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+
+    .mock-top {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--surface) 80%, var(--soft));
+    }
+
+    .mock-title {
+      font-size: 12px;
+      font-weight: 850;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .mini-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .icon-btn,
+    .tab,
+    .row,
+    .nav-row,
+    .table-row,
+    .chip {
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .icon-btn {
+      width: 28px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .console-a {
+      display: grid;
+      grid-template-columns: 116px 1fr;
+      min-height: 0;
+    }
+
+    .domain-rail {
+      border-right: 1px solid var(--line);
+      background: #eee6d8;
+      padding: 8px;
+      display: grid;
+      align-content: start;
+      gap: 6px;
+    }
+
+    .nav-row {
+      min-height: 38px;
+      padding: 6px 7px;
+      display: grid;
+      gap: 1px;
+    }
+
+    .nav-row.active {
+      border-color: var(--blue);
+      color: var(--blue);
+      font-weight: 850;
+    }
+
+    .nav-row span:first-child {
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .nav-row span:last-child {
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .master-detail {
+      display: grid;
+      grid-template-columns: 40% 60%;
+      min-width: 0;
+    }
+
+    .entity-list,
+    .inspector,
+    .table-area,
+    .drawer,
+    .tab-body {
+      padding: 10px;
+      min-width: 0;
+    }
+
+    .entity-list {
+      border-right: 1px solid var(--line);
+      display: grid;
+      align-content: start;
+      gap: 7px;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    .search {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--muted);
+      padding: 6px 8px;
+      font-size: 11px;
+    }
+
+    .row {
+      padding: 8px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .row.active {
+      border-color: var(--blue);
+      background: color-mix(in srgb, var(--blue) 8%, var(--surface));
+    }
+
+    .row-main {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .row-meta {
+      color: var(--muted);
+      font-size: 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 19px;
+      padding: 0 6px;
+      font-size: 10px;
+      color: var(--muted);
+      font-weight: 750;
+    }
+
+    .inspector {
+      display: grid;
+      align-content: start;
+      gap: 10px;
+      background: #fffaf2;
+    }
+
+    .inspector-title {
+      display: grid;
+      gap: 5px;
+      padding-bottom: 9px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .inspector-title strong {
+      font-size: 20px;
+      line-height: 1.1;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+    }
+
+    .field {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 8px;
+      min-height: 54px;
+    }
+
+    .field label {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      margin-bottom: 3px;
+    }
+
+    .field strong,
+    .field span {
+      font-size: 12px;
+    }
+
+    .evidence {
+      border-left: 3px solid var(--green);
+      background: color-mix(in srgb, var(--green) 8%, var(--surface));
+      padding: 8px 9px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .console-b {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 0;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      padding: 8px;
+      border-bottom: 1px solid var(--line);
+      overflow: hidden;
+    }
+
+    .tab {
+      min-height: 28px;
+      padding: 0 8px;
+      font-size: 11px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .tab.active {
+      color: var(--blue);
+      border-color: var(--blue);
+    }
+
+    .table-layout {
+      display: grid;
+      grid-template-columns: 1fr 170px;
+      min-width: 0;
+    }
+
+    .table-area {
+      border-right: 1px solid var(--line);
+    }
+
+    .table-head,
+    .table-row {
+      display: grid;
+      grid-template-columns: 1fr 70px 54px;
+      gap: 8px;
+      align-items: center;
+      font-size: 11px;
+    }
+
+    .table-head {
+      color: var(--muted);
+      font-weight: 800;
+      padding: 4px 7px 7px;
+    }
+
+    .table-row {
+      min-height: 34px;
+      padding: 6px 7px;
+      margin-bottom: 6px;
+      background: var(--surface);
+    }
+
+    .drawer {
+      background: #fffaf2;
+      display: grid;
+      align-content: start;
+      gap: 8px;
+    }
+
+    .console-c {
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .tab-body {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 7px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 8px;
+      min-height: 56px;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 3px;
+      font-size: 17px;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .notes {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .note {
+      border-top: 1px solid var(--line);
+      padding-top: 8px;
+    }
+
+    .note strong {
+      color: var(--ink);
+    }
+
+    .decision {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .decision section {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      padding: 14px;
+    }
+
+    ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    li + li {
+      margin-top: 5px;
+    }
+
+    .section-heading {
+      margin-top: 30px;
+      padding-top: 22px;
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 6px;
+    }
+
+    .section-heading p {
+      max-width: 880px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .progress-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 16px;
+    }
+
+    .progress-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      padding: 14px;
+      min-width: 0;
+    }
+
+    .progress-card.recommended {
+      border: 2px solid var(--blue);
+      padding: 13px;
+    }
+
+    .task-shell {
+      border: 1px solid var(--line);
+      background: #f8f3ea;
+      min-height: 560px;
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .task-top {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--surface) 78%, var(--soft));
+    }
+
+    .task-title {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .task-title strong {
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .task-title span {
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .task-body {
+      padding: 12px;
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .live-core {
+      border: 1px solid var(--line);
+      background: #fffaf1;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .live-core::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--blue) 12%, transparent), transparent);
+      transform: translateX(-100%);
+      animation: scan 2.8s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    .core-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+      position: relative;
+      z-index: 1;
+    }
+
+    .core-row strong {
+      font-size: 24px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+
+    .core-row span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .progress-track {
+      height: 9px;
+      border: 1px solid var(--line);
+      background: var(--soft);
+      position: relative;
+      overflow: hidden;
+      z-index: 1;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 42%;
+      background: linear-gradient(90deg, var(--blue), var(--violet));
+      position: relative;
+    }
+
+    .progress-fill::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent);
+      transform: translateX(-100%);
+      animation: shimmer 1.8s linear infinite;
+    }
+
+    .pipeline {
+      display: grid;
+      gap: 8px;
+    }
+
+    .stage {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 8px;
+      display: grid;
+      grid-template-columns: 18px 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .stage-dot {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--line);
+      background: var(--soft);
+    }
+
+    .stage.done .stage-dot {
+      border-color: var(--green);
+      background: var(--green);
+    }
+
+    .stage.active {
+      border-color: color-mix(in srgb, var(--blue) 52%, var(--line));
+      background: color-mix(in srgb, var(--blue) 7%, var(--surface));
+    }
+
+    .stage.active .stage-dot {
+      border-color: var(--blue);
+      background: var(--blue);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .stage.failed {
+      border-color: color-mix(in srgb, var(--red) 55%, var(--line));
+      background: color-mix(in srgb, var(--red) 7%, var(--surface));
+    }
+
+    .stage.failed .stage-dot {
+      border-color: var(--red);
+      background: var(--red);
+    }
+
+    .stage-name {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .stage-name strong {
+      font-size: 12px;
+    }
+
+    .stage-name span {
+      color: var(--muted);
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .stage small {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .chapter-strip {
+      display: grid;
+      grid-template-columns: repeat(16, minmax(0, 1fr));
+      gap: 4px;
+    }
+
+    .chapter-cell {
+      aspect-ratio: 1;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      min-width: 0;
+    }
+
+    .chapter-cell.done { background: var(--green); border-color: var(--green); }
+    .chapter-cell.active { background: var(--blue); border-color: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+    .chapter-cell.failed { background: var(--red); border-color: var(--red); }
+    .chapter-cell.pending { background: var(--soft); }
+
+    .run-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .run-row {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 7px;
+      display: grid;
+      grid-template-columns: 54px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      font-size: 11px;
+    }
+
+    .run-row strong {
+      font-size: 11px;
+    }
+
+    .run-row span {
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .heatmap-panel {
+      display: grid;
+      gap: 12px;
+    }
+
+    .heatmap-grid {
+      display: grid;
+      grid-template-columns: repeat(18, minmax(0, 1fr));
+      gap: 4px;
+      border: 1px solid var(--line);
+      background: #fffaf1;
+      padding: 10px;
+    }
+
+    .heatmap-cell {
+      aspect-ratio: 1;
+      border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+      background: var(--soft);
+      position: relative;
+    }
+
+    .heatmap-cell.done { background: color-mix(in srgb, var(--green) 82%, #fff); }
+    .heatmap-cell.active { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+    .heatmap-cell.failed { background: var(--red); }
+
+    .heatmap-detail {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .detail-line {
+      display: grid;
+      grid-template-columns: 82px 1fr;
+      gap: 8px;
+      font-size: 11px;
+    }
+
+    .detail-line span:first-child {
+      color: var(--muted);
+      font-weight: 750;
+    }
+
+    .mission-grid {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .radar {
+      aspect-ratio: 1;
+      border: 1px solid var(--line);
+      background:
+        radial-gradient(circle at center, transparent 0 30%, color-mix(in srgb, var(--blue) 12%, transparent) 31% 32%, transparent 33% 60%, color-mix(in srgb, var(--blue) 12%, transparent) 61% 62%, transparent 63%),
+        conic-gradient(from 0deg, color-mix(in srgb, var(--blue) 82%, #fff) 0 151deg, var(--soft) 151deg 360deg);
+      display: grid;
+      place-items: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .radar::after {
+      content: "";
+      position: absolute;
+      width: 50%;
+      height: 2px;
+      left: 50%;
+      top: 50%;
+      background: linear-gradient(90deg, var(--blue), transparent);
+      transform-origin: left center;
+      animation: rotate 3.5s linear infinite;
+    }
+
+    .radar-core {
+      width: 82px;
+      height: 82px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      display: grid;
+      place-items: center;
+      text-align: center;
+      position: relative;
+      z-index: 1;
+    }
+
+    .radar-core strong {
+      font-size: 24px;
+      line-height: 1;
+    }
+
+    .radar-core span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      margin-top: 3px;
+    }
+
+    .mission-stack {
+      display: grid;
+      gap: 7px;
+    }
+
+    .hybrid-showcase {
+      margin-top: 18px;
+      background: var(--surface);
+      border: 2px solid var(--blue);
+      padding: 14px;
+    }
+
+    .hybrid-shell {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      background: #f6efe4;
+      min-height: 690px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+
+    .hybrid-body {
+      display: grid;
+      grid-template-columns: 146px 1fr;
+      min-height: 0;
+    }
+
+    .hybrid-rail {
+      border-right: 1px solid var(--line);
+      background: #eee6d8;
+      padding: 10px;
+      display: grid;
+      align-content: start;
+      gap: 7px;
+    }
+
+    .hybrid-rail .nav-row {
+      min-height: 42px;
+    }
+
+    .task-workspace {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-width: 0;
+    }
+
+    .task-hero {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      background: #fffaf1;
+      display: grid;
+      grid-template-columns: 1fr 260px;
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    .task-hero-main {
+      display: grid;
+      align-content: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .task-hero-main h2 {
+      font-size: 26px;
+      line-height: 1.08;
+      letter-spacing: -0.03em;
+    }
+
+    .task-hero-main p {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .task-hero-meter {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+      align-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .task-hero-meter::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--violet) 13%, transparent), transparent);
+      transform: translateX(-100%);
+      animation: scan 3.1s ease-in-out infinite;
+    }
+
+    .task-hero-meter strong,
+    .task-hero-meter span,
+    .task-hero-meter .progress-track {
+      position: relative;
+      z-index: 1;
+    }
+
+    .task-hero-meter strong {
+      font-size: 34px;
+      line-height: 1;
+    }
+
+    .task-hero-meter span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .task-main-grid {
+      padding: 14px;
+      display: grid;
+      grid-template-columns: minmax(420px, 1fr) 340px;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .pipeline-large {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    .pipeline-large h3,
+    .error-inspector h3,
+    .heatmap-wide h3 {
+      font-size: 14px;
+    }
+
+    .stage-large {
+      border: 1px solid var(--line);
+      background: #fffaf1;
+      padding: 10px;
+      display: grid;
+      grid-template-columns: 24px 1fr 104px;
+      gap: 10px;
+      align-items: center;
+      min-height: 62px;
+    }
+
+    .stage-large .stage-dot {
+      width: 18px;
+      height: 18px;
+    }
+
+    .stage-large.active {
+      border-color: color-mix(in srgb, var(--blue) 55%, var(--line));
+      background: color-mix(in srgb, var(--blue) 8%, #fffaf1);
+    }
+
+    .stage-large.failed {
+      border-color: color-mix(in srgb, var(--red) 62%, var(--line));
+      background: color-mix(in srgb, var(--red) 8%, #fffaf1);
+    }
+
+    .stage-large.done .stage-dot {
+      background: var(--green);
+      border-color: var(--green);
+    }
+
+    .stage-large.active .stage-dot {
+      background: var(--blue);
+      border-color: var(--blue);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .stage-large.failed .stage-dot {
+      background: var(--red);
+      border-color: var(--red);
+    }
+
+    .stage-large strong {
+      font-size: 13px;
+    }
+
+    .stage-large span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    .stage-large small {
+      justify-self: end;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .error-inspector {
+      border: 1px solid color-mix(in srgb, var(--red) 48%, var(--line));
+      background: color-mix(in srgb, var(--red) 6%, var(--surface));
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    .error-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .error-code {
+      border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line));
+      background: #fffaf1;
+      padding: 9px;
+      color: var(--red);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .action-row {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .action-btn {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      min-height: 28px;
+      padding: 0 9px;
+      font-size: 11px;
+      font-weight: 850;
+      color: var(--ink);
+    }
+
+    .action-btn.primary {
+      border-color: color-mix(in srgb, var(--blue) 48%, var(--line));
+      color: var(--blue);
+      background: color-mix(in srgb, var(--blue) 7%, var(--surface));
+    }
+
+    .heatmap-wide {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--line);
+      background: #fffaf1;
+      display: grid;
+      gap: 9px;
+    }
+
+    .heatmap-wide .heatmap-grid {
+      grid-template-columns: repeat(32, minmax(0, 1fr));
+      padding: 8px;
+      gap: 3px;
+    }
+
+    .status-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 8px;
+      display: grid;
+      gap: 3px;
+    }
+
+    .status-card label {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 750;
+    }
+
+    .status-card strong {
+      font-size: 12px;
+    }
+
+    .log-panel {
+      border: 1px solid var(--line);
+      background: #181612;
+      color: #f7f0e5;
+      padding: 9px;
+      display: grid;
+      gap: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+    }
+
+    .log-panel span {
+      color: color-mix(in srgb, #f7f0e5 74%, transparent);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .rail-showcase {
+      margin-top: 24px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .rail-screen {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      padding: 14px;
+    }
+
+    .rail-screen-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+      margin-bottom: 12px;
+    }
+
+    .rail-screen-head p {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 13px;
+      max-width: 820px;
+    }
+
+    .screen-shell {
+      border: 1px solid var(--line);
+      background: #f6efe4;
+      min-height: 590px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+
+    .screen-body {
+      display: grid;
+      grid-template-columns: 146px 1fr;
+      min-height: 0;
+    }
+
+    .screen-rail {
+      border-right: 1px solid var(--line);
+      background: #eee6d8;
+      padding: 10px;
+      display: grid;
+      align-content: start;
+      gap: 7px;
+    }
+
+    .screen-content {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      background: #fffaf1;
+    }
+
+    .screen-header {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .screen-heading {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .screen-heading h2 {
+      font-size: 25px;
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .screen-heading p {
+      color: var(--muted);
+      font-size: 13px;
+      max-width: 780px;
+    }
+
+    .screen-toolbar {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+      justify-content: end;
+    }
+
+    .screen-main {
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .overview-grid {
+      display: grid;
+      grid-template-columns: 1.3fr .9fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .wide-panel,
+    .domain-card,
+    .list-panel,
+    .detail-panel,
+    .graph-panel,
+    .map-panel {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 12px;
+      min-width: 0;
+    }
+
+    .wide-panel {
+      display: grid;
+      gap: 10px;
+    }
+
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .panel-title h3 {
+      font-size: 14px;
+    }
+
+    .domain-health-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .domain-card {
+      min-height: 110px;
+      display: grid;
+      align-content: space-between;
+      gap: 8px;
+    }
+
+    .domain-card strong {
+      font-size: 26px;
+      line-height: 1;
+    }
+
+    .domain-card span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .spark {
+      height: 30px;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, transparent 0 17%, color-mix(in srgb, var(--blue) 36%, transparent) 18% 19%, transparent 20% 42%, color-mix(in srgb, var(--green) 44%, transparent) 43% 45%, transparent 46% 68%, color-mix(in srgb, var(--amber) 38%, transparent) 69% 70%, transparent 71%);
+    }
+
+    .attention-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .attention-row {
+      border: 1px solid var(--line);
+      background: #fffaf1;
+      padding: 9px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 9px;
+      align-items: center;
+      font-size: 12px;
+    }
+
+    .status-dot {
+      width: 11px;
+      height: 11px;
+      border: 2px solid var(--line);
+      background: var(--soft);
+    }
+
+    .status-dot.blue { background: var(--blue); border-color: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+    .status-dot.green { background: var(--green); border-color: var(--green); }
+    .status-dot.amber { background: var(--amber); border-color: var(--amber); }
+    .status-dot.red { background: var(--red); border-color: var(--red); }
+
+    .directory-layout {
+      display: grid;
+      grid-template-columns: minmax(270px, 34%) 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .list-panel,
+    .detail-panel {
+      display: grid;
+      align-content: start;
+      gap: 8px;
+    }
+
+    .detail-panel {
+      background: #fffaf1;
+    }
+
+    .identity-thread {
+      border: 1px solid color-mix(in srgb, var(--violet) 42%, var(--line));
+      background: color-mix(in srgb, var(--violet) 7%, var(--surface));
+      padding: 10px;
+      display: grid;
+      gap: 7px;
+    }
+
+    .relationship-layout,
+    .knowledge-layout,
+    .place-layout,
+    .quality-layout {
+      display: grid;
+      grid-template-columns: 1fr 330px;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .graph-panel {
+      min-height: 420px;
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(90deg, color-mix(in srgb, var(--line) 38%, transparent) 1px, transparent 1px),
+        linear-gradient(color-mix(in srgb, var(--line) 38%, transparent) 1px, transparent 1px),
+        #fffaf1;
+      background-size: 48px 48px;
+    }
+
+    .node {
+      position: absolute;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 8px 10px;
+      min-width: 96px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 850;
+      box-shadow: 0 8px 20px rgba(24, 22, 18, .08);
+    }
+
+    .node small {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 650;
+    }
+
+    .edge-line {
+      position: absolute;
+      height: 2px;
+      background: color-mix(in srgb, var(--blue) 55%, var(--line));
+      transform-origin: left center;
+    }
+
+    .edge-label {
+      position: absolute;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 4px 6px;
+      color: var(--blue);
+      font-size: 10px;
+      font-weight: 850;
+    }
+
+    .fact-stack {
+      display: grid;
+      gap: 8px;
+    }
+
+    .fact-row {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 10px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .fact-row strong {
+      font-size: 13px;
+    }
+
+    .fact-row span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .map-panel {
+      min-height: 420px;
+      position: relative;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 22% 28%, color-mix(in srgb, var(--green) 18%, transparent) 0 9%, transparent 10%),
+        radial-gradient(circle at 72% 38%, color-mix(in srgb, var(--blue) 16%, transparent) 0 10%, transparent 11%),
+        radial-gradient(circle at 48% 75%, color-mix(in srgb, var(--amber) 17%, transparent) 0 12%, transparent 13%),
+        linear-gradient(135deg, #fffaf1, #f2eadb);
+    }
+
+    .place-pin {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      border: 3px solid var(--surface);
+      background: var(--blue);
+      box-shadow: 0 0 0 1px var(--line), 0 10px 20px rgba(24, 22, 18, .16);
+    }
+
+    .place-pin.green { background: var(--green); }
+    .place-pin.amber { background: var(--amber); }
+
+    .route-line {
+      position: absolute;
+      height: 2px;
+      background: color-mix(in srgb, var(--green) 56%, var(--line));
+      transform-origin: left center;
+    }
+
+    .map-label {
+      position: absolute;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 5px 7px;
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .quality-layout {
+      grid-template-columns: 220px 1fr 330px;
+    }
+
+    .queue-panel {
+      border: 1px solid var(--line);
+      background: #fffaf1;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .queue-row {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 9px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .queue-row.active {
+      border-color: color-mix(in srgb, var(--red) 52%, var(--line));
+      background: color-mix(in srgb, var(--red) 6%, var(--surface));
+    }
+
+    .queue-row strong {
+      font-size: 12px;
+    }
+
+    .queue-row span {
+      color: var(--muted);
+      font-size: 10px;
+      grid-column: 1 / -1;
+    }
+
+    .triage-list {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 12px;
+      display: grid;
+      gap: 9px;
+      align-content: start;
+    }
+
+    .triage-row {
+      border: 1px solid var(--line);
+      background: #fffaf1;
+      padding: 10px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .triage-row.active {
+      border-color: color-mix(in srgb, var(--red) 52%, var(--line));
+      background: color-mix(in srgb, var(--red) 6%, #fffaf1);
+    }
+
+    .triage-copy {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .triage-copy strong {
+      font-size: 13px;
+    }
+
+    .triage-copy span {
+      color: var(--muted);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .severity {
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--line);
+      background: var(--soft);
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      font-weight: 900;
+      color: var(--muted);
+    }
+
+    .severity.high {
+      color: var(--red);
+      border-color: color-mix(in srgb, var(--red) 46%, var(--line));
+      background: color-mix(in srgb, var(--red) 8%, var(--surface));
+    }
+
+    .severity.medium {
+      color: var(--amber);
+      border-color: color-mix(in srgb, var(--amber) 46%, var(--line));
+      background: color-mix(in srgb, var(--amber) 9%, var(--surface));
+    }
+
+    .quality-inspector {
+      border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line));
+      background: color-mix(in srgb, var(--red) 5%, var(--surface));
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    @keyframes shimmer {
+      to { transform: translateX(100%); }
+    }
+
+    @keyframes scan {
+      0%, 18% { transform: translateX(-100%); }
+      72%, 100% { transform: translateX(100%); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: .62; transform: scale(.92); }
+    }
+
+    @keyframes rotate {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (max-width: 1180px) {
+      .option-grid,
+      .progress-grid,
+      .decision {
+        grid-template-columns: 1fr;
+      }
+
+      .mock {
+        min-height: 500px;
+      }
+    }
+
+    @media (max-width: 720px) {
+      main {
+        width: calc(100vw - 24px);
+        padding-top: 18px;
+      }
+
+      header,
+      .console-a,
+      .master-detail,
+      .table-layout,
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+
+      .domain-rail,
+      .entity-list,
+      .table-area {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .mission-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hybrid-body,
+      .task-hero,
+      .task-main-grid,
+      .screen-body,
+      .screen-header,
+      .overview-grid,
+      .directory-layout,
+      .relationship-layout,
+      .knowledge-layout,
+      .place-layout,
+      .quality-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .hybrid-rail {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .screen-rail {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .domain-health-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .heatmap-wide .heatmap-grid {
+        grid-template-columns: repeat(16, minmax(0, 1fr));
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>V4 记忆数据库控制台</h1>
+        <p class="sub">Visual Companion 草图，用来决定 V4 前端主交互模型。目标不是炫技，而是让 canonical 角色、关系、知识、地点、身份、质量治理都像一个可检查的记忆库。</p>
+      </div>
+      <div class="status-strip" aria-label="design facts">
+        <span class="pill blue">V4 only</span>
+        <span class="pill green">frontend only</span>
+        <span class="pill amber">planning mock</span>
+      </div>
+    </header>
+
+    <section class="option-grid" aria-label="interaction model options">
+      <article class="option recommended">
+        <div class="option-head">
+          <div class="option-title">
+            <h2>A. 实体目录 + 详情检查器</h2>
+            <small>推荐：统一所有 domain 的数据库控制台心智</small>
+          </div>
+          <span class="pill blue">推荐</span>
+        </div>
+
+        <div class="mock" aria-label="option a mock">
+          <div class="mock-top">
+            <div class="mock-title">《长夜记》 · V4 Memory Console</div>
+            <div class="mini-actions">
+              <span class="icon-btn">⟳</span>
+              <span class="icon-btn">▶</span>
+              <span class="icon-btn">⋯</span>
+            </div>
+          </div>
+          <div class="console-a">
+            <nav class="domain-rail">
+              <div class="nav-row active"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row"><span>身份</span><span>9 links</span></div>
+              <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+            </nav>
+            <div class="master-detail">
+              <section class="entity-list">
+                <div class="toolbar">
+                  <div class="search">搜索 canonical / 别名 / 状态</div>
+                  <span class="icon-btn">⌕</span>
+                </div>
+                <div class="row active">
+                  <div class="row-main"><span>白无常</span><span class="chip">高可见</span></div>
+                  <div class="row-meta">别名 3 · 首见 1 · 最近 43 · 证据 12</div>
+                </div>
+                <div class="row">
+                  <div class="row-main"><span>李青萝</span><span class="chip">中</span></div>
+                  <div class="row-meta">别名 1 · 首见 5 · 最近 38 · 证据 6</div>
+                </div>
+                <div class="row">
+                  <div class="row-main"><span>祁观</span><span class="chip">待审</span></div>
+                  <div class="row-meta">identity link · merge candidate · 证据 2</div>
+                </div>
+                <div class="row">
+                  <div class="row-main"><span>红衣女子</span><span class="chip">泛化名</span></div>
+                  <div class="row-meta">需要别名确认 · quarantine 1</div>
+                </div>
+              </section>
+              <aside class="inspector">
+                <div class="inspector-title">
+                  <strong>白无常</strong>
+                  <span class="row-meta">canonical character · visibility 0.91 · accepted</span>
+                  <div>
+                    <span class="chip">别名：白爷</span>
+                    <span class="chip">身份稳定</span>
+                    <span class="chip">关系 17</span>
+                  </div>
+                </div>
+                <div class="field-grid">
+                  <div class="field"><label>当前状态</label><strong>被追捕，仍掌握钥匙</strong></div>
+                  <div class="field"><label>章节范围</label><strong>1 - 43</strong></div>
+                  <div class="field"><label>关系摘要</label><strong>师徒 1 · 敌对 3</strong></div>
+                  <div class="field"><label>治理状态</label><strong>无隔离项</strong></div>
+                </div>
+                <div class="evidence">证据摘要：第 42 章再次确认“白爷”与“白无常”为同一人；最近一次状态更新来自 accepted claim。</div>
+                <div class="field"><label>检查器动作</label><span>查看证据 · 查看 claim · 跳到章节 · 打开质量记录</span></div>
+              </aside>
+            </div>
+          </div>
+        </div>
+
+        <div class="notes">
+          <p class="note"><strong>优点：</strong>角色、关系、知识、地点、身份可以共用“目录-详情”的理解方式；质量变成治理队列，不再像杂项面板。</p>
+          <p class="note"><strong>代价：</strong>需要抽一个共享 console layout，并把现有 panel 逐个迁移。</p>
+        </div>
+      </article>
+
+      <article class="option">
+        <div class="option-head">
+          <div class="option-title">
+            <h2>B. Domain 表格 + 详情抽屉</h2>
+            <small>最像数据库后台，适合大数据量扫描</small>
+          </div>
+          <span class="pill green">强扫描</span>
+        </div>
+
+        <div class="mock" aria-label="option b mock">
+          <div class="mock-top">
+            <div class="mock-title">Memory Tables</div>
+            <div class="mini-actions">
+              <span class="icon-btn">⟳</span>
+              <span class="icon-btn">▦</span>
+              <span class="icon-btn">⚙</span>
+            </div>
+          </div>
+          <div class="console-b">
+            <nav class="tabs">
+              <span class="tab active">Characters</span>
+              <span class="tab">Relationships</span>
+              <span class="tab">Knowledge</span>
+              <span class="tab">Places</span>
+              <span class="tab">Identity</span>
+              <span class="tab">Quality</span>
+            </nav>
+            <div class="table-layout">
+              <section class="table-area">
+                <div class="toolbar">
+                  <div class="search">filter: accepted, visibility &gt; .4</div>
+                  <span class="icon-btn">⇅</span>
+                </div>
+                <div class="table-head"><span>Name</span><span>Status</span><span>Seen</span></div>
+                <div class="table-row"><strong>白无常</strong><span class="chip">accepted</span><span>43</span></div>
+                <div class="table-row"><strong>李青萝</strong><span class="chip">accepted</span><span>38</span></div>
+                <div class="table-row"><strong>祁观</strong><span class="chip">review</span><span>29</span></div>
+                <div class="table-row"><strong>红衣女子</strong><span class="chip">quarantine</span><span>18</span></div>
+                <div class="table-row"><strong>旧称：小七</strong><span class="chip">redirected</span><span>12</span></div>
+              </section>
+              <aside class="drawer">
+                <h3>Row Detail</h3>
+                <div class="field"><label>Canonical</label><strong>白无常</strong></div>
+                <div class="field"><label>Raw identifiers</label><span>展开后显示，不默认暴露</span></div>
+                <div class="field"><label>Evidence</label><span>12 source spans</span></div>
+                <div class="field"><label>Actions</label><span>open · copy id · quality</span></div>
+              </aside>
+            </div>
+          </div>
+        </div>
+
+        <div class="notes">
+          <p class="note"><strong>优点：</strong>最适合排序、过滤、批量检查；数据库控制台感最强。</p>
+          <p class="note"><strong>代价：</strong>更容易滑向 raw table dump；需要更多表格交互和移动端处理。</p>
+        </div>
+      </article>
+
+      <article class="option">
+        <div class="option-head">
+          <div class="option-title">
+            <h2>C. 保留 Tabs，统一密度</h2>
+            <small>最快落地，主要修现有割裂感</small>
+          </div>
+          <span class="pill amber">低风险</span>
+        </div>
+
+        <div class="mock" aria-label="option c mock">
+          <div class="mock-top">
+            <div class="mock-title">AI Book Memory V4</div>
+            <div class="mini-actions">
+              <span class="icon-btn">⟳</span>
+              <span class="icon-btn">▶</span>
+              <span class="icon-btn">×</span>
+            </div>
+          </div>
+          <div class="console-c">
+            <nav class="tabs">
+              <span class="tab active">总览</span>
+              <span class="tab">角色</span>
+              <span class="tab">关系</span>
+              <span class="tab">知识</span>
+              <span class="tab">地图</span>
+              <span class="tab">身份</span>
+              <span class="tab">质量</span>
+            </nav>
+            <section class="tab-body">
+              <div class="summary-grid">
+                <div class="metric"><span>Canonical 角色</span><strong>48</strong></div>
+                <div class="metric"><span>关系边</span><strong>126</strong></div>
+                <div class="metric"><span>隔离项</span><strong>3</strong></div>
+              </div>
+              <div class="two-col">
+                <div class="row active">
+                  <div class="row-main"><span>白无常</span><span class="chip">0.91</span></div>
+                  <div class="row-meta">别名、章节、证据统一摘要</div>
+                </div>
+                <div class="row">
+                  <div class="row-main"><span>李青萝</span><span class="chip">0.76</span></div>
+                  <div class="row-meta">不默认显示 raw id</div>
+                </div>
+                <div class="row">
+                  <div class="row-main"><span>师徒关系</span><span class="chip">family</span></div>
+                  <div class="row-meta">边类型和证据摘要</div>
+                </div>
+                <div class="row">
+                  <div class="row-main"><span>地图冲突</span><span class="chip">0</span></div>
+                  <div class="row-meta">治理信息统一入口</div>
+                </div>
+              </div>
+              <div class="field"><label>统一规则</label><span>每个 tab 使用同一个标题、toolbar、列表密度、详情层级和证据折叠方式。</span></div>
+            </section>
+          </div>
+        </div>
+
+        <div class="notes">
+          <p class="note"><strong>优点：</strong>最小改动，容易分 slice 验证，风险低。</p>
+          <p class="note"><strong>代价：</strong>仍然是多个面板拼接，难形成真正的“记忆库控制台”。</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="section-heading" aria-label="task progress visualization options">
+      <h1>任务进度可视化对比</h1>
+      <p>这三种方案都假设左 rail 新增「任务」入口，并在总览里露出小型 live 摘要。差异在于主详情页怎样回答：跑到哪一步、处理了什么、失败在哪个环节、错误是什么。</p>
+    </section>
+
+    <section class="progress-grid" aria-label="task visualization cards">
+      <article class="progress-card recommended">
+        <div class="option-head">
+          <div class="option-title">
+            <h2>1. Pipeline Timeline</h2>
+            <small>推荐：最直接解释任务卡在哪一步</small>
+          </div>
+          <span class="pill blue">推荐</span>
+        </div>
+
+        <div class="task-shell">
+          <div class="task-top">
+            <div class="task-title">
+              <strong>补齐到当前阅读 · 运行中</strong>
+              <span>第 43 / 1032 章 · 当前阶段：Domain Decision</span>
+            </div>
+            <span class="pill blue">live</span>
+          </div>
+          <div class="task-body">
+            <section class="live-core">
+              <div class="core-row">
+                <div>
+                  <strong>42%</strong>
+                  <span>本次任务进度</span>
+                </div>
+                <div>
+                  <strong>43</strong>
+                  <span>当前章节</span>
+                </div>
+              </div>
+              <div class="progress-track"><div class="progress-fill"></div></div>
+              <div class="core-row">
+                <span>最近完成：第 42 章</span>
+                <span>目标：第 1032 章</span>
+              </div>
+            </section>
+
+            <section class="pipeline" aria-label="pipeline stages">
+              <div class="stage done">
+                <span class="stage-dot"></span>
+                <div class="stage-name"><strong>加载章节</strong><span>第 43 章正文已读取</span></div>
+                <small>完成</small>
+              </div>
+              <div class="stage done">
+                <span class="stage-dot"></span>
+                <div class="stage-name"><strong>AI 输出解析</strong><span>角色、关系、知识、地点 claims 已生成</span></div>
+                <small>完成</small>
+              </div>
+              <div class="stage active">
+                <span class="stage-dot"></span>
+                <div class="stage-name"><strong>Domain Decision</strong><span>正在判断可写入和隔离项</span></div>
+                <small>运行中</small>
+              </div>
+              <div class="stage">
+                <span class="stage-dot"></span>
+                <div class="stage-name"><strong>Canonical 写入</strong><span>等待 reducer 接收 command</span></div>
+                <small>等待</small>
+              </div>
+              <div class="stage">
+                <span class="stage-dot"></span>
+                <div class="stage-name"><strong>Projection 更新</strong><span>等待刷新前端 view model</span></div>
+                <small>等待</small>
+              </div>
+            </section>
+
+            <section class="run-list">
+              <div class="run-row"><strong>第 42 章</strong><span>成功 · 18 claims · 2 quarantine</span><span class="chip">12s</span></div>
+              <div class="run-row"><strong>第 41 章</strong><span>成功 · 21 claims · 0 quarantine</span><span class="chip">9s</span></div>
+              <div class="run-row"><strong>第 40 章</strong><span>成功 · 13 claims · projection refreshed</span><span class="chip">8s</span></div>
+            </section>
+          </div>
+        </div>
+
+        <div class="notes">
+          <p class="note"><strong>适合：</strong>回答“现在在哪一步”和“失败在哪个环节”。</p>
+          <p class="note"><strong>代价：</strong>后端最好补 stage 级状态，否则只能先用章节 run 推断。</p>
+        </div>
+      </article>
+
+      <article class="progress-card">
+        <div class="option-head">
+          <div class="option-title">
+            <h2>2. Chapter Heatmap</h2>
+            <small>最适合长书：一眼看哪些章节已处理</small>
+          </div>
+          <span class="pill green">章节地图</span>
+        </div>
+
+        <div class="task-shell">
+          <div class="task-top">
+            <div class="task-title">
+              <strong>章节处理地图</strong>
+              <span>绿色成功 · 蓝色运行 · 红色失败 · 灰色等待</span>
+            </div>
+            <span class="pill green">1032 章</span>
+          </div>
+          <div class="task-body heatmap-panel">
+            <section class="live-core">
+              <div class="core-row">
+                <div>
+                  <strong>42 / 1032</strong>
+                  <span>已处理边界</span>
+                </div>
+                <div>
+                  <strong>1</strong>
+                  <span>失败章节</span>
+                </div>
+              </div>
+              <div class="progress-track"><div class="progress-fill" style="width: 28%;"></div></div>
+            </section>
+
+            <section class="heatmap-grid" aria-label="chapter heatmap">
+              <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+              <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+              <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+              <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell failed"></span>
+              <span class="heatmap-cell done"></span><span class="heatmap-cell active"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+              <span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+              <span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+              <span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+            </section>
+
+            <section class="heatmap-detail">
+              <h3>选中：第 24 章失败</h3>
+              <div class="detail-line"><span>失败阶段</span><strong>AI 输出解析</strong></div>
+              <div class="detail-line"><span>错误</span><strong>JSON 对象不完整</strong></div>
+              <div class="detail-line"><span>最近成功</span><strong>第 23 章 · 11 claims</strong></div>
+              <div class="detail-line"><span>操作</span><strong>重试本章 · 查看原始输出</strong></div>
+            </section>
+          </div>
+        </div>
+
+        <div class="notes">
+          <p class="note"><strong>适合：</strong>长篇小说、批处理扫视、快速发现断点。</p>
+          <p class="note"><strong>代价：</strong>阶段链路需要二级详情，单独用它不够解释“卡在哪一步”。</p>
+        </div>
+      </article>
+
+      <article class="progress-card">
+        <div class="option-head">
+          <div class="option-title">
+            <h2>3. Mission Control</h2>
+            <small>仪表盘感最强，适合作为总览 live card</small>
+          </div>
+          <span class="pill violet">强观感</span>
+        </div>
+
+        <div class="task-shell">
+          <div class="task-top">
+            <div class="task-title">
+              <strong>V4 Processing Mission Control</strong>
+              <span>吞吐、错误、最近事件、系统状态集中显示</span>
+            </div>
+            <span class="pill amber">monitor</span>
+          </div>
+          <div class="task-body">
+            <section class="mission-grid">
+              <div class="radar">
+                <div class="radar-core"><div><strong>42%</strong><span>running</span></div></div>
+              </div>
+              <div class="mission-stack">
+                <div class="status-card"><label>当前任务</label><strong>补齐到当前阅读</strong></div>
+                <div class="status-card"><label>当前处理</label><strong>第 43 章 · Domain Decision</strong></div>
+                <div class="status-card"><label>预计剩余</label><strong>约 18 分钟</strong></div>
+                <div class="status-card"><label>风险</label><strong>1 个失败章节待处理</strong></div>
+              </div>
+            </section>
+
+            <section class="summary-grid">
+              <div class="metric"><span>成功</span><strong>42</strong></div>
+              <div class="metric"><span>隔离</span><strong>7</strong></div>
+              <div class="metric"><span>失败</span><strong>1</strong></div>
+            </section>
+
+            <section class="log-panel" aria-label="live log">
+              <span>12:41:03 ingest chapter 43</span>
+              <span>12:41:07 extractor returned 18 claims</span>
+              <span>12:41:11 decision materialized 15 writes</span>
+              <span>12:41:12 quarantine 2 uncertain claims</span>
+              <span>12:41:13 reducer waiting for canonical write</span>
+            </section>
+
+            <section class="heatmap-detail">
+              <h3>错误卡</h3>
+              <div class="detail-line"><span>失败章节</span><strong>第 24 章</strong></div>
+              <div class="detail-line"><span>错误摘要</span><strong>AI 输出被截断，可重试</strong></div>
+            </section>
+          </div>
+        </div>
+
+        <div class="notes">
+          <p class="note"><strong>适合：</strong>总览里的 live monitor，视觉冲击和安心感强。</p>
+          <p class="note"><strong>代价：</strong>如果作为主详情页，定位错误环节不如 Pipeline 直接。</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="hybrid-showcase" aria-label="recommended hybrid task progress">
+      <div class="option-head">
+        <div class="option-title">
+          <h1>推荐混合方案：Pipeline + Error Inspector + Mini Heatmap</h1>
+          <small>主视觉保持漂亮的任务流水线；右侧直接给出错误定位；下方用章节地图显示整本书断点。</small>
+        </div>
+        <span class="pill blue">推荐落地稿</span>
+      </div>
+
+      <div class="hybrid-shell">
+        <div class="task-top">
+          <div class="task-title">
+            <strong>《长夜记》 · V4 Memory Console</strong>
+            <span>左 rail 新增「任务」入口；总览页显示 mini live card，详情页进入这里</span>
+          </div>
+          <div class="mini-actions">
+            <span class="icon-btn">⟳</span>
+            <span class="icon-btn">▶</span>
+            <span class="icon-btn">⋯</span>
+          </div>
+        </div>
+
+        <div class="hybrid-body">
+          <nav class="hybrid-rail">
+            <div class="nav-row"><span>总览</span><span>dashboard</span></div>
+            <div class="nav-row active"><span>任务</span><span>running · 42%</span></div>
+            <div class="nav-row"><span>角色</span><span>48 canonical</span></div>
+            <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+            <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+            <div class="nav-row"><span>地点</span><span>21 places</span></div>
+            <div class="nav-row"><span>身份</span><span>9 links</span></div>
+            <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+          </nav>
+
+          <section class="task-workspace">
+            <div class="task-hero">
+              <div class="task-hero-main">
+                <h2>补齐到当前阅读正在运行</h2>
+                <p>第 43 / 1032 章 · 最近完成第 42 章 · 当前停在 Domain Decision。这里一眼告诉你任务没消失、正在处理什么，以及是否出现可处理错误。</p>
+                <div class="action-row">
+                  <button class="action-btn primary" type="button">刷新状态</button>
+                  <button class="action-btn" type="button">取消任务</button>
+                  <button class="action-btn" type="button">查看最近 run</button>
+                </div>
+              </div>
+
+              <aside class="task-hero-meter">
+                <span>本次任务进度</span>
+                <strong>42%</strong>
+                <div class="progress-track"><div class="progress-fill" style="width:42%;"></div></div>
+                <span>当前阶段仍在运行 · 12:41:13 更新</span>
+              </aside>
+            </div>
+
+            <div class="task-main-grid">
+              <section class="pipeline-large">
+                <h3>Pipeline Timeline</h3>
+                <div class="stage-large done">
+                  <span class="stage-dot"></span>
+                  <div><strong>加载章节</strong><span>第 43 章正文已读取，长度 4,812 字</span></div>
+                  <small>完成</small>
+                </div>
+                <div class="stage-large done">
+                  <span class="stage-dot"></span>
+                  <div><strong>AI 输出解析</strong><span>解析出 18 条 claim：角色 6、关系 5、知识 4、地点 3</span></div>
+                  <small>完成</small>
+                </div>
+                <div class="stage-large active">
+                  <span class="stage-dot"></span>
+                  <div><strong>Domain Decision</strong><span>正在判断 Write / Quarantine / NoWrite；已隔离 2 条不确定 claim</span></div>
+                  <small>运行中</small>
+                </div>
+                <div class="stage-large">
+                  <span class="stage-dot"></span>
+                  <div><strong>Canonical 写入</strong><span>等待 reducer 接收 DomainWriteCommand</span></div>
+                  <small>等待</small>
+                </div>
+                <div class="stage-large">
+                  <span class="stage-dot"></span>
+                  <div><strong>Projection 更新</strong><span>等待刷新角色、关系、知识、地图 view model</span></div>
+                  <small>等待</small>
+                </div>
+                <div class="stage-large failed">
+                  <span class="stage-dot"></span>
+                  <div><strong>历史失败：第 24 章</strong><span>AI 输出解析失败；不影响当前任务继续处理</span></div>
+                  <small>可重试</small>
+                </div>
+              </section>
+
+              <aside class="error-inspector">
+                <div class="error-title">
+                  <h3>Error Inspector</h3>
+                  <span class="pill red">第 24 章失败</span>
+                </div>
+                <div class="detail-line"><span>失败阶段</span><strong>AI 输出解析</strong></div>
+                <div class="detail-line"><span>失败时间</span><strong>12:18:09</strong></div>
+                <div class="detail-line"><span>最近成功</span><strong>第 23 章 · 11 claims</strong></div>
+                <div class="detail-line"><span>影响范围</span><strong>本章未写 canonical</strong></div>
+                <div class="error-code">JSON parse failed: unexpected EOF while parsing object at line 1 column 8192. Raw output appears truncated.</div>
+                <div class="action-row">
+                  <button class="action-btn primary" type="button">重试本章</button>
+                  <button class="action-btn" type="button">查看 raw output</button>
+                  <button class="action-btn" type="button">跳到章节</button>
+                </div>
+                <div class="heatmap-detail">
+                  <h3>诊断摘要</h3>
+                  <div class="detail-line"><span>建议</span><strong>重试第 24 章，必要时降低输出体积</strong></div>
+                  <div class="detail-line"><span>质量关系</span><strong>不是 Quality finding，是运行失败</strong></div>
+                </div>
+              </aside>
+            </div>
+
+            <section class="heatmap-wide">
+              <h3>Mini Chapter Heatmap</h3>
+              <div class="heatmap-grid" aria-label="recommended mini heatmap">
+                <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+                <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+                <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell failed"></span>
+                <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+                <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+                <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell active"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+                <span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+                <span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+              </div>
+              <div class="core-row">
+                <span>绿色成功 · 蓝色当前运行 · 红色失败可诊断 · 灰色等待</span>
+                <span>点击格子切换右侧 Inspector</span>
+              </div>
+            </section>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-heading" id="rail-pages" aria-label="rail page visualization">
+      <h1>Rail 页面逐项可视化</h1>
+      <p>这里按目标 rail 展开每个页面的实际形态：总览、任务、角色、关系、知识、地点、质量。身份不作为一级 tab，而是折进角色详情、任务 inspector 和治理队列。</p>
+    </section>
+
+    <section class="rail-showcase" aria-label="all target rail screens">
+      <article class="rail-screen">
+        <div class="rail-screen-head">
+          <div>
+            <h2>总览 / Overview</h2>
+            <p>默认 landing。它不是欢迎页，而是整本书记忆库的控制台：处理状态、domain 健康、最近变化、需要注意的事项。</p>
+          </div>
+          <span class="pill blue">default</span>
+        </div>
+
+        <div class="screen-shell">
+          <div class="task-top">
+            <div class="task-title">
+              <strong>《长夜记》 · V4 Memory Console</strong>
+              <span>左 rail 是主导航；右侧页面随 domain 切换</span>
+            </div>
+            <div class="mini-actions">
+              <span class="icon-btn">⟳</span>
+              <span class="icon-btn">▶</span>
+              <span class="icon-btn">⋯</span>
+            </div>
+          </div>
+
+          <div class="screen-body">
+            <nav class="screen-rail">
+              <div class="nav-row active"><span>总览</span><span>health</span></div>
+              <div class="nav-row"><span>任务</span><span>running · 42%</span></div>
+              <div class="nav-row"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+            </nav>
+
+            <section class="screen-content">
+              <div class="screen-header">
+                <div class="screen-heading">
+                  <h2>记忆库总览</h2>
+                  <p>一眼回答：任务有没有在跑，canonical 数据是否健康，哪里需要我介入。</p>
+                </div>
+                <div class="screen-toolbar">
+                  <button class="action-btn primary" type="button">补齐到当前阅读</button>
+                  <button class="action-btn" type="button">刷新</button>
+                </div>
+              </div>
+
+              <div class="screen-main">
+                <section class="live-core">
+                  <div class="core-row">
+                    <div>
+                      <strong>42%</strong>
+                      <span>补齐任务运行中 · 第 43 / 1032 章</span>
+                    </div>
+                    <span class="pill blue">Domain Decision</span>
+                  </div>
+                  <div class="progress-track"><div class="progress-fill" style="width:42%;"></div></div>
+                  <div class="core-row">
+                    <span>最近完成：第 42 章 · 18 claims · 2 quarantine</span>
+                    <span>1 个历史失败可重试</span>
+                  </div>
+                </section>
+
+                <div class="overview-grid">
+                  <section class="wide-panel">
+                    <div class="panel-title">
+                      <h3>Domain Health</h3>
+                      <span class="pill green">canonical ready</span>
+                    </div>
+                    <div class="domain-health-grid">
+                      <div class="domain-card"><span>角色</span><strong>48</strong><span>3 条 identity 线索待确认</span><div class="spark"></div></div>
+                      <div class="domain-card"><span>关系</span><strong>126</strong><span>family 反向边已合并展示</span><div class="spark"></div></div>
+                      <div class="domain-card"><span>知识</span><strong>83</strong><span>4 条事实有新证据</span><div class="spark"></div></div>
+                      <div class="domain-card"><span>地点</span><strong>21</strong><span>2 条路线更新</span><div class="spark"></div></div>
+                    </div>
+                  </section>
+
+                  <aside class="wide-panel">
+                    <div class="panel-title">
+                      <h3>需要注意</h3>
+                      <span class="pill amber">4 items</span>
+                    </div>
+                    <div class="attention-list">
+                      <div class="attention-row"><span class="status-dot blue"></span><strong>第 43 章正在处理</strong><span class="chip">任务</span></div>
+                      <div class="attention-row"><span class="status-dot red"></span><strong>第 24 章解析失败</strong><span class="chip">重试</span></div>
+                      <div class="attention-row"><span class="status-dot amber"></span><strong>红衣女子可能是李青萝</strong><span class="chip">身份线索</span></div>
+                      <div class="attention-row"><span class="status-dot green"></span><strong>地图 projection 已刷新</strong><span class="chip">刚刚</span></div>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article class="rail-screen">
+        <div class="rail-screen-head">
+          <div>
+            <h2>任务 / Task Progress</h2>
+            <p>主视图用 pipeline 解释生命周期；右侧 inspector 解释错误和当前章节产物；下方保留压缩章节地图。</p>
+          </div>
+          <span class="pill blue">live</span>
+        </div>
+
+        <div class="screen-shell">
+          <div class="task-top">
+            <div class="task-title">
+              <strong>《长夜记》 · V4 Memory Console</strong>
+              <span>任务页是“我点了补齐之后发生了什么”的答案</span>
+            </div>
+            <div class="mini-actions"><span class="icon-btn">⟳</span><span class="icon-btn">▣</span><span class="icon-btn">⋯</span></div>
+          </div>
+
+          <div class="screen-body">
+            <nav class="screen-rail">
+              <div class="nav-row"><span>总览</span><span>health</span></div>
+              <div class="nav-row active"><span>任务</span><span>running · 42%</span></div>
+              <div class="nav-row"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+            </nav>
+
+            <section class="task-workspace">
+              <div class="task-hero">
+                <div class="task-hero-main">
+                  <h2>补齐到当前阅读正在运行</h2>
+                  <p>当前第 43 章，AI 输出已解析，正在把 claim 变成 Write / Quarantine / NoWrite。任务失败时会定位到章节、阶段和错误文本。</p>
+                  <div class="action-row">
+                    <button class="action-btn primary" type="button">刷新状态</button>
+                    <button class="action-btn" type="button">取消任务</button>
+                    <button class="action-btn" type="button">查看本章 claims</button>
+                  </div>
+                </div>
+                <aside class="task-hero-meter">
+                  <span>本次任务</span>
+                  <strong>42%</strong>
+                  <div class="progress-track"><div class="progress-fill" style="width:42%;"></div></div>
+                  <span>12:41:13 更新</span>
+                </aside>
+              </div>
+
+              <div class="task-main-grid">
+                <section class="pipeline-large">
+                  <h3>Pipeline Timeline</h3>
+                  <div class="stage-large done"><span class="stage-dot"></span><div><strong>AI 输出解析</strong><span>18 claims：角色 6、关系 5、知识 4、地点 3</span></div><small>完成</small></div>
+                  <div class="stage-large active"><span class="stage-dot"></span><div><strong>Domain Decision</strong><span>15 Write · 2 Quarantine · 1 NoWrite</span></div><small>运行中</small></div>
+                  <div class="stage-large"><span class="stage-dot"></span><div><strong>Canonical 写入</strong><span>等待 reducer 写入 canonical tables</span></div><small>等待</small></div>
+                  <div class="stage-large"><span class="stage-dot"></span><div><strong>Projection 更新</strong><span>刷新角色、关系、知识、地点 view model</span></div><small>等待</small></div>
+                </section>
+
+                <aside class="error-inspector">
+                  <div class="error-title">
+                    <h3>Stage Inspector</h3>
+                    <span class="pill blue">第 43 章</span>
+                  </div>
+                  <div class="detail-line"><span>解析产物</span><strong>18 claims</strong></div>
+                  <div class="detail-line"><span>Decision</span><strong>15 write · 2 quarantine</strong></div>
+                  <div class="detail-line"><span>失败历史</span><strong>第 24 章 AI parse failed</strong></div>
+                  <div class="error-code">第 43 章：红衣女子 identity link 证据不足，已进入 quarantine，不写 canonical。</div>
+                  <div class="action-row">
+                    <button class="action-btn primary" type="button">查看 claims</button>
+                    <button class="action-btn" type="button">查看隔离项</button>
+                    <button class="action-btn" type="button">重试失败章</button>
+                  </div>
+                </aside>
+              </div>
+
+              <section class="heatmap-wide">
+                <h3>Compressed Chapter Navigator</h3>
+                <div class="heatmap-grid" aria-label="task page mini heatmap">
+                  <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span>
+                  <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell failed"></span>
+                  <span class="heatmap-cell done"></span><span class="heatmap-cell done"></span><span class="heatmap-cell active"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+                  <span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span><span class="heatmap-cell pending"></span>
+                </div>
+              </section>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article class="rail-screen">
+        <div class="rail-screen-head">
+          <div>
+            <h2>角色 / Characters</h2>
+            <p>角色仍然是标准目录 + 详情检查器，但把 identity 线索作为角色治理信息嵌入详情，不再单独放一级 tab。</p>
+          </div>
+          <span class="pill green">entity</span>
+        </div>
+
+        <div class="screen-shell">
+          <div class="task-top">
+            <div class="task-title"><strong>《长夜记》 · V4 Memory Console</strong><span>角色页默认展示 canonical name、别名、章节范围、关系摘要和身份稳定度</span></div>
+            <div class="mini-actions"><span class="icon-btn">⌕</span><span class="icon-btn">⇅</span><span class="icon-btn">⋯</span></div>
+          </div>
+
+          <div class="screen-body">
+            <nav class="screen-rail">
+              <div class="nav-row"><span>总览</span><span>health</span></div>
+              <div class="nav-row"><span>任务</span><span>running · 42%</span></div>
+              <div class="nav-row active"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+            </nav>
+
+            <section class="screen-content">
+              <div class="screen-header">
+                <div class="screen-heading">
+                  <h2>角色目录</h2>
+                  <p>默认按 visibility 排序。详情页必须把角色当前 state 放到核心位置：境界、技能、装备、位置、目标、精神状态都来自 currentStates。</p>
+                </div>
+                <div class="screen-toolbar">
+                  <button class="action-btn" type="button">筛选</button>
+                  <button class="action-btn" type="button">证据密度</button>
+                </div>
+              </div>
+
+              <div class="screen-main directory-layout">
+                <section class="list-panel">
+                  <div class="toolbar"><div class="search">搜索角色 / 别名 / 状态</div><span class="icon-btn">⌕</span></div>
+                  <div class="row active"><div class="row-main"><span>白无常</span><span class="chip">0.91</span></div><div class="row-meta">别名 3 · 首见 1 · 最近 43 · 证据 12</div></div>
+                  <div class="row"><div class="row-main"><span>李青萝</span><span class="chip">0.76</span></div><div class="row-meta">别名 1 · 最近 38 · 关系 7</div></div>
+                  <div class="row"><div class="row-main"><span>红衣女子</span><span class="chip">身份线索</span></div><div class="row-meta">可能指向李青萝 · 隔离 1</div></div>
+                  <div class="row"><div class="row-main"><span>祁观</span><span class="chip">新</span></div><div class="row-meta">首见 29 · 最近 43 · 证据 4</div></div>
+                </section>
+
+                <aside class="detail-panel">
+                  <div class="inspector-title">
+                    <strong>白无常</strong>
+                    <span class="row-meta">canonical character · accepted · visibility 0.91</span>
+                    <div><span class="chip">白爷</span><span class="chip">谢七</span><span class="chip">身份稳定</span></div>
+                  </div>
+                  <div class="field-grid">
+                    <div class="field"><label>当前状态</label><strong>掌握钥匙，被多方追捕</strong></div>
+                    <div class="field"><label>章节范围</label><strong>1 - 43</strong></div>
+                    <div class="field"><label>关系摘要</label><strong>敌对 3 · 同盟 2 · 师承 1</strong></div>
+                    <div class="field"><label>最近更新</label><strong>第 42 章 accepted claim</strong></div>
+                  </div>
+                  <div class="identity-thread">
+                    <h3>状态矩阵</h3>
+                    <div class="field-grid">
+                      <div class="field"><label>境界</label><strong>金丹后期</strong><span>第 42 章 · 0.86</span></div>
+                      <div class="field"><label>技能</label><strong>锁魂术、夜行步</strong><span>第 39 章 · 0.79</span></div>
+                      <div class="field"><label>装备</label><strong>青铜钥匙、黑伞</strong><span>第 43 章 · 0.91</span></div>
+                      <div class="field"><label>位置</label><strong>东塔旧井附近</strong><span>第 43 章 · 0.74</span></div>
+                      <div class="field"><label>目标</label><strong>找到井门后的名单</strong><span>第 41 章 · 0.68</span></div>
+                      <div class="field"><label>精神状态</label><strong>警觉，开始怀疑祁观</strong><span>第 43 章 · 0.63</span></div>
+                    </div>
+                  </div>
+                  <div class="identity-thread">
+                    <h3>身份线索</h3>
+                    <div class="detail-line"><span>稳定链接</span><strong>白爷 -> 白无常</strong></div>
+                    <div class="detail-line"><span>待确认</span><strong>红衣女子 -> 李青萝</strong></div>
+                    <div class="detail-line"><span>处理入口</span><strong>打开证据 / 送入质量治理</strong></div>
+                  </div>
+                  <div class="evidence">证据摘要：第 42 章用“白爷”称呼同一角色，并与前文钥匙线索连续。</div>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article class="rail-screen">
+        <div class="rail-screen-head">
+          <div>
+            <h2>关系 / Relationships</h2>
+            <p>关系页不只是表格，也不是大而全社交图。默认左侧是边列表，主区域给局部关系图，右侧 inspector 解释 edge、证据和合并规则。</p>
+          </div>
+          <span class="pill violet">graph + list</span>
+        </div>
+
+        <div class="screen-shell">
+          <div class="task-top">
+            <div class="task-title"><strong>《长夜记》 · V4 Memory Console</strong><span>关系页回答：谁和谁有什么关系，证据来自哪里，关系是否稳定</span></div>
+            <div class="mini-actions"><span class="icon-btn">⌕</span><span class="icon-btn">⇄</span><span class="icon-btn">⋯</span></div>
+          </div>
+
+          <div class="screen-body">
+            <nav class="screen-rail">
+              <div class="nav-row"><span>总览</span><span>health</span></div>
+              <div class="nav-row"><span>任务</span><span>running · 42%</span></div>
+              <div class="nav-row"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row active"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+            </nav>
+
+            <section class="screen-content">
+              <div class="screen-header">
+                <div class="screen-heading">
+                  <h2>关系网络</h2>
+                  <p>列表适合扫描和排序；局部图适合理解上下文；反向 family 边合并结果显示为事实结果，不在这里修 canonical。</p>
+                </div>
+                <div class="screen-toolbar">
+                  <button class="action-btn" type="button">按 group</button>
+                  <button class="action-btn" type="button">只看高置信</button>
+                </div>
+              </div>
+
+              <div class="screen-main relationship-layout">
+                <section class="graph-panel">
+                  <span class="edge-line" style="left:190px;top:142px;width:210px;transform:rotate(14deg);"></span>
+                  <span class="edge-line" style="left:306px;top:248px;width:180px;transform:rotate(-24deg);"></span>
+                  <span class="edge-line" style="left:148px;top:292px;width:170px;transform:rotate(-36deg);"></span>
+                  <div class="node" style="left:60px;top:110px;">白无常<small>中心角色</small></div>
+                  <div class="node" style="left:390px;top:166px;">祁观<small>同盟</small></div>
+                  <div class="node" style="left:470px;top:296px;">李青萝<small>敌对</small></div>
+                  <div class="node" style="left:158px;top:312px;">旧师<small>师承</small></div>
+                  <span class="edge-label" style="left:264px;top:136px;">同盟 · conf .82</span>
+                  <span class="edge-label" style="left:374px;top:248px;">敌对 · 5 events</span>
+                  <span class="edge-label" style="left:188px;top:242px;">family/mentor 合并</span>
+                </section>
+
+                <aside class="detail-panel">
+                  <div class="panel-title"><h3>选中关系</h3><span class="pill blue">同盟</span></div>
+                  <div class="field"><label>Edge</label><strong>白无常 -> 祁观</strong></div>
+                  <div class="field"><label>语义</label><strong>共同对抗李青萝势力</strong></div>
+                  <div class="field-grid">
+                    <div class="field"><label>置信度</label><strong>0.82</strong></div>
+                    <div class="field"><label>事件数</label><strong>5</strong></div>
+                  </div>
+                  <div class="evidence">证据摘要：第 39-43 章连续出现共同目标；最近一次由第 43 章 claim 更新。</div>
+                  <div class="fact-stack">
+                    <div class="fact-row"><strong>family 组提示</strong><span>反向边在展示层显示为无向关系；canonical 仍来自 reducer 写入结果。</span></div>
+                    <div class="fact-row"><strong>可操作</strong><span>打开两侧角色 · 查看相关 claims · 跳到证据章节</span></div>
+                  </div>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article class="rail-screen">
+        <div class="rail-screen-head">
+          <div>
+            <h2>知识 / Knowledge</h2>
+            <p>知识页不做无限 fact stream。它应该是主题化的世界设定库：先按 category/topic 聚合，再进入卡片看摘要、关键断言、冲突和演化。</p>
+          </div>
+          <span class="pill amber">facts</span>
+        </div>
+
+        <div class="screen-shell">
+          <div class="task-top">
+            <div class="task-title"><strong>《长夜记》 · V4 Memory Console</strong><span>知识页重点是事实状态和证据，不把 raw claim dump 到第一层</span></div>
+            <div class="mini-actions"><span class="icon-btn">⌕</span><span class="icon-btn">◇</span><span class="icon-btn">⋯</span></div>
+          </div>
+
+          <div class="screen-body">
+            <nav class="screen-rail">
+              <div class="nav-row"><span>总览</span><span>health</span></div>
+              <div class="nav-row"><span>任务</span><span>running · 42%</span></div>
+              <div class="nav-row"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row active"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+            </nav>
+
+            <section class="screen-content">
+              <div class="screen-header">
+                <div class="screen-heading">
+                  <h2>知识库</h2>
+                  <p>默认展示主题地图和高价值卡片，而不是把所有 assertion 平铺。Fact stream 只作为选中 topic 的证据时间线。</p>
+                </div>
+                <div class="screen-toolbar">
+                  <button class="action-btn" type="button">分类</button>
+                  <button class="action-btn" type="button">冲突</button>
+                  <button class="action-btn" type="button">最近更新</button>
+                </div>
+              </div>
+
+              <div class="screen-main knowledge-layout">
+                <section class="wide-panel">
+                  <div class="panel-title"><h3>Knowledge Atlas</h3><span class="pill amber">9 categories</span></div>
+                  <div class="domain-health-grid">
+                    <div class="domain-card"><span>修炼体系</span><strong>12</strong><span>境界、功法、能力边界</span><div class="spark"></div></div>
+                    <div class="domain-card"><span>势力结构</span><strong>9</strong><span>宗门、家族、暗线组织</span><div class="spark"></div></div>
+                    <div class="domain-card"><span>世界规则</span><strong>15</strong><span>禁制、契约、空间规则</span><div class="spark"></div></div>
+                    <div class="domain-card"><span>秘密 / 预言</span><strong>7</strong><span>未揭示或半揭示线索</span><div class="spark"></div></div>
+                  </div>
+                  <div class="fact-stack">
+                    <div class="fact-row">
+                      <strong>境界体系：炼气 -> 筑基 -> 金丹 -> 元婴</strong>
+                      <span>power_system · 6 assertions · last updated 43 · confidence .88</span>
+                    </div>
+                    <div class="fact-row">
+                      <strong>东塔旧井规则</strong>
+                      <span>world_rule / geography · 4 assertions · 1 contradiction · needs review</span>
+                    </div>
+                    <div class="fact-row">
+                      <strong>青萝会与祁家旧案</strong>
+                      <span>history / politics · 8 assertions · revised twice</span>
+                    </div>
+                    <div class="fact-row">
+                      <strong>钥匙与名单的真实用途</strong>
+                      <span>secret · 5 assertions · hidden from characters except 白无常</span>
+                    </div>
+                  </div>
+                </section>
+
+                <aside class="detail-panel">
+                  <div class="panel-title"><h3>Topic Inspector</h3><span class="pill blue">power_system</span></div>
+                  <div class="field"><label>主题</label><strong>境界体系</strong></div>
+                  <div class="field"><label>当前摘要</label><strong>修炼境界有稳定层级，白无常当前处于金丹后期。</strong></div>
+                  <div class="field-grid">
+                    <div class="field"><label>断言数</label><strong>6</strong></div>
+                    <div class="field"><label>最近更新</label><strong>第 43 章</strong></div>
+                  </div>
+                  <div class="evidence">证据摘要：第 43 章确认白无常境界变化；第 12 章和第 29 章描述过体系层级。</div>
+                  <div class="fact-stack">
+                    <div class="fact-row"><strong>第 12 章</strong><span>境界体系首次被旁白说明 · active</span></div>
+                    <div class="fact-row"><strong>第 29 章</strong><span>祁观提到金丹与元婴差距 · clarifies</span></div>
+                    <div class="fact-row"><strong>第 43 章</strong><span>白无常突破到金丹后期 · supports character state</span></div>
+                    <div class="fact-row"><strong>展开</strong><span>查看 assertions / links / source spans / related characters</span></div>
+                  </div>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article class="rail-screen">
+        <div class="rail-screen-head">
+          <div>
+            <h2>地点 / Places</h2>
+            <p>地点页要把地图、地点目录、路线和地点事实放在一起。它不是地理精确地图，而是小说空间记忆图。</p>
+          </div>
+          <span class="pill green">map</span>
+        </div>
+
+        <div class="screen-shell">
+          <div class="task-top">
+            <div class="task-title"><strong>《长夜记》 · V4 Memory Console</strong><span>地点页回答：人和事件发生在哪里，空间关系是否清楚，最近刷新了哪些地点</span></div>
+            <div class="mini-actions"><span class="icon-btn">⌕</span><span class="icon-btn">⌖</span><span class="icon-btn">⋯</span></div>
+          </div>
+
+          <div class="screen-body">
+            <nav class="screen-rail">
+              <div class="nav-row"><span>总览</span><span>health</span></div>
+              <div class="nav-row"><span>任务</span><span>running · 42%</span></div>
+              <div class="nav-row"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row active"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row"><span>质量</span><span>4 queues</span></div>
+            </nav>
+
+            <section class="screen-content">
+              <div class="screen-header">
+                <div class="screen-heading">
+                  <h2>地点地图</h2>
+                  <p>左侧空间图，右侧地点 inspector。路线和地点规则来自 canonical，projection 只负责组织成可看的 map model。</p>
+                </div>
+                <div class="screen-toolbar">
+                  <button class="action-btn" type="button">按区域</button>
+                  <button class="action-btn" type="button">显示路线</button>
+                </div>
+              </div>
+
+              <div class="screen-main place-layout">
+                <section class="map-panel">
+                  <span class="route-line" style="left:150px;top:140px;width:250px;transform:rotate(20deg);"></span>
+                  <span class="route-line" style="left:375px;top:222px;width:155px;transform:rotate(55deg);"></span>
+                  <span class="place-pin" style="left:134px;top:124px;"></span>
+                  <span class="place-pin green" style="left:390px;top:206px;"></span>
+                  <span class="place-pin amber" style="left:518px;top:330px;"></span>
+                  <span class="map-label" style="left:86px;top:78px;">东塔</span>
+                  <span class="map-label" style="left:356px;top:160px;">旧井</span>
+                  <span class="map-label" style="left:486px;top:360px;">南巷</span>
+                </section>
+
+                <aside class="detail-panel">
+                  <div class="panel-title"><h3>地点 Inspector</h3><span class="pill green">active</span></div>
+                  <div class="field"><label>地点</label><strong>东塔</strong></div>
+                  <div class="field-grid">
+                    <div class="field"><label>出现章节</label><strong>12 - 43</strong></div>
+                    <div class="field"><label>关联事实</label><strong>9</strong></div>
+                  </div>
+                  <div class="fact-stack">
+                    <div class="fact-row"><strong>空间规则</strong><span>雨夜封闭内廊，旧井门只能从东塔下层进入。</span></div>
+                    <div class="fact-row"><strong>最近事件</strong><span>第 43 章白无常从东塔转入旧井。</span></div>
+                    <div class="fact-row"><strong>关联角色</strong><span>白无常、祁观、李青萝</span></div>
+                  </div>
+                  <div class="evidence">Projection 刷新摘要：地点 view model 刚刷新，新增东塔 -> 旧井路线。</div>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article class="rail-screen">
+        <div class="rail-screen-head">
+          <div>
+            <h2>质量 / Quality</h2>
+            <p>质量页是治理工作台，不是第六种实体目录。它集中处理 quarantine、质量发现、修正记录、重处理任务和 prompt 回归风险。</p>
+          </div>
+          <span class="pill red">governance</span>
+        </div>
+
+        <div class="screen-shell">
+          <div class="task-top">
+            <div class="task-title"><strong>《长夜记》 · V4 Memory Console</strong><span>质量页回答：哪些东西不能自动写，为什么不能写，下一步我能做什么</span></div>
+            <div class="mini-actions"><span class="icon-btn">⌕</span><span class="icon-btn">⟳</span><span class="icon-btn">⋯</span></div>
+          </div>
+
+          <div class="screen-body">
+            <nav class="screen-rail">
+              <div class="nav-row"><span>总览</span><span>health</span></div>
+              <div class="nav-row"><span>任务</span><span>running · 42%</span></div>
+              <div class="nav-row"><span>角色</span><span>48 canonical</span></div>
+              <div class="nav-row"><span>关系</span><span>126 edges</span></div>
+              <div class="nav-row"><span>知识</span><span>83 facts</span></div>
+              <div class="nav-row"><span>地点</span><span>21 places</span></div>
+              <div class="nav-row active"><span>质量</span><span>4 queues</span></div>
+            </nav>
+
+            <section class="screen-content">
+              <div class="screen-header">
+                <div class="screen-heading">
+                  <h2>质量治理</h2>
+                  <p>默认按“最需要人介入”排序。这里展示问题和处理动作，不把 canonical 修正悄悄塞回 projection。</p>
+                </div>
+                <div class="screen-toolbar">
+                  <button class="action-btn primary" type="button">处理选中项</button>
+                  <button class="action-btn" type="button">批量重试</button>
+                  <button class="action-btn" type="button">导出诊断</button>
+                </div>
+              </div>
+
+              <div class="screen-main quality-layout">
+                <aside class="queue-panel">
+                  <div class="panel-title"><h3>Queues</h3><span class="pill amber">12 open</span></div>
+                  <div class="queue-row active"><strong>隔离 Claims</strong><span class="chip">7</span><span>Decision 拒绝自动写入</span></div>
+                  <div class="queue-row"><strong>身份线索</strong><span class="chip">3</span><span>可能 merge / alias 冲突</span></div>
+                  <div class="queue-row"><strong>运行失败</strong><span class="chip">1</span><span>章节处理失败可重试</span></div>
+                  <div class="queue-row"><strong>Prompt 回归</strong><span class="chip">1</span><span>输出结构异常趋势</span></div>
+                </aside>
+
+                <section class="triage-list">
+                  <div class="panel-title">
+                    <h3>隔离 Claims</h3>
+                    <span class="pill red">needs review</span>
+                  </div>
+                  <div class="triage-row active">
+                    <span class="severity high">H</span>
+                    <div class="triage-copy">
+                      <strong>红衣女子可能是李青萝，但证据不足</strong>
+                      <span>第 43 章 · identity link · quarantine · 不写 canonical</span>
+                    </div>
+                    <span class="chip">identity</span>
+                  </div>
+                  <div class="triage-row">
+                    <span class="severity medium">M</span>
+                    <div class="triage-copy">
+                      <strong>“旧师”关系方向不清楚</strong>
+                      <span>第 41 章 · relationship · judge uncertain</span>
+                    </div>
+                    <span class="chip">relation</span>
+                  </div>
+                  <div class="triage-row">
+                    <span class="severity medium">M</span>
+                    <div class="triage-copy">
+                      <strong>东塔内廊规则和旧事实冲突</strong>
+                      <span>第 39 章 · knowledge/place · needs evidence</span>
+                    </div>
+                    <span class="chip">fact</span>
+                  </div>
+                  <div class="triage-row">
+                    <span class="severity">L</span>
+                    <div class="triage-copy">
+                      <strong>第 24 章 AI 输出截断</strong>
+                      <span>run failure · parse failed · retry available</span>
+                    </div>
+                    <span class="chip">task</span>
+                  </div>
+                </section>
+
+                <aside class="quality-inspector">
+                  <div class="error-title">
+                    <h3>Review Inspector</h3>
+                    <span class="pill red">quarantined</span>
+                  </div>
+                  <div class="field"><label>问题</label><strong>红衣女子可能是李青萝，但证据不足</strong></div>
+                  <div class="field-grid">
+                    <div class="field"><label>Domain</label><strong>identity / character</strong></div>
+                    <div class="field"><label>章节</label><strong>43</strong></div>
+                  </div>
+                  <div class="detail-line"><span>Decision</span><strong>Quarantine，不写 canonical</strong></div>
+                  <div class="detail-line"><span>原因</span><strong>只有称谓相似，没有同场确认</strong></div>
+                  <div class="error-code">claim: 红衣女子 == 李青萝
+judge: uncertain_identity
+action: quarantine_claim
+canonical_write: none</div>
+                  <div class="evidence">证据摘要：第 43 章出现“红衣女子”与李青萝相似动作，但缺少直接称呼或上下文闭环。</div>
+                  <div class="action-row">
+                    <button class="action-btn primary" type="button">查看证据</button>
+                    <button class="action-btn" type="button">标记已确认</button>
+                    <button class="action-btn" type="button">保持隔离</button>
+                    <button class="action-btn" type="button">重跑章节</button>
+                  </div>
+                  <div class="fact-stack">
+                    <div class="fact-row"><strong>边界提示</strong><span>人工确认应该生成明确 correction / reprocess 意图，不允许前端或 projection 直接改 canonical。</span></div>
+                  </div>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="decision">
+      <section>
+        <h2>推荐结论</h2>
+        <ul>
+          <li>选择 A 作为目标架构：共享 domain rail、entity directory、detail inspector。</li>
+          <li>保留现有 V4 API 和 panel 数据加载边界，先重组信息展示，不扩 backend scope。</li>
+          <li>Quality 不是隐藏诊断页，而是控制台里的治理队列：隔离、发现、修正、重处理。</li>
+          <li>Raw claim / id / provenance 可检查，但不作为默认第一阅读层。</li>
+        </ul>
+      </section>
+      <section>
+        <h2>需要你定的点</h2>
+        <ul>
+          <li>是否确认 A 作为设计方向？</li>
+          <li>Domain 入口用左侧竖 rail，还是保留顶部 tabs 但进入后采用目录+检查器？</li>
+          <li>Quality 是否固定为最后一个治理入口，还是在总览里也给强提示？</li>
+        </ul>
+      </section>
+    </section>
+  </main>
+</body>
+</html>
