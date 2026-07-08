@@ -59,26 +59,24 @@ const emit = defineEmits<{
 
 <style scoped>
 .v4-panel-shell {
-  border: 1px solid color-mix(in srgb, var(--color-border) 84%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--color-bg) 96%, var(--color-bg-sunken) 4%);
+  min-height: 100%;
+  background: var(--v4-bg);
+  color: var(--v4-ink);
 }
 
 .v4-panel-shell-inner {
   min-height: 100%;
   padding: 14px;
-  border-radius: 8px;
-  background: transparent;
 }
 
 .v4-panel-shell-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: center;
   margin-bottom: 14px;
   padding-bottom: 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
+  border-bottom: 1px solid var(--v4-line);
 }
 
 .v4-panel-shell-header h2,
@@ -87,15 +85,17 @@ const emit = defineEmits<{
 }
 
 .v4-panel-shell-header h2 {
-  color: var(--color-text);
+  color: var(--v4-ink);
   font-size: 18px;
+  font-weight: 850;
   letter-spacing: 0;
 }
 
 .v4-panel-shell-header p {
   margin-top: 5px;
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   line-height: 1.6;
+  font-size: 13px;
 }
 
 .v4-panel-shell-toolbar {
@@ -108,6 +108,7 @@ const emit = defineEmits<{
 @media (max-width: 768px) {
   .v4-panel-shell-header {
     flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>
