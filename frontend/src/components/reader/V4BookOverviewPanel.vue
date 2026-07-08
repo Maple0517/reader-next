@@ -169,7 +169,7 @@ function summarizeError(error: unknown) {
 .v4-processing-strip,
 .v4-domain-grid {
   display: grid;
-  gap: 10px;
+  gap: var(--v4-gap);
 }
 
 .v4-processing-strip {
@@ -181,10 +181,26 @@ function summarizeError(error: unknown) {
 }
 
 .v4-attention-panel {
-  padding: 14px;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 80%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 64%, transparent);
+  display: grid;
+  gap: 10px;
+  padding: var(--v4-pad-lg);
+  border: 1px solid var(--v4-line);
+  background: var(--v4-surface);
+}
+
+.v4-attention-panel h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--v4-ink);
+}
+
+.v4-attention-panel ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--v4-muted);
+  line-height: var(--v4-line-height);
 }
 
 .v4-live-task-card {
@@ -193,10 +209,9 @@ function summarizeError(error: unknown) {
   gap: 18px;
   align-items: center;
   min-height: 118px;
-  padding: 18px;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--color-primary) 9%, var(--color-bg-sunken));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 64%, transparent);
+  padding: var(--v4-pad-lg);
+  border: 1px solid color-mix(in srgb, var(--v4-accent) 28%, var(--v4-line));
+  background: color-mix(in srgb, var(--v4-accent) 6%, var(--v4-surface));
 }
 
 .v4-live-task-card div:first-child {
@@ -205,20 +220,20 @@ function summarizeError(error: unknown) {
 }
 
 .v4-live-task-card span {
-  color: var(--color-text-tertiary);
+  color: var(--v4-muted);
   font-size: 12px;
   font-weight: 800;
 }
 
 .v4-live-task-card strong {
-  color: var(--color-text);
+  color: var(--v4-ink);
   font-size: 28px;
   letter-spacing: -0.02em;
 }
 
 .v4-live-task-card p {
   margin: 0;
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
 }
 
 .v4-live-task-status {
@@ -226,29 +241,10 @@ function summarizeError(error: unknown) {
   min-width: 88px;
   min-height: 88px;
   place-items: center;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--color-bg) 82%, transparent);
-  color: var(--color-primary);
+  border: 1px solid var(--v4-line);
+  background: var(--v4-surface);
+  color: var(--v4-accent);
   font-weight: 900;
-}
-
-.v4-attention-panel {
-  display: grid;
-  gap: 10px;
-}
-
-.v4-attention-panel h3 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.v4-attention-panel ul {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding-left: 18px;
-  color: var(--color-text-secondary);
-  line-height: 1.6;
 }
 
 @media (max-width: 900px) {
