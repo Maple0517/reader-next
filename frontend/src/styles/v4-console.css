@@ -1,0 +1,143 @@
+/* V4 Console — Restrained Warm Tone Design System */
+
+/* === Base Palette === */
+:root {
+  --v4-bg: #f5f1ea;
+  --v4-surface: #fffdf9;
+  --v4-line: #d8d0c3;
+  --v4-ink: #181612;
+  --v4-muted: #655f55;
+  --v4-soft: #ebe4d8;
+  --v4-inspector-bg: #fffaf2;
+  --v4-rail-bg: #eee6d8;
+  --v4-shell-top-bg: #f0ebe3;
+
+  /* Functional */
+  --v4-accent: #3657d6;
+  --v4-success: #26704f;
+  --v4-warn: #9a6416;
+  --v4-danger: #b83a3a;
+  --v4-purple: #6550b9;
+
+  /* Spacing */
+  --v4-radius: 0px;
+  --v4-gap: 6px;
+  --v4-pad: 8px;
+  --v4-pad-lg: 10px;
+  --v4-line-height: 1.45;
+}
+
+/* === Utility Classes === */
+.v4-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--v4-line);
+  background: var(--v4-surface);
+  color: var(--v4-muted);
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.v4-pill.blue {
+  color: var(--v4-accent);
+  border-color: color-mix(in srgb, var(--v4-accent) 34%, var(--v4-line));
+}
+
+.v4-pill.green {
+  color: var(--v4-success);
+  border-color: color-mix(in srgb, var(--v4-success) 34%, var(--v4-line));
+}
+
+.v4-pill.amber {
+  color: var(--v4-warn);
+  border-color: color-mix(in srgb, var(--v4-warn) 34%, var(--v4-line));
+}
+
+.v4-pill.red {
+  color: var(--v4-danger);
+  border-color: color-mix(in srgb, var(--v4-danger) 34%, var(--v4-line));
+}
+
+.v4-pill.violet {
+  color: var(--v4-purple);
+  border-color: color-mix(in srgb, var(--v4-purple) 34%, var(--v4-line));
+}
+
+.v4-icon-btn {
+  width: 28px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--v4-line);
+  background: var(--v4-surface);
+  color: var(--v4-muted);
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.v4-action-btn {
+  border: 1px solid var(--v4-line);
+  background: var(--v4-surface);
+  min-height: 28px;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 850;
+  color: var(--v4-ink);
+  cursor: pointer;
+}
+
+.v4-action-btn.primary {
+  border-color: color-mix(in srgb, var(--v4-accent) 48%, var(--v4-line));
+  color: var(--v4-accent);
+  background: color-mix(in srgb, var(--v4-accent) 7%, var(--v4-surface));
+}
+
+.v4-action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.v4-evidence {
+  border-left: 3px solid var(--v4-success);
+  background: color-mix(in srgb, var(--v4-success) 8%, var(--v4-surface));
+  padding: 8px 9px;
+  font-size: 11px;
+  color: var(--v4-muted);
+}
+
+.v4-field {
+  border: 1px solid var(--v4-line);
+  background: var(--v4-surface);
+  padding: 8px;
+  min-height: 54px;
+}
+
+.v4-field label {
+  display: block;
+  color: var(--v4-muted);
+  font-size: 10px;
+  margin-bottom: 3px;
+}
+
+.v4-field strong {
+  font-size: 12px;
+}
+
+/* === Progress Animations === */
+@keyframes v4-shimmer {
+  to { transform: translateX(100%); }
+}
+
+@keyframes v4-scan {
+  0%, 18% { transform: translateX(-100%); }
+  72%, 100% { transform: translateX(100%); }
+}
+
+@keyframes v4-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.62; transform: scale(0.92); }
+}
