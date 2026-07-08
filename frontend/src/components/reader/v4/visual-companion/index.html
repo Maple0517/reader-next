@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>V4 记忆数据库控制台 — Visual Companion</title>
+  <style>
+    /* Reset */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      line-height: 1.45;
+      background: var(--v4-bg);
+      color: var(--v4-ink);
+    }
+
+    /* Import v4 tokens inline (standalone page) */
+    :root {
+      --v4-bg: #f5f1ea;
+      --v4-surface: #fffdf9;
+      --v4-line: #d8d0c3;
+      --v4-ink: #181612;
+      --v4-muted: #655f55;
+      --v4-soft: #ebe4d8;
+      --v4-inspector-bg: #fffaf2;
+      --v4-rail-bg: #eee6d8;
+      --v4-shell-top-bg: #f0ebe3;
+      --v4-accent: #3657d6;
+      --v4-success: #26704f;
+      --v4-warn: #9a6416;
+      --v4-danger: #b83a3a;
+      --v4-purple: #6550b9;
+      --v4-radius: 0px;
+      --v4-gap: 6px;
+      --v4-pad: 8px;
+      --v4-pad-lg: 10px;
+      --v4-line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <!-- V4 Console Shell -->
+  <section class="v4-console" aria-label="AI Book Memory V4 console">
+    <!-- Top Bar -->
+    <div class="v4-top-bar" id="top-bar">
+      <!-- Populated by companion.js -->
+    </div>
+
+    <!-- Body: Rail + Main -->
+    <div class="v4-console-body">
+      <aside class="v4-console-rail" id="rail">
+        <!-- Populated by companion.js -->
+      </aside>
+      <div class="v4-console-main">
+        <main class="v4-console-content" id="panel-content">
+          <!-- Populated by companion.js when domain selected -->
+        </main>
+      </div>
+    </div>
+  </section>
+
+  <!-- Companion Scripts (injected by build) -->
+  <!-- <script src="./tokens.css"></script> is handled via <style> above -->
+  <script src="./companion.js" type="module"></script>
+</body>
+</html>
