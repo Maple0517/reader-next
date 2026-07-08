@@ -582,12 +582,12 @@ defineExpose({ reload: () => panelState.reload() })
   justify-content: space-between;
   gap: 12px;
   padding-bottom: 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
+  border-bottom: 1px solid var(--v4-line);
 }
 
 .v4-quality-governance-toolbar p {
   margin: 0;
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   font-size: 0.78rem;
   line-height: 1.65;
 }
@@ -615,9 +615,9 @@ defineExpose({ reload: () => panelState.reload() })
   display: grid;
   gap: 4px;
   width: 100%;
-  border: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--color-bg) 94%, var(--color-bg-sunken) 6%);
+  border: 1px solid var(--v4-line);
+  border-radius: 0;
+  background: var(--v4-soft);
   color: inherit;
   padding: 10px;
   text-align: left;
@@ -626,8 +626,8 @@ defineExpose({ reload: () => panelState.reload() })
 
 .v4-quality-queue.is-active,
 .v4-quality-triage-row.is-active {
-  border-color: color-mix(in srgb, var(--color-primary) 74%, var(--color-border));
-  background: color-mix(in srgb, var(--color-primary) 7%, var(--color-bg));
+  border-color: var(--v4-accent);
+  background: var(--v4-soft);
 }
 
 .v4-quality-queue strong {
@@ -638,7 +638,7 @@ defineExpose({ reload: () => panelState.reload() })
 .v4-quality-state,
 .v4-quality-row small {
   margin: 4px 0 0;
-  color: var(--color-text-tertiary, #64748b);
+  color: var(--v4-muted);
 }
 
 .v4-quality-row-main {
@@ -665,32 +665,32 @@ defineExpose({ reload: () => panelState.reload() })
   min-width: 24px;
   min-height: 24px;
   place-items: center;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 0.72rem;
   font-weight: 800;
-  background: color-mix(in srgb, currentColor 6%, transparent);
+  background: var(--v4-soft);
 }
 
 .v4-quality-severity.is-high {
-  color: #b42318;
-  background: #fff0ec;
+  color: var(--v4-danger);
+  background: var(--v4-soft);
 }
 
 .v4-quality-severity.is-medium {
-  color: #915930;
-  background: #fff6e8;
+  color: var(--v4-warn);
+  background: var(--v4-soft);
 }
 
 .v4-quality-severity.is-low {
-  color: #315970;
-  background: #eef8fb;
+  color: var(--v4-muted);
+  background: var(--v4-soft);
 }
 
 .v4-quality-action,
 .v4-quality-refresh {
-  border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--color-bg) 92%, var(--color-primary) 8%);
+  border: 1px solid var(--v4-line);
+  border-radius: 0;
+  background: var(--v4-soft);
   color: inherit;
   padding: 4px 10px;
   font-size: 0.76rem;
@@ -711,9 +711,9 @@ defineExpose({ reload: () => panelState.reload() })
 
 .v4-quality-metric-card,
 .v4-quality-row {
-  border: 1px solid color-mix(in srgb, var(--color-border) 86%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--color-bg) 96%, transparent);
+  border: 1px solid var(--v4-line);
+  border-radius: 0;
+  background: var(--v4-soft);
   padding: 10px 12px;
 }
 
@@ -725,9 +725,9 @@ defineExpose({ reload: () => panelState.reload() })
 .v4-quality-inspector,
 .v4-quality-queue-panel,
 .v4-quality-triage-list {
-  border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--color-bg) 98%, transparent);
+  border: 1px solid var(--v4-line);
+  border-radius: 0;
+  background: var(--v4-soft);
   padding: 12px;
 }
 
@@ -735,9 +735,9 @@ defineExpose({ reload: () => panelState.reload() })
   display: grid;
   gap: 6px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--color-border) 76%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--color-primary) 5%, var(--color-bg));
+  border: 1px solid var(--v4-line);
+  border-radius: 0;
+  background: var(--v4-soft);
 }
 
 .v4-quality-inspector-hero p,
@@ -760,13 +760,13 @@ defineExpose({ reload: () => panelState.reload() })
   display: grid;
   gap: 4px;
   padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
-  border-radius: 3px;
+  border: 1px solid var(--v4-line);
+  border-radius: 0;
 }
 
 .v4-quality-boundary-note {
-  border-left: 3px solid color-mix(in srgb, var(--color-success, #2f855a) 72%, var(--color-border));
-  background: color-mix(in srgb, var(--color-success, #2f855a) 6%, var(--color-bg));
+  border-left: 3px solid var(--v4-success);
+  background: var(--v4-soft);
 }
 
 .v4-quality-empty-triage-row {
@@ -776,14 +776,14 @@ defineExpose({ reload: () => panelState.reload() })
   align-items: start;
   min-height: 78px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 36%, transparent);
-  color: var(--color-text-secondary);
+  border: 1px solid var(--v4-line);
+  border-radius: 0;
+  background: var(--v4-soft);
+  color: var(--v4-muted);
 }
 
 .v4-quality-detail-grid dt {
-  color: var(--color-text-tertiary, #64748b);
+  color: var(--v4-muted);
   font-size: 0.72rem;
 }
 
@@ -799,8 +799,8 @@ defineExpose({ reload: () => panelState.reload() })
 .v4-quality-evidence-drawer blockquote {
   margin: 6px 0 0;
   padding-left: 10px;
-  border-left: 2px solid color-mix(in srgb, currentColor 18%, transparent);
-  color: var(--color-text-secondary, #475569);
+  border-left: 2px solid var(--v4-line);
+  color: var(--v4-muted);
 }
 
 .v4-quality-evidence-drawer pre {
