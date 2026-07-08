@@ -249,12 +249,10 @@ function summarizeError(error: unknown) {
   min-height: 34px;
   padding: 0 14px;
   border: 0;
-  border-radius: 999px;
-  background: var(--color-primary);
-  color: #fff;
+  background: var(--v4-accent);
+  color: var(--v4-bg);
   font-weight: 800;
   cursor: pointer;
-  transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1), opacity 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .v4-character-refresh:disabled {
@@ -263,7 +261,7 @@ function summarizeError(error: unknown) {
 }
 
 .v4-character-refresh:active:not(:disabled) {
-  transform: translateY(1px) scale(0.98);
+  opacity: 0.85;
 }
 
 .v4-character-workbench {
@@ -285,28 +283,19 @@ function summarizeError(error: unknown) {
   width: 100%;
   padding: 14px;
   text-align: center;
-  border: 2px solid transparent;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 76%, transparent);
-  color: var(--color-text);
+  border: 1px solid var(--v4-line);
+  background: var(--v4-soft);
+  color: var(--v4-ink);
   cursor: pointer;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 64%, transparent);
-  transition:
-    transform 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    background 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    border-color 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    box-shadow 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .v4-character-card:hover {
-  transform: translateY(-1px);
-  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-bg));
+  background: color-mix(in srgb, var(--v4-accent) 10%, var(--v4-bg));
 }
 
 .v4-character-card.active {
-  border-color: var(--color-primary);
-  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-bg));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 28%, transparent);
+  border-color: var(--v4-accent);
+  background: color-mix(in srgb, var(--v4-accent) 10%, var(--v4-bg));
 }
 
 .v4-character-avatar {
@@ -316,9 +305,8 @@ function summarizeError(error: unknown) {
   width: 44px;
   height: 44px;
   margin: 0 auto;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--color-primary) 15%, var(--color-bg));
-  color: var(--color-primary);
+  background: color-mix(in srgb, var(--v4-accent) 15%, var(--v4-bg));
+  color: var(--v4-accent);
   font-size: 20px;
   font-weight: 900;
 }
@@ -333,7 +321,7 @@ function summarizeError(error: unknown) {
 }
 
 .v4-character-aliases {
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -344,7 +332,6 @@ function summarizeError(error: unknown) {
   display: inline-block;
   margin: 0 auto;
   padding: 2px 10px;
-  border-radius: 999px;
   font-size: 11px;
   font-weight: 800;
 }
@@ -355,17 +342,17 @@ function summarizeError(error: unknown) {
 }
 
 .importance-mid {
-  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-bg));
-  color: var(--color-primary);
+  background: color-mix(in srgb, var(--v4-accent) 12%, var(--v4-bg));
+  color: var(--v4-accent);
 }
 
 .importance-low {
-  background: var(--color-bg-sunken);
-  color: var(--color-text-tertiary);
+  background: var(--v4-soft);
+  color: var(--v4-muted);
 }
 
 .v4-character-chapters {
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   font-size: 12px;
 }
 
@@ -374,9 +361,8 @@ function summarizeError(error: unknown) {
   min-height: 38px;
   padding: 0 14px;
   border: 0;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-bg));
-  color: var(--color-primary);
+  background: color-mix(in srgb, var(--v4-accent) 10%, var(--v4-bg));
+  color: var(--v4-accent);
   font-weight: 800;
   cursor: pointer;
 }
@@ -385,11 +371,8 @@ function summarizeError(error: unknown) {
   display: grid;
   gap: 14px;
   padding: 16px;
-  border-radius: 20px;
-  background: color-mix(in srgb, var(--color-bg) 92%, var(--color-primary) 8%);
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--color-border) 68%, transparent),
-    inset 0 1px 0 color-mix(in srgb, #fff 26%, transparent);
+  border: 1px solid var(--v4-line);
+  background: color-mix(in srgb, var(--v4-bg) 92%, var(--v4-accent) 8%);
 }
 
 .v4-character-detail-head {
@@ -411,13 +394,13 @@ function summarizeError(error: unknown) {
 
 .v4-character-detail-aliases {
   margin-top: 4px;
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   font-size: 14px;
 }
 
 .v4-character-detail-summary {
   margin-top: 6px;
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   line-height: 1.6;
 }
 
@@ -425,9 +408,8 @@ function summarizeError(error: unknown) {
   flex: 0 0 auto;
   min-height: 30px;
   padding: 5px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-bg));
-  color: var(--color-primary);
+  background: color-mix(in srgb, var(--v4-accent) 12%, var(--v4-bg));
+  color: var(--v4-accent);
   font-size: 12px;
   font-weight: 900;
 }
@@ -436,8 +418,8 @@ function summarizeError(error: unknown) {
   display: grid;
   gap: 12px;
   padding: 14px;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 70%, transparent);
+  border: 1px solid var(--v4-line);
+  background: var(--v4-soft);
 }
 
 .v4-character-state-matrix-head {
@@ -449,12 +431,12 @@ function summarizeError(error: unknown) {
 
 .v4-character-state-matrix-head span,
 .v4-character-state-group h4 {
-  color: var(--color-text);
+  color: var(--v4-ink);
   font-weight: 900;
 }
 
 .v4-character-state-matrix-head strong {
-  color: var(--color-text-tertiary);
+  color: var(--v4-muted);
   font-size: 12px;
 }
 
@@ -477,8 +459,7 @@ function summarizeError(error: unknown) {
 
 .v4-character-states div {
   padding: 12px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 82%, transparent);
+  background: var(--v4-soft);
 }
 
 .v4-character-states dt,
@@ -488,13 +469,13 @@ function summarizeError(error: unknown) {
 
 .v4-character-states dt,
 .v4-character-states small {
-  color: var(--color-text-tertiary);
+  color: var(--v4-muted);
   font-size: 12px;
 }
 
 .v4-character-states dd {
   margin-top: 4px;
-  color: var(--color-text);
+  color: var(--v4-ink);
   font-weight: 900;
 }
 
@@ -505,9 +486,8 @@ function summarizeError(error: unknown) {
 
 .v4-character-evidence {
   padding: 12px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-primary) 9%, var(--color-bg));
-  color: var(--color-text-secondary);
+  background: color-mix(in srgb, var(--v4-accent) 9%, var(--v4-bg));
+  color: var(--v4-muted);
   font-weight: 800;
 }
 
