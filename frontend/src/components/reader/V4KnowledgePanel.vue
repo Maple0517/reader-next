@@ -259,22 +259,16 @@ defineExpose({ reload: () => listState.reload() })
 .v4-knowledge-refresh {
   min-height: 34px;
   padding: 0 14px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--color-primary);
+  border: 1px solid var(--v4-line);
+  background: var(--v4-accent);
   color: #fff;
   font-weight: 800;
   cursor: pointer;
-  transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1), opacity 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .v4-knowledge-refresh:disabled {
   cursor: not-allowed;
   opacity: 0.55;
-}
-
-.v4-knowledge-refresh:active:not(:disabled) {
-  transform: translateY(1px) scale(0.98);
 }
 
 .v4-knowledge-categories,
@@ -289,9 +283,8 @@ defineExpose({ reload: () => listState.reload() })
   display: grid;
   gap: 12px;
   padding: 14px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 68%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 62%, transparent);
+  background: var(--v4-soft);
+  border: 1px solid var(--v4-line);
 }
 
 .v4-knowledge-atlas-head {
@@ -306,28 +299,27 @@ defineExpose({ reload: () => listState.reload() })
 }
 
 .v4-knowledge-atlas-head span {
-  color: var(--color-text-tertiary);
+  color: var(--v4-muted);
   font-size: 12px;
   font-weight: 850;
 }
 
 .v4-knowledge-atlas-head strong {
-  color: var(--color-text);
+  color: var(--v4-ink);
   font-size: 18px;
 }
 
 .v4-knowledge-categories button {
-  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-  border-radius: 999px;
+  border: 1px solid var(--v4-line);
   background: transparent;
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   padding: 6px 10px;
   cursor: pointer;
 }
 
 .v4-knowledge-categories button.active {
-  border-color: var(--color-primary, #c97f3a);
-  color: var(--color-primary, #c97f3a);
+  border-color: var(--v4-accent);
+  color: var(--v4-accent);
 }
 
 .v4-knowledge-grid {
@@ -349,9 +341,8 @@ defineExpose({ reload: () => listState.reload() })
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, currentColor 2%, transparent);
+  border: 1px solid var(--v4-line);
+  background: var(--v4-soft);
 }
 
 .v4-knowledge-card {
@@ -359,7 +350,7 @@ defineExpose({ reload: () => listState.reload() })
 }
 
 .v4-knowledge-card.active {
-  border-color: var(--color-primary, #c97f3a);
+  border-color: var(--v4-accent);
 }
 
 .v4-knowledge-card-head,
@@ -388,30 +379,30 @@ defineExpose({ reload: () => listState.reload() })
   align-items: center;
   min-height: 22px;
   padding: 0 9px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-primary, #c97f3a) 10%, transparent);
-  color: var(--color-primary, #c97f3a);
+  background: var(--v4-soft);
+  color: var(--v4-accent);
   font-size: 0.72rem;
   font-weight: 700;
+  border: 1px solid var(--v4-line);
 }
 
 .v4-knowledge-card-meta {
-  color: var(--color-text-tertiary);
+  color: var(--v4-muted);
   font-size: 0.76rem;
 }
 
 .v4-knowledge-entity-chips span {
-  border-radius: 999px;
-  background: color-mix(in srgb, currentColor 7%, transparent);
-  color: var(--color-text-secondary);
+  background: var(--v4-soft);
+  color: var(--v4-muted);
   padding: 3px 8px;
   font-size: 0.74rem;
+  border: 1px solid var(--v4-line);
 }
 
 .v4-knowledge-empty-text,
 .v4-knowledge-detail-state {
   margin: 0;
-  color: var(--color-text-tertiary);
+  color: var(--v4-muted);
   font-size: 0.84rem;
 }
 
