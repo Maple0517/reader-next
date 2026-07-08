@@ -276,22 +276,16 @@ defineExpose({ reload: () => listState.reload() })
 .v4-relationship-refresh {
   min-height: 34px;
   padding: 0 14px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--color-primary);
+  border: 1px solid var(--v4-line);
+  background: var(--v4-accent);
   color: #fff;
   font-weight: 800;
   cursor: pointer;
-  transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1), opacity 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .v4-relationship-refresh:disabled {
   cursor: not-allowed;
   opacity: 0.55;
-}
-
-.v4-relationship-refresh:active:not(:disabled) {
-  transform: translateY(1px) scale(0.98);
 }
 
 /* ── Group filter ── */
@@ -308,12 +302,10 @@ defineExpose({ reload: () => listState.reload() })
   align-items: center;
   padding: 3px 9px;
   border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
-  border-radius: 8px;
   background: color-mix(in srgb, currentColor 3%, transparent);
   font-size: 0.76rem;
   line-height: 1.3;
   cursor: pointer;
-  transition: all 0.15s;
   color: inherit;
   font-family: inherit;
 }
@@ -324,8 +316,8 @@ defineExpose({ reload: () => listState.reload() })
 }
 
 .group-pill.active {
-  border-color: color-mix(in srgb, var(--color-primary, #c97f3a) 40%, transparent);
-  background: color-mix(in srgb, var(--color-primary, #c97f3a) 8%, transparent);
+  border-color: color-mix(in srgb, var(--v4-accent, #c97f3a) 40%, transparent);
+  background: color-mix(in srgb, var(--v4-accent, #c97f3a) 8%, transparent);
   font-weight: 600;
 }
 
@@ -366,7 +358,6 @@ defineExpose({ reload: () => listState.reload() })
   margin-top: 0;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
   display: inline-block;
 }
 
@@ -384,10 +375,8 @@ defineExpose({ reload: () => listState.reload() })
 .rel-item {
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
-  border-radius: 10px;
   background: color-mix(in srgb, currentColor 2%, transparent);
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
 }
 
 .rel-item:hover {
@@ -396,8 +385,8 @@ defineExpose({ reload: () => listState.reload() })
 }
 
 .rel-item.active {
-  border-color: color-mix(in srgb, var(--color-primary) 42%, transparent);
-  background: color-mix(in srgb, var(--color-primary) 9%, transparent);
+  border-color: color-mix(in srgb, var(--v4-accent) 42%, transparent);
+  background: color-mix(in srgb, var(--v4-accent) 9%, transparent);
 }
 
 .rel-item.low-importance {
@@ -427,12 +416,10 @@ defineExpose({ reload: () => listState.reload() })
   opacity: 0.6;
   padding: 1px 5px;
   border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
-  border-radius: 5px;
 }
 
 .rel-polarity {
   padding: 0 4px;
-  border-radius: 4px;
   font-size: 0.7rem;
   margin-left: auto;
 }
@@ -443,13 +430,11 @@ defineExpose({ reload: () => listState.reload() })
 }
 
 .polarity-positive {
-  color: #28a745;
-  background: rgba(40, 167, 69, 0.1);
+  color: var(--v4-success);
 }
 
 .polarity-negative {
-  color: #dc3545;
-  background: rgba(220, 53, 69, 0.08);
+  color: var(--v4-danger);
 }
 
 /* ── Detail expansion ── */
@@ -483,9 +468,8 @@ defineExpose({ reload: () => listState.reload() })
   display: grid;
   gap: 12px;
   padding: 14px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 70%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 64%, transparent);
+  background: var(--v4-soft);
+  border: 1px solid var(--v4-line);
 }
 
 .relationship-network-nodes {
@@ -497,8 +481,8 @@ defineExpose({ reload: () => listState.reload() })
   align-content: center;
   justify-content: center;
   padding: 14px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--color-bg) 78%, transparent);
+  background: var(--v4-bg);
+  border: 1px solid var(--v4-line);
 }
 
 .relationship-node {
@@ -506,16 +490,16 @@ defineExpose({ reload: () => listState.reload() })
   min-height: 34px;
   align-items: center;
   padding: 0 11px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-bg-sunken) 80%, transparent);
-  color: var(--color-text);
+  background: var(--v4-soft);
+  color: var(--v4-ink);
   font-size: 12px;
   font-weight: 850;
+  border: 1px solid var(--v4-line);
 }
 
 .relationship-node.active {
-  background: color-mix(in srgb, var(--color-primary) 14%, var(--color-bg));
-  color: var(--color-primary);
+  background: color-mix(in srgb, var(--v4-accent) 14%, var(--v4-bg));
+  color: var(--v4-accent);
 }
 
 .relationship-network-edges {
@@ -531,7 +515,6 @@ defineExpose({ reload: () => listState.reload() })
   min-height: 34px;
   padding: 0 10px;
   border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-  border-radius: 10px;
   background: color-mix(in srgb, currentColor 3%, transparent);
   color: inherit;
   cursor: pointer;
@@ -562,13 +545,13 @@ defineExpose({ reload: () => listState.reload() })
 
 .relationship-inspector-head h3 {
   margin: 0;
-  color: var(--color-text);
+  color: var(--v4-ink);
   font-size: 16px;
 }
 
 .relationship-inspector-title {
   justify-content: flex-start;
-  color: var(--color-text);
+  color: var(--v4-ink);
 }
 
 .relationship-inspector-facts {
@@ -582,18 +565,18 @@ defineExpose({ reload: () => listState.reload() })
   grid-template-columns: 72px minmax(0, 1fr);
   gap: 8px;
   padding: 8px 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 48%, transparent);
+  border-bottom: 1px solid var(--v4-line);
 }
 
 .relationship-inspector-facts dt,
 .relationship-inspector-empty {
-  color: var(--color-text-tertiary);
+  color: var(--v4-muted);
   font-size: 12px;
 }
 
 .relationship-inspector-facts dd {
   margin: 0;
-  color: var(--color-text-secondary);
+  color: var(--v4-muted);
   line-height: 1.45;
 }
 
