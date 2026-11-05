@@ -39,11 +39,15 @@ function createPlayback(
     pageIndex: { value: number }
     showPage: (pageIndex: number) => void
   },
+  options?: {
+    autoPageMode?: string
+    nextChapter?: () => void | Promise<void>
+  },
 ) {
   return useReaderAutoPlayback(
     store as never,
     computed(() => ({
-      autoPageMode: 'paragraph',
+      autoPageMode: options?.autoPageMode || 'paragraph',
       clickAction: 'auto',
       scrollPixel: 1,
       pageSpeed: 1000,
@@ -53,7 +57,7 @@ function createPlayback(
     computed(() => false),
     ref(container),
     ref(chapterText),
-    vi.fn(),
+    options?.nextChapter || vi.fn(),
     vi.fn(),
     horizontal
       ? {
@@ -67,6 +71,7 @@ function createPlayback(
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 describe('useReaderAutoPlayback reading position', () => {
@@ -242,5 +247,140 @@ describe('useReaderAutoPlayback reading position', () => {
     playback.startSpeech()
 
     expect(spoken[0]?.text).toBe('当前页面顶部')
+  })
+})
+
+describe('useReaderAutoPlayback auto reading', () => {
+  function stubAnimationFrame() {
+    let callback: FrameRequestCallback | null = null
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      callback = cb
+      return 1
+    })
+    vi.stubGlobal('cancelAnimationFrame', () => {
+      callback = null
+    })
+    return {
+      runFrame: () => {
+        const cb = callback
+        callback = null
+        cb?.(0)
+      },
+    }
+  }
+
+  function defineScrollGeometry(el: HTMLElement, values: { scrollHeight: number; clientHeight: number; scrollTop: number }) {
+    let top = values.scrollTop
+    Object.defineProperty(el, 'scrollHeight', { value: values.scrollHeight, configurable: true })
+    Object.defineProperty(el, 'clientHeight', { value: values.clientHeight, configurable: true })
+    Object.defineProperty(el, 'scrollTop', {
+      get: () => top,
+      set: (next: number) => {
+        top = next
+      },
+      configurable: true,
+    })
+  }
+
+  it('uses paragraph progression instead of jumping chapters in horizontal mode with pixel mode configured', async () => {
+    vi.useFakeTimers()
+    const container = document.createElement('div')
+    const chapterText = document.createElement('div')
+    chapterText.innerHTML = `
+      <section class="horizontal-page"><p>第一页段落</p></section>
+      <section class="horizontal-page"><p>第二页段落</p></section>
+    `
+    container.appendChild(chapterText)
+    const { store } = createStore()
+    store.hasNext = true
+    const nextChapter = vi.fn()
+    const pageIndex = ref(0)
+    const showPage = vi.fn((next: number) => {
+      pageIndex.value = next
+    })
+    const playback = createPlayback(store, container, chapterText, { pageIndex, showPage }, { autoPageMode: 'pixel', nextChapter })
+
+    store.isAutoScrolling = true
+    playback.startAutoScroll()
+
+    const paragraphs = chapterText.querySelectorAll('p')
+    expect(nextChapter).not.toHaveBeenCalled()
+    expect(paragraphs[0]?.classList.contains('reading')).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(showPage).toHaveBeenCalledWith(1)
+    expect(paragraphs[1]?.classList.contains('reading')).toBe(true)
+    expect(nextChapter).not.toHaveBeenCalled()
+  })
+
+  it('advances to the next chapter only after the last paragraph dwell in horizontal mode', async () => {
+    vi.useFakeTimers()
+    const container = document.createElement('div')
+    const chapterText = document.createElement('div')
+    chapterText.innerHTML = `
+      <section class="horizontal-page"><p>唯一一段</p></section>
+    `
+    container.appendChild(chapterText)
+    const { store } = createStore()
+    store.hasNext = true
+    const nextChapter = vi.fn()
+    const pageIndex = ref(0)
+    const playback = createPlayback(store, container, chapterText, {
+      pageIndex,
+      showPage: (next) => {
+        pageIndex.value = next
+      },
+    }, { autoPageMode: 'pixel', nextChapter })
+
+    store.isAutoScrolling = true
+    playback.startAutoScroll()
+    expect(nextChapter).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(nextChapter).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops pixel auto scroll without jumping chapters when content fits the viewport', () => {
+    stubAnimationFrame()
+    const container = document.createElement('div')
+    const chapterText = document.createElement('div')
+    chapterText.innerHTML = '<p>短章节</p>'
+    container.appendChild(chapterText)
+    defineScrollGeometry(container, { scrollHeight: 500, clientHeight: 500, scrollTop: 0 })
+    const { store } = createStore()
+    store.hasNext = true
+    const nextChapter = vi.fn()
+    const playback = createPlayback(store, container, chapterText, undefined, { autoPageMode: 'pixel', nextChapter })
+
+    store.isAutoScrolling = true
+    playback.startAutoScroll()
+
+    expect(nextChapter).not.toHaveBeenCalled()
+    expect(store.isAutoScrolling).toBe(false)
+  })
+
+  it('does not jump chapters instantly when pixel auto scroll starts at the bottom', async () => {
+    vi.useFakeTimers()
+    const frames = stubAnimationFrame()
+    const container = document.createElement('div')
+    const chapterText = document.createElement('div')
+    chapterText.innerHTML = '<p>已在章末</p>'
+    container.appendChild(chapterText)
+    defineScrollGeometry(container, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    const { store } = createStore()
+    store.hasNext = true
+    const nextChapter = vi.fn()
+    const playback = createPlayback(store, container, chapterText, undefined, { autoPageMode: 'pixel', nextChapter })
+
+    store.isAutoScrolling = true
+    playback.startAutoScroll()
+    expect(nextChapter).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1100)
+    frames.runFrame()
+
+    expect(nextChapter).toHaveBeenCalledTimes(1)
   })
 })

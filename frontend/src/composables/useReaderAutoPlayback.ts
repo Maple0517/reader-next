@@ -32,6 +32,8 @@ export function useReaderAutoPlayback(
   horizontalPlayback?: HorizontalPlayback,
 ) {
   let autoScrollId: number | null = null
+  let autoScrollSessionTop = 0
+  let autoScrollSessionAt = 0
   let autoParagraphTimer: number | null = null
   let autoReadingParagraphIndex = -1
   let autoReadingProcessing = false
@@ -378,6 +380,41 @@ export function useReaderAutoPlayback(
     }
   }
 
+  // Horizontal page mode has no vertical overflow to pixel-scroll through,
+  // so auto reading there is always driven by paragraph progression.
+  function usesParagraphAutoReading() {
+    return config.value.autoPageMode === 'paragraph' || !!horizontalPlayback?.isEnabled.value
+  }
+
+  function estimateParagraphLineCount(paragraph: HTMLElement) {
+    const lineHeightPx = Math.max(1, config.value.fontSize * config.value.lineHeight)
+    if (paragraph.offsetHeight > 0) {
+      return Math.max(1, Math.ceil(paragraph.offsetHeight / lineHeightPx))
+    }
+    // Not laid out yet (height unknown): fall back to a rough CJK chars-per-line estimate.
+    const charCount = paragraph.innerText.trim().length
+    return Math.max(1, Math.ceil(charCount / 24))
+  }
+
+  function showParagraphForAutoReading(paragraph: HTMLElement | null) {
+    if (!paragraph) return
+    if (horizontalPlayback?.isEnabled.value) {
+      showParagraph(paragraph)
+      return
+    }
+    const container = scrollContainerRef.value
+    if (!container) {
+      showParagraph(paragraph)
+      return
+    }
+    const containerRect = container.getBoundingClientRect()
+    const rect = paragraph.getBoundingClientRect()
+    const comfortablyVisible = rect.top >= containerRect.top + 8 && rect.bottom <= containerRect.bottom - 8
+    if (!comfortablyVisible) {
+      showParagraph(paragraph)
+    }
+  }
+
   function runAutoScroll() {
     if (!store.isAutoScrolling || !scrollContainerRef.value) return
 
@@ -386,9 +423,34 @@ export function useReaderAutoPlayback(
 
     container.scrollTop += speed
 
-    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
+    const maxScrollTop = container.scrollHeight - container.clientHeight
+    if (maxScrollTop <= 2) {
+      // Content fits the viewport: there is nowhere to scroll, so stop
+      // instead of treating the first frame as "reached the end".
+      stopAutoScroll()
+      return
+    }
+
+    if (container.scrollTop >= maxScrollTop - 2) {
+      // Guard against an instant chapter jump when auto reading starts
+      // already at (or restored to) the bottom of a chapter.
+      const movedEnough = container.scrollTop > autoScrollSessionTop + 2
+      const waitedEnough = Date.now() - autoScrollSessionAt > 1000
+      if (!movedEnough && !waitedEnough) {
+        autoScrollId = requestAnimationFrame(runAutoScroll)
+        return
+      }
+      autoScrollId = null
       if (config.value.clickAction === 'auto' && store.hasNext) {
-        void nextChapter()
+        Promise.resolve(nextChapter()).then(() => {
+          window.setTimeout(() => {
+            if (store.isAutoScrolling && !usesParagraphAutoReading()) {
+              autoScrollSessionTop = scrollContainerRef.value?.scrollTop || 0
+              autoScrollSessionAt = Date.now()
+              runAutoScroll()
+            }
+          }, 300)
+        })
       } else {
         stopAutoScroll()
       }
@@ -417,7 +479,7 @@ export function useReaderAutoPlayback(
       if (store.hasNext) {
         Promise.resolve(nextChapter()).then(() => {
           window.setTimeout(() => {
-            if (store.isAutoScrolling && config.value.autoPageMode === 'paragraph') {
+            if (store.isAutoScrolling && usesParagraphAutoReading()) {
               runAutoParagraph()
             }
           }, 300)
@@ -430,10 +492,9 @@ export function useReaderAutoPlayback(
 
     const current = list[autoReadingParagraphIndex]
     markReadingParagraph(current)
-    showParagraph(current)
+    showParagraphForAutoReading(current)
 
-    const estimatedLineCount = Math.max(1, Math.ceil(current.offsetHeight / (config.value.fontSize * config.value.lineHeight)))
-    const delayTime = Math.max(300, config.value.pageSpeed * estimatedLineCount)
+    const delayTime = Math.max(300, config.value.pageSpeed * estimateParagraphLineCount(current))
 
     autoReadingProcessing = false
     autoParagraphTimer = window.setTimeout(() => {
@@ -443,12 +504,14 @@ export function useReaderAutoPlayback(
   }
 
   function startAutoScroll() {
-    if (config.value.autoPageMode === 'paragraph') {
+    if (usesParagraphAutoReading()) {
       if (autoParagraphTimer) return
       runAutoParagraph()
       return
     }
     if (autoScrollId) return
+    autoScrollSessionTop = scrollContainerRef.value?.scrollTop || 0
+    autoScrollSessionAt = Date.now()
     runAutoScroll()
   }
 
@@ -717,13 +780,13 @@ export function useReaderAutoPlayback(
 
   function handleContentChanged() {
     autoReadingParagraphIndex = -1
-    if (store.isAutoScrolling && config.value.autoPageMode === 'paragraph') {
+    if (store.isAutoScrolling && usesParagraphAutoReading()) {
       if (autoParagraphTimer) {
         clearTimeout(autoParagraphTimer)
         autoParagraphTimer = null
       }
       window.setTimeout(() => {
-        if (store.isAutoScrolling && config.value.autoPageMode === 'paragraph') {
+        if (store.isAutoScrolling && usesParagraphAutoReading()) {
           runAutoParagraph()
         }
       }, 100)

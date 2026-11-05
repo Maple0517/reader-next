@@ -210,6 +210,10 @@
           <button class="opt-btn" :class="{ active: config.autoPageMode === 'paragraph' }" @click="store.updateConfig('autoPageMode', 'paragraph')">段落滚动</button>
         </div>
       </div>
+      <div v-if="config.readMethod === '左右翻页'" class="setting-row">
+        <label></label>
+        <div class="setting-hint">左右翻页没有垂直滚动，自动阅读会按段落框选推进并自动翻页。</div>
+      </div>
 
       <!-- 滚动像素 -->
       <div class="setting-row">
